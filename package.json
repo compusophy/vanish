@@ -1,0 +1,30 @@
+{
+  "name": "vanish",
+  "version": "1.0.0",
+  "description": "autonomous self-editing and self-improving coding harness powered by stealth/ox-alpha",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "cli": "node cli.js",
+    "test": "node --test",
+    "push": "git add -A && git commit -m 'update vanish harness' && git push origin main",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "keywords": [
+    "vanish",
+    "ox-alpha",
+    "autonomous-agent",
+    "coding-harness",
+    "self-editing",
+    "openrouter"
+  ],
+  "author": "compusophy",
+  "license": "MIT"
+}

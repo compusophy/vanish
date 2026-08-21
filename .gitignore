@@ -1,0 +1,27 @@
+# environment & credentials
+.env
+.env*.local
+*.key
+*.pem
+
+# dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# system & ides
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# builds & deployments
+.vercel/
+dist/
+build/
+coverage/
+
+# temporary test files
+scratch/
+test-stream.js
