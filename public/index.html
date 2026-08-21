@@ -264,49 +264,6 @@
             </nav>
           </div>
 
-          <!-- top bar right actions -->
-          <div class="topbar-right">
-            <div class="model-badge">
-              <span class="pulse-indicator"></span>
-              <span class="model-label">stealth/ox-alpha</span>
-            </div>
-
-            <button
-              class="btn-action-sm"
-              id="btn-git-push-top"
-              title="push to github"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="13"
-                height="13"
-                stroke="currentColor"
-                stroke-width="2"
-                fill="none"
-              >
-                <path d="M12 19V5M5 12l7-7 7 7"></path>
-              </svg>
-              <span>push github</span>
-            </button>
-
-            <button
-              class="btn-action-sm btn-action-accent"
-              id="btn-vercel-deploy-top"
-              title="deploy to vercel"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="12"
-                height="12"
-                stroke="currentColor"
-                stroke-width="2"
-                fill="none"
-              >
-                <polygon points="12 2 2 22 22 22"></polygon>
-              </svg>
-              <span>deploy vercel</span>
-            </button>
-          </div>
         </header>
 
         <!-- content views area -->
@@ -428,7 +385,13 @@
                 <span class="pulsing-emerald"></span>
                 <span>autonomous self-editing loop</span>
               </div>
-              <div class="dock-status" id="dock-agent-status">ready</div>
+              <div class="dock-header-right">
+                <div class="model-badge">
+                  <span class="pulse-indicator"></span>
+                  <span class="model-label">stealth/ox-alpha</span>
+                </div>
+                <div class="dock-status" id="dock-agent-status">ready</div>
+              </div>
             </div>
 
             <div class="dock-input-row">

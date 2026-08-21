@@ -39,10 +39,6 @@ document.addEventListener('DOMContentLoaded', () => {
     sidebarGithubLabel: document.getElementById('sidebar-github-label'),
     sidebarVercelLabel: document.getElementById('sidebar-vercel-label'),
 
-    // topbar actions
-    btnGitPushTop: document.getElementById('btn-git-push-top'),
-    btnVercelDeployTop: document.getElementById('btn-vercel-deploy-top'),
-
     // agent live feed
     agentStreamContainer: document.getElementById('agent-stream-container'),
     agentHero: document.getElementById('agent-hero'),
@@ -300,44 +296,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch (err) {
       showToast('commit failed');
-    }
-  });
-
-  el.btnGitPushTop.addEventListener('click', async () => {
-    showToast('pushing to github...');
-    try {
-      const res = await fetch('/api/git/push', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ branch: 'main' })
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast('successfully pushed to github!');
-      } else {
-        showToast(`push failed: ${data.error}`);
-      }
-    } catch (err) {
-      showToast('push failed');
-    }
-  });
-
-  el.btnVercelDeployTop.addEventListener('click', async () => {
-    showToast('triggering vercel deployment...');
-    try {
-      const res = await fetch('/api/deploy/vercel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prod: false })
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast(`vercel deployed: ${data.url || 'ready'}`);
-      } else {
-        showToast(`deploy failed: ${data.error}`);
-      }
-    } catch (err) {
-      showToast('deploy failed');
     }
   });
 
