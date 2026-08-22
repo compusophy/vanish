@@ -28,6 +28,13 @@
   the right shape for self-editing agents: fixes that live only in a reply
   evaporate; fixes that live in the prompt + memory files recur every run.
 
+## verified live
+
+- all three web tools exercised successfully in one run: `web_search`
+  (empty result for "latest stable version" style query — expected),
+  `http_fetch` (correctly blocked by non-CORS site), `web_read` (full
+  markdown of rust-lang.org). pipeline is healthy end to end.
+
 ## still open
 
 - [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,
