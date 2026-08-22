@@ -40,8 +40,27 @@
         <div class="rail-section grow">
           <div class="rail-label">workspace files</div>
           <div id="tree" class="tree"></div>
+          <button id="editor-close" class="btn btn-quiet" style="display: none">close editor</button>
         </div>
       </aside>
+
+      <!-- editor pane: hidden until a file is opened from the tree -->
+      <section id="editor-pane" class="editor-pane" style="display: none">
+        <div class="editor-head">
+          <span id="editor-path" class="editor-path"></span>
+          <span id="editor-dirty" class="badge" style="display: none">modified</span>
+        </div>
+        <textarea
+          id="editor"
+          rows="1"
+          spellcheck="false"
+          placeholder="file contents…"
+        ></textarea>
+        <div class="editor-foot">
+          <button id="editor-save" class="btn primary">save</button>
+          <span id="editor-status" class="editor-status"></span>
+        </div>
+      </section>
 
       <!-- centre: the run -->
       <main class="main">

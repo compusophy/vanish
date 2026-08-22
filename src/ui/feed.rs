@@ -370,6 +370,13 @@ pub fn render(ui: &Shared, event: Event) {
                     let _ = list.append_child(&row);
                 }
             }
+            // an editor save reports back through this event too; clear the
+            // "saving…" note and show the file's dirty state.
+            if let Some(status) = by_id("editor-status") {
+                if status.text_content().as_deref() == Some("saving…") {
+                    status.set_text_content(Some("saved to the working tree — uncommitted"));
+                }
+            }
         }
 
         Event::Committed {
@@ -417,13 +424,22 @@ pub fn render(ui: &Shared, event: Event) {
             let Some(tree) = by_id("tree") else { return };
             tree.set_inner_html("");
             for e in entries.iter().filter(|e| !e.is_dir) {
-                let row = create("div", if e.dirty { "file dirty" } else { "file" });
+                let row = create(
+                    "div",
+                    if e.dirty { "file dirty" } else { "file" },
+                );
+                // clickable: the editor pane opens this path on click
+                let _ = row.set_attribute("data-file", &e.path);
                 row.set_text_content(Some(&e.path));
                 let _ = tree.append_child(&row);
             }
         }
 
         Event::FileContent { path, content } => {
+            // reveal the editor pane, fill it, and say how big the file is.
+            if let Some(pane) = by_id("editor-pane") {
+                let _ = pane.set_attribute("style", "display: flex");
+            }
             if let Some(ed) = by_id("editor").and_then(|e| {
                 e.dyn_into::<web_sys::HtmlTextAreaElement>().ok()
             }) {
@@ -432,6 +448,13 @@ pub fn render(ui: &Shared, event: Event) {
             if let Some(name) = by_id("editor-path") {
                 name.set_text_content(Some(&path));
             }
+            if let Some(status) = by_id("editor-status") {
+                status.set_text_content(Some(&format!(
+                    "{} lines · local copy",
+                    content.lines().count()
+                )));
+            }
+            scroll_to_bottom();
         }
 
         Event::HistoryRestored { turns, .. } => {

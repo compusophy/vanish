@@ -784,4 +784,66 @@ fn wire_controls(ui: &Shared) {
             }
         }
     }
+
+    // clicking a path in the workspace tree asks the worker for that file;
+    // Event::FileContent fills the editor pane.
+    {
+        let ui = ui.clone();
+        let Some(tree) = by_id("tree") else { return };
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            let Some(target) = ev.target().and_then(|t| t.dyn_into::<Element>().ok()) else {
+                return;
+            };
+            // delegation: one listener on #tree survives every Tree re-render,
+            // because the rows themselves are rebuilt each time.
+            let Some(path) = target.get_attribute("data-file") else {
+                return;
+            };
+            let worker = ui.borrow().worker.clone();
+            send(&worker, &Command::ReadFile { path });
+        });
+        tree.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())
+            .expect("could not attach tree click handler");
+        cb.forget();
+    }
+
+    // editor save: write through to the working tree. dirty flags and the
+    // explorer badge update on the TreeChanged event that comes back.
+    {
+        let ui = ui.clone();
+        on_click("editor-save", move || {
+            let Some(text) =
+                by_id("editor").and_then(|e| e.dyn_into::<HtmlTextAreaElement>().ok())
+            else {
+                return;
+            };
+            let Some(path_el) = by_id("editor-path") else { return };
+            let Some(path) = path_el.text_content() else { return };
+            if path.trim().is_empty() {
+                return;
+            }
+            let content = text.value();
+            let worker = ui.borrow().worker.clone();
+            send(
+                &worker,
+                &Command::WriteFile {
+                    path: path.trim().to_string(),
+                    content,
+                },
+            );
+            if let Some(status) = by_id("editor-status") {
+                status.set_text_content(Some("saving…"));
+            }
+        });
+    }
+
+    // editor close: just hides the pane; nothing is lost, the working tree
+    // already has whatever was saved.
+    {
+        on_click("editor-close", || {
+            if let Some(pane) = by_id("editor-pane") {
+                let _ = pane.set_attribute("style", "display: none");
+            }
+        });
+    }
 }
