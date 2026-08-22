@@ -269,10 +269,13 @@ fn wire_rails() {
 
         let Some(button) = by_id(button_id) else { continue };
         let rail_for_click = rail.clone();
+        // the closure needs its own handle: `button` is still needed below to
+        // attach the listener, and Element is not Copy.
+        let button_for_click = button.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
             let now_open = !rail_for_click.has_attribute("data-collapsed");
             apply_collapsed(&rail_for_click, now_open);
-            let _ = button.set_attribute(
+            let _ = button_for_click.set_attribute(
                 "aria-expanded",
                 if now_open { "true" } else { "false" },
             );
