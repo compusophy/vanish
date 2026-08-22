@@ -255,9 +255,36 @@ fn handle(command: Command) {
                     }
                 };
 
+                // optional: absent is fine and not an error, but a token that
+                // is present and broken must be reported now rather than
+                // during the incident it exists to diagnose.
+                let vercel_ok = if config.vercel_token.trim().is_empty() {
+                    notes.push(
+                        "no vercel token (build failures will have no compiler output)".to_string(),
+                    );
+                    None
+                } else {
+                    let v = crate::agent::vercel::Vercel::new(
+                        &config.vercel_token,
+                        &config.vercel_team_id,
+                        crate::agent::vercel::Vercel::project_from_repo(&config.repo),
+                    );
+                    match v.verify().await {
+                        Ok(msg) => {
+                            notes.push(msg);
+                            Some(true)
+                        }
+                        Err(e) => {
+                            notes.push(format!("vercel token unusable: {e}"));
+                            Some(false)
+                        }
+                    }
+                };
+
                 emit(Event::ConfigStatus {
                     openrouter_ok,
                     github_ok,
+                    vercel_ok,
                     detail: notes.join(" · "),
                 });
             });
@@ -384,7 +411,12 @@ fn handle(command: Command) {
                 // on a resolved promise lets it drain. skipping this wait
                 // would allow a slower older snapshot to land after — and
                 // overwrite — this authoritative final save.
-                while *queue.borrow() != (None, false) {
+                // first, let any in-flight checkpoint finish: the queue's
+                // writer task runs on the same microtask queue, so yielding
+                // on a resolved promise lets it drain. skipping this wait
+                // would allow a slower older snapshot to land after — and
+                // overwrite — this authoritative final save.
+                while queue.borrow().0.is_some() || queue.borrow().1 {
                     let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
                         &mut |resolve, _reject| {
                             let _ = resolve.call0(&JsValue::NULL);

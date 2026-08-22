@@ -197,6 +197,12 @@ fn load_config() -> Config {
     if cfg.reasoning_effort.trim().is_empty() {
         cfg.reasoning_effort = "high".to_string();
     }
+    if cfg.vercel_team_id.trim().is_empty() {
+        // this project lives under a team, and a team-scoped deployment
+        // lookup returns nothing without it — which would look like "vercel
+        // has no record of your commit" rather than a missing setting.
+        cfg.vercel_team_id = "team_DYlw1hPeilK5o3w1uPWqt8Mi".to_string();
+    }
 
     // whatever reached this point — defaults, a stored config with gaps, or
     // the healing of a corrupt store — is what the ui is now showing. write
@@ -274,10 +280,13 @@ fn wire_rails() {
 
         let Some(button) = by_id(button_id) else { continue };
         let rail_for_click = rail.clone();
+        // the closure needs its own handle: `button` is still needed below to
+        // attach the listener, and Element is not Copy.
+        let button_for_click = button.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
             let now_open = !rail_for_click.has_attribute("data-collapsed");
             apply_collapsed(&rail_for_click, now_open);
-            let _ = button.set_attribute(
+            let _ = button_for_click.set_attribute(
                 "aria-expanded",
                 if now_open { "true" } else { "false" },
             );
@@ -421,6 +430,66 @@ pub fn wire_conversation_rows(ui: &Shared) {
     }
 }
 
+// ---- settings-save throttle ------------------------------------------
+// verification makes three live api calls. a fast double-click fired three
+// more, and nothing stopped a held-down mouse from hammering openrouter,
+// github and vercel as fast as they answered.
+
+thread_local! {
+    /// epoch millis of the last accepted save, and whether one is in flight.
+    static LAST_SAVE: RefCell<(f64, bool)> = const { RefCell::new((0.0, false)) };
+}
+
+/// minimum gap between accepted saves. long enough to swallow a double
+/// click, short enough that a real correction is never blocked.
+const SAVE_COOLDOWN_MS: f64 = 3_000.0;
+
+/// returns false when this click should be ignored.
+fn begin_settings_check() -> bool {
+    let now = js_sys::Date::now();
+    let accepted = LAST_SAVE.with(|s| {
+        let (last, in_flight) = *s.borrow();
+        if in_flight || now - last < SAVE_COOLDOWN_MS {
+            return false;
+        }
+        *s.borrow_mut() = (now, true);
+        true
+    });
+
+    if accepted {
+        if let Some(btn) = by_id("cfg-save") {
+            let _ = btn.set_attribute("disabled", "true");
+            btn.set_text_content(Some("checking…"));
+        }
+        // last resort: if the worker never answers — it crashed, or a request
+        // hangs — re-arm anyway rather than stranding the user with a dead
+        // button and no way to retry.
+        let cb = Closure::<dyn FnMut()>::new(finish_settings_check);
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                30_000,
+            );
+        }
+        cb.forget();
+    }
+    accepted
+}
+
+/// re-arm the button. called when verification reports back — and also on
+/// error paths, because a lock that only clears on success is a lock that
+/// eventually never clears.
+pub fn finish_settings_check() {
+    LAST_SAVE.with(|s| {
+        let last = s.borrow().0;
+        *s.borrow_mut() = (last, false);
+    });
+    if let Some(btn) = by_id("cfg-save") {
+        let _ = btn.remove_attribute("disabled");
+        btn.set_text_content(Some("save settings"));
+    }
+}
+
 /// send the worker its opening state. called from the `Ready` handler, never
 /// from boot, because before `Ready` the worker has no message listener and
 /// anything posted is dropped on the floor.
@@ -458,12 +527,16 @@ fn hydrate_settings(cfg: &Config) {
     if let Some(c) = by_id("cfg-loop").and_then(|e| e.dyn_into::<HtmlInputElement>().ok()) {
         c.set_checked(cfg.loop_mode);
     }
+    set_input("cfg-vercel-token", &cfg.vercel_token);
+    set_input("cfg-vercel-team", &cfg.vercel_team_id);
 }
 
 fn collect_settings() -> Config {
     Config {
         openrouter_key: input_value("cfg-key"),
         github_token: input_value("cfg-token"),
+        vercel_token: input_value("cfg-vercel-token").trim().to_string(),
+        vercel_team_id: input_value("cfg-vercel-team").trim().to_string(),
         repo: input_value("cfg-repo").trim().to_string(),
         branch: {
             let b = input_value("cfg-branch");
@@ -576,6 +649,11 @@ fn wire_controls(ui: &Shared) {
     {
         let ui = ui.clone();
         on_click("cfg-save", move || {
+            // each save costs three live api calls. swallow the second click
+            // of a double-click rather than tripling that.
+            if !begin_settings_check() {
+                return;
+            }
             let cfg = collect_settings();
             match save_config(&cfg) {
                 Ok(()) => {
@@ -587,7 +665,12 @@ fn wire_controls(ui: &Shared) {
                     // nothing the credential check is not about to say better.
                     feed::note("settings saved — checking credentials");
                 }
-                Err(e) => feed::error("settings", &e),
+                Err(e) => {
+                    // release the lock: a storage failure must not leave the
+                    // button disabled forever.
+                    finish_settings_check();
+                    feed::error("settings", &e);
+                }
             }
         });
     }

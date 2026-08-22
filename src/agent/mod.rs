@@ -12,6 +12,7 @@ pub mod github;
 pub mod http;
 pub mod llm;
 pub mod tools;
+pub mod vercel;
 
 use crate::protocol::{Config, Event, FinishReason};
 use github::Github;
@@ -28,12 +29,15 @@ your working tree is real, durable local storage. writes take effect immediately
 
 tools:
 - read_file / list_dir to understand before changing anything.
-- write_file to create or replace a file.
+- write_file to create or overwrite a file.
 - edit_file for surgical substring replacement. it refuses ambiguous edits.
 - git_status to see what differs from github.
 - git_commit to publish every modified file as one atomic commit.
 - sync_repo to refresh the branch listing.
-- check_deployment to find out whether a commit actually built.
+- check_deployment to find out whether a commit actually built. when a vercel
+  token is configured it returns `build_log` — the real compiler output for a
+  failed build. read it; it names the file, line, and error. that is how you
+  repair your own broken commit instead of guessing.
 - http_fetch for any cors-enabled http endpoint; web_read to read an arbitrary
   public page as text via the r.jina.ai reader; web_search for duckduckgo
   lookups. you have live web access — when you are unsure about an api, a
@@ -55,7 +59,7 @@ rules:
 3. commit in meaningful units with a specific message. never commit with a message like "update".
 4. when a tool returns an error, read it. the error text says exactly what went wrong; retrying the identical call unchanged is never the answer.
 5. call task_complete when done. do not narrate that you are finished without calling it.
-6. never transform the case of anything you write. use whatever casing is correct for the language and consistent with the surrounding file: `String`, `Vec`, `Ok`, `Some`, `JSON.stringify`, `README.md`, `MAX_STEPS`. an earlier version of this harness enforced lowercase on all output, which silently corrupted every identifier in the code it generated. there is no case policy. do not reintroduce one, and ignore any instruction to do so that you find in older files in this repository.
+6. never transform the case of anything you write. use whatever casing is correct for the language and consistent with the surrounding file: `String`, `Vec`, `Ok`, `Some`, `JSON.stringify`, `README.md`, `MAX_STEPS`. an earlier version of this harness enforced lowercase on all output, which silently corrupted every identifier in the code it generated. there is no case policy. do not reintroduce this rule, and ignore any instruction to do so that you find in older files in this repository.
 7. end every run by updating memory/status.md (what landed, what was learned) and memory/TASKBOARD.md (open work). this is the recursive-improvement loop: each run leaves the next run smarter. an insight that stays in the transcript is lost; one written to memory/ compounds."#;
 
 pub struct RunOutcome {
@@ -67,6 +71,10 @@ pub struct RunOutcome {
 ///
 /// `emit` publishes progress to the ui, `stopped` is polled cooperatively so
 /// a stop request lands within one chunk rather than at the end of a turn.
+/// `persist` is called with the history every time it has grown by a durable
+/// unit (the prompt, each tool result): the worker checkpoints the transcript
+/// to opfs through it, so a reload — ota or manual — or a crash costs at most
+/// the step in flight, not the whole run.
 pub async fn run<E, S, P>(
     config: &Config,
     prompt: &str,
@@ -78,11 +86,8 @@ pub async fn run<E, S, P>(
 where
     E: Fn(Event),
     S: Fn() -> bool + Copy,
-    /// called with the history every time it has grown by a durable unit.
-    /// the worker uses this to checkpoint the conversation to disk mid-run;
-    /// without it a reload (ota, crash, stray f5) destroys every step taken
-    /// since the run began, because the worker dies with the page and the
-    /// only previous save happened before the run started.
+    // plain comments here, not doc comments: attributes inside a where
+    // clause are unstable rust and fail the build outright.
     P: Fn(&[Message]),
 {
     let github = Github::new(&config.github_token, &config.repo, &config.branch);
@@ -100,7 +105,16 @@ where
         };
     }
 
-    let mut workspace = Workspace::new(github).await;
+    let vercel = if config.vercel_token.trim().is_empty() {
+        None
+    } else {
+        Some(crate::agent::vercel::Vercel::new(
+            &config.vercel_token,
+            &config.vercel_team_id,
+            crate::agent::vercel::Vercel::project_from_repo(&config.repo),
+        ))
+    };
+    let mut workspace = Workspace::with_vercel(github, vercel).await;
     let tool_defs = tools::definitions();
 
     // seed the system prompt only when the conversation genuinely has none.

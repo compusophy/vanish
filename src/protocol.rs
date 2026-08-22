@@ -1,10 +1,10 @@
 //! the single wire contract between the ui thread and the agent worker.
 //!
 //! this module exists because the harness has twice shipped a ui/logic
-//! mismatch that silently bricked the app — a client referencing dom or
-//! event shapes the other half no longer produced. both sides now compile
-//! against these types, so that class of bug becomes a build error instead
-//! of a blank screen in production.
+//! mismatch that silently bricked the app — a client referencing dom or event
+//! shapes the other half no longer produced. both sides now compile against
+//! these types, so that class of bug becomes a build error instead of a blank
+//! screen in production.
 
 use serde::{Deserialize, Serialize};
 
