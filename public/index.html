@@ -55,6 +55,25 @@
           </button>
         </div>
 
+        <!-- conversations: persistent threads, rendered by app.js -->
+        <div class="sidebar-section conv-section">
+          <div class="sidebar-section-header">
+            <span class="sidebar-section-title">conversations</span>
+            <button
+              class="btn-icon-xs"
+              id="btn-new-chat"
+              title="start a new conversation (old ones stay listed)"
+              aria-label="new conversation"
+            >
+              <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="thread-list" id="thread-list"></div>
+        </div>
+
         <!-- workspace file tree explorer -->
         <div class="sidebar-section file-tree-section">
           <div class="sidebar-section-header">
@@ -85,89 +104,6 @@
           </div>
         </div>
 
-        <!-- self-editing quick presets -->
-        <div class="sidebar-section presets-section">
-          <span class="sidebar-section-title">self-edit actions</span>
-          <div class="presets-list">
-            <button
-              class="preset-item"
-              data-prompt="audit the vanish agent harness and add a new tool or helper to improve autonomous performance."
-            >
-              <span class="preset-icon">⚡</span>
-              <span class="preset-label">evolve agent harness</span>
-            </button>
-            <button
-              class="preset-item"
-              data-prompt="inspect public/style.css and public/app.js to refine animations, dark glass styling, and enforce strict lowercase."
-            >
-              <span class="preset-icon">🎨</span>
-              <span class="preset-label">refine ui & themes</span>
-            </button>
-            <button
-              class="preset-item"
-              data-prompt="create a comprehensive automated test script for vanish tools and run it."
-            >
-              <span class="preset-icon">🧪</span>
-              <span class="preset-label">create & run tests</span>
-            </button>
-            <button
-              class="preset-item"
-              data-prompt="review uncommitted changes with git_diff, create a clean commit message, and push to origin main on github."
-            >
-              <span class="preset-icon">🐙</span>
-              <span class="preset-label">commit & sync github</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- autonomy settings -->
-        <div class="sidebar-section config-section">
-          <span class="sidebar-section-title">reasoning</span>
-          <div class="param-row">
-            <div class="param-header">
-              <label for="param-effort">effort</label>
-              <span class="param-num" id="val-effort">high</span>
-            </div>
-            <select id="param-effort" class="select-dark">
-              <option value="high" selected>high (deep reflection)</option>
-              <option value="medium">medium (balanced)</option>
-              <option value="low">low (rapid)</option>
-              <option value="none">none (direct)</option>
-            </select>
-          </div>
-        </div>
-
-        <!-- sidebar footer status -->
-        <div class="sidebar-footer">
-          <div class="footer-status-item">
-            <svg
-              viewBox="0 0 24 24"
-              width="14"
-              height="14"
-              stroke="currentColor"
-              stroke-width="2"
-              fill="none"
-            >
-              <path
-                d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"
-              ></path>
-            </svg>
-            <span id="sidebar-github-label">compusophy/vanish</span>
-          </div>
-          <div class="footer-status-item">
-            <svg
-              viewBox="0 0 24 24"
-              width="14"
-              height="14"
-              stroke="currentColor"
-              stroke-width="2"
-              fill="none"
-            >
-              <polygon points="12 2 2 22 22 22"></polygon>
-            </svg>
-            <span id="sidebar-vercel-label">vercel ready</span>
-          </div>
-        </div>
       </aside>
 
       <!-- main container -->
@@ -363,7 +299,7 @@
           </section>
         </div>
 
-        <!-- right-hand harness config panel (mirrors left sidebar) -->
+        <!-- right-hand harness config panel: the single home for all settings -->
         <aside class="config-panel" id="config-panel">
           <div class="sidebar-header">
             <div class="brand">
@@ -372,6 +308,41 @@
                 <span class="brand-title">harness</span>
                 <span class="brand-subtitle">agent configuration</span>
               </div>
+            </div>
+          </div>
+
+          <!-- self-edit quick actions -->
+          <div class="sidebar-section presets-section">
+            <span class="sidebar-section-title">self-edit actions</span>
+            <div class="presets-list">
+              <button
+                class="preset-item"
+                data-prompt="audit the vanish agent harness and add a new tool or helper to improve autonomous performance."
+              >
+                <span class="preset-icon">⚡</span>
+                <span class="preset-label">evolve agent harness</span>
+              </button>
+              <button
+                class="preset-item"
+                data-prompt="inspect public/style.css and public/app.js to refine animations, dark glass styling, and enforce strict lowercase."
+              >
+                <span class="preset-icon">🎨</span>
+                <span class="preset-label">refine ui & themes</span>
+              </button>
+              <button
+                class="preset-item"
+                data-prompt="create a comprehensive automated test script for vanish tools and run it."
+              >
+                <span class="preset-icon">🧪</span>
+                <span class="preset-label">create & run tests</span>
+              </button>
+              <button
+                class="preset-item"
+                data-prompt="review uncommitted changes with git_diff, create a clean commit message, and push to origin main on github."
+              >
+                <span class="preset-icon">🐙</span>
+                <span class="preset-label">commit & sync github</span>
+              </button>
             </div>
           </div>
 
@@ -447,22 +418,6 @@
                 <span>autonomous self-editing loop</span>
               </div>
               <div class="dock-header-right">
-                <select id="thread-select" class="select-dark-inline" title="chat threads — separate conversations per agent"></select>
-                <label
-                  class="keep-going-toggle"
-                  title="loop mode: the agent never self-terminates — it runs until you press stop, always finding the next most valuable action"
-                >
-                  <input type="checkbox" id="chk-loop-mode" />
-                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                  <span class="toggle-label">∞ loop</span>
-                </label>
-                <button
-                  class="btn-sm"
-                  id="btn-new-chat"
-                  title="start a fresh thread (old threads stay in the switcher)"
-                >
-                  new chat
-                </button>
                 <div class="model-badge">
                   <span class="pulse-indicator"></span>
                   <span class="model-label">stealth/ox-alpha</span>
