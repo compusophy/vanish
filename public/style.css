@@ -44,6 +44,86 @@
   --shadow-glow: 0 0 25px rgba(0, 240, 180, 0.12);
 }
 
+/* keep-going toggle (dock header, left of "new chat") */
+.keep-going-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.keep-going-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.keep-going-toggle .toggle-track {
+  width: 32px;
+  height: 17px;
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  position: relative;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  flex-shrink: 0;
+}
+
+.keep-going-toggle .toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.keep-going-toggle input:checked + .toggle-track {
+  background: rgba(0, 240, 180, 0.18);
+  border-color: var(--border-focus);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+.keep-going-toggle input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(15px);
+  background: var(--accent-emerald);
+}
+
+.keep-going-toggle .toggle-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.04em;
+  transition: color 0.2s ease;
+}
+
+.keep-going-toggle input:checked ~ .toggle-label {
+  color: var(--accent-emerald);
+}
+
+/* continue-nudge chip in the agent feed */
+.continue-nudge {
+  margin: 6px auto;
+  padding: 5px 14px;
+  max-width: 720px;
+  width: fit-content;
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-full);
+  background: rgba(0, 240, 180, 0.08);
+  color: var(--accent-emerald);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-align: center;
+  animation: nudge-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes nudge-pulse {
+  0%, 100% { box-shadow: 0 0 0 var(--accent-glow); }
+  50% { box-shadow: 0 0 14px var(--accent-glow-strong); }
+}
+
 /* 100% strict lowercase globally */
 *, *::before, *::after, input, textarea, select, button, ::placeholder, ::selection {
   text-transform: lowercase !important;

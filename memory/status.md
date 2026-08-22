@@ -3,29 +3,46 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## the wall we hit
+## landed this run (commit: keep-going + step budget semantics)
 
-1. **staged work is lost between runs.** write_file/edit_file stage in
-   memory per-run; if the run ends without git_commit, everything is gone.
-   this happened twice: the phase-0 batch (edit engine, ci workflow,
-   session test, agent hardening) was staged but never committed.
-2. **maxsteps too low + no retries.** runs die on transient openrouter
-   errors (any step_error aborts the loop) and run out of steps (default 8).
-3. **no persistent context.** each run re-discovers the repo from scratch.
+- [x] `lib/agent.js`: new `keepGoing` option on `runAgentLoop`. when true and
+      the model tries to finish early (0 tool calls) with steps left in the
+      budget, the loop refuses the exit, pushes a "keep going" user nudge
+      into the conversation, emits a `continue_nudge` event, and continues
+      until the full `maxSteps` budget is exhausted (or abort).
+- [x] `lib/app.js`: `/api/agent/run` reads `keepGoing` from the body and
+      passes it into the loop (`keepGoing === true`).
+- [x] `public/index.html`: added `#chk-keep-going` toggle in the dock header,
+      positioned immediately left of the "new chat" button (user requirement).
+- [x] `public/app.js`: persists toggle state in localStorage
+      (`vanish_keep_going`), sends `keepGoing` in the run request, renders
+      `continue_nudge` as a glowing chip in the agent feed.
+- [x] `public/style.css`: `.keep-going-toggle` switch styles (emerald when on)
+      + `.continue-nudge` chip with pulse animation.
 
-## plan (from docs/refactor_plan.md, phase 0 first)
+## semantics now
 
-- [ ] re-land the hardened agent loop: maxsteps default 50, retry with
-      backoff on 429/5xx, consecutive-error threshold 3, tool-result
-      truncation (12k chars), finish_reason handling
-- [ ] re-land the shared edit engine in lib/tools.js: occurrence-indexed
-      replace, replace_all, whitespace-tolerant fuzzy fallback,
-      edited-region snippet in the result
-- [ ] add .github/workflows/ci.yml (node --test on push) — the cloud-mode
-      verification channel
-- [ ] add test/session.test.js + test/edit-engine.test.js
-- [ ] bump app.js maxsteps ceiling 25 → 100
-- [ ] ci_status tool (github checks api) to close the post-commit loop
+- keep going off (default): agent finishes as soon as it stops calling tools
+  (previous behavior).
+- keep going on: agent is forced to spend the entire step budget; each early
+  finish attempt gets a nudge to verify/refine/harden until steps run out.
+
+## lesson learned this run
+
+- a 20-step run died at exactly step 20 trying to git_commit: all staged
+  edits were lost and had to be redone from scratch. commit EARLY — after
+  the first couple of file edits, not at the end of the run. staged work
+  does NOT survive between runs, ever.
+
+## still open (from docs/refactor_plan.md)
+
+- [ ] re-land hardened agent loop: retry with backoff on 429/5xx,
+      consecutive-error threshold 3, finish_reason handling
+- [ ] shared edit engine in lib/tools.js: occurrence-indexed replace,
+      replace_all, fuzzy fallback
+- [ ] .github/workflows/ci.yml (node --test on push)
+- [ ] test/session.test.js + test/edit-engine.test.js
+- [ ] ci_status tool (github checks api)
 
 ## rules for the next run
 
@@ -34,3 +51,5 @@
 - markdown-only commits are safe (cannot break the deploy) — use them
   to checkpoint progress.
 - code commits: review git_diff first. committing is deploying.
+- note: file contents are camelCase on disk; the ui transcript lowercases
+  everything for display. match casing exactly when editing.

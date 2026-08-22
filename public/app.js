@@ -15,8 +15,14 @@ document.addEventListener('DOMContentLoaded', () => {
       maxSteps: 8,
       reasoningEffort: 'high',
       model: 'stealth/ox-alpha'
-    }
+    },
+    keepGoing: false
   };
+
+  // restore the keep-going toggle across reloads
+  try {
+    state.keepGoing = localStorage.getItem('vanish_keep_going') === 'true';
+  } catch (e) {}
 
   function loadHistory() {
     try {
@@ -66,6 +72,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btnAgentRun: document.getElementById('btn-agent-run'),
     btnAgentStop: document.getElementById('btn-agent-stop'),
     dockAgentStatus: document.getElementById('dock-agent-status'),
+    chkKeepGoing: document.getElementById('chk-keep-going'),
 
     // editor
     editorActiveFile: document.getElementById('editor-active-file'),
@@ -345,7 +352,8 @@ document.addEventListener('DOMContentLoaded', () => {
           history: state.history,
           model: state.config.model,
           reasoningEffort: state.config.reasoningEffort,
-          maxSteps: state.config.maxSteps
+          maxSteps: state.config.maxSteps,
+          keepGoing: state.keepGoing
         }),
         signal: state.abortController.signal
       });
@@ -487,6 +495,20 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         }
 
+        case 'continue_nudge': {
+          if (currentStepCard) {
+            currentStepCard.querySelector('.step-status').textContent =
+              'keep going — nudged to continue';
+            const nudge = document.createElement('div');
+            nudge.className = 'continue-nudge';
+            nudge.textContent =
+              `↻ keep going: early finish refused, ${ev.remainingSteps} steps remaining in budget`;
+            el.agentStepsFeed.appendChild(nudge);
+            scrolltobottom();
+          }
+          break;
+        }
+
         case 'agent_context': {
           if (Array.isArray(ev.messages)) {
             state.history = ev.messages;
@@ -544,6 +566,22 @@ document.addEventListener('DOMContentLoaded', () => {
     state.config.reasoningEffort = el.paramEffort.value;
     el.valEffort.textContent = state.config.reasoningEffort;
   });
+
+  // keep-going toggle: forces the agent to spend its full step budget
+  if (el.chkKeepGoing) {
+    el.chkKeepGoing.checked = state.keepGoing;
+    el.chkKeepGoing.addEventListener('change', () => {
+      state.keepGoing = el.chkKeepGoing.checked;
+      try {
+        localStorage.setItem('vanish_keep_going', String(state.keepGoing));
+      } catch (e) {}
+      showToast(
+        state.keepGoing
+          ? 'keep going on — agent will use its full step budget'
+          : 'keep going off — agent may finish early when done'
+      );
+    });
+  }
 
   el.btnToggleSidebar.addEventListener('click', () => {
     el.sidebar.classList.toggle('open');
