@@ -99,20 +99,31 @@ fn checkbox(id: &str) -> bool {
 const STORE: &str = "vanish.config";
 
 fn load_config() -> Config {
-    web_sys::window()
+    let stored: Option<Config> = web_sys::window()
         .and_then(|w| w.local_storage().ok().flatten())
         .and_then(|s| s.get_item(STORE).ok().flatten())
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Config {
-            // this harness edits its own repository, so defaulting to it is
-            // correct rather than presumptuous — and it removes one more
-            // field to fill in by hand.
-            repo: "compusophy/vanish".to_string(),
-            branch: "main".to_string(),
-            model: "stealth/ox-alpha".to_string(),
-            reasoning_effort: "high".to_string(),
-            ..Default::default()
-        })
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+
+    // defaults fill gaps rather than applying only to a blank slate. a
+    // half-finished config — one credential saved, the rest untouched — used
+    // to suppress every default, so the repo field came back empty and had
+    // to be typed by hand for no reason.
+    let mut cfg = stored.unwrap_or_default();
+    if cfg.repo.trim().is_empty() {
+        // this harness edits its own repository, so defaulting to it is
+        // correct rather than presumptuous.
+        cfg.repo = "compusophy/vanish".to_string();
+    }
+    if cfg.branch.trim().is_empty() {
+        cfg.branch = "main".to_string();
+    }
+    if cfg.model.trim().is_empty() {
+        cfg.model = "stealth/ox-alpha".to_string();
+    }
+    if cfg.reasoning_effort.trim().is_empty() {
+        cfg.reasoning_effort = "high".to_string();
+    }
+    cfg
 }
 
 fn save_config(cfg: &Config) -> Result<(), String> {
