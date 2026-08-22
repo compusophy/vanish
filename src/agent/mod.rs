@@ -94,8 +94,13 @@ where
     let mut workspace = Workspace::new(github).await;
     let tool_defs = tools::definitions();
 
-    if history.is_empty() {
-        history.push(Message::system(SYSTEM_PROMPT));
+    // seed the system prompt only when the conversation genuinely has none.
+    // a restored transcript normally carries its original prompt, but the
+    // retention cap can trim it off the oldest end — in that case the new
+    // prompt is correct, and the old is_empty() check would have left the
+    // model with no instructions at all.
+    if !history.iter().any(|m| m.role == "system") {
+        history.insert(0, Message::system(SYSTEM_PROMPT));
     }
     if !prompt.is_empty() {
         history.push(Message::user(prompt));

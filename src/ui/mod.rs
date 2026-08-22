@@ -365,6 +365,17 @@ fn wire_controls(ui: &Shared) {
         });
     }
 
+    // forget the conversation. the worker clears memory and opfs, then
+    // confirms; the feed is wiped only on that confirmation, so a failed
+    // clear never shows an empty transcript over a live history.
+    {
+        let ui = ui.clone();
+        on_click("clear-history", move || {
+            let worker = ui.borrow().worker.clone();
+            send(&worker, &Command::ClearHistory);
+        });
+    }
+
     // enter to run, shift+enter for a newline
     {
         let ui = ui.clone();

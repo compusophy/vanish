@@ -16,6 +16,9 @@ use crate::agent::http::request;
 const POLL_MS: i32 = 45_000;
 /// grace period so the changelog is readable before the page goes away.
 const RELOAD_DELAY_MS: i32 = 6_000;
+/// localStorage key holding the sha the user chose not to take yet. cleared
+/// implicitly by taking the update, since the running build then matches.
+const DECLINED_KEY: &str = "vanish.ota.declined";
 
 pub fn start_watching(ui: &Shared) {
     let ui = ui.clone();
@@ -81,6 +84,16 @@ async fn check_once(ui: &Shared) {
         .collect::<String>();
 
     if head_sha.is_empty() || head_sha == build {
+        return;
+    }
+
+    // the user pressed "later" for this version. respect that until a newer
+    // commit lands — polling must never nag more than the release cadence.
+    let declined = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(DECLINED_KEY).ok().flatten())
+        .unwrap_or_default();
+    if declined == head_sha {
         return;
     }
 
@@ -159,9 +172,37 @@ fn show_banner(sha: &str, changelog: &[String], run_in_progress: bool) {
         schedule_reload(RELOAD_DELAY_MS);
     }
 
+    // the conversation survives a reload now (it is written through to opfs
+    // after every run), so updating is no longer destructive — but it still
+    // interrupts whatever the user is reading, and "not now" costs nothing
+    // to offer. the next poll re-offers the update.
+    let later = create("button", "ota-btn quiet");
+    later.set_text_content(Some("later — keep this session"));
+    attach_dismiss(&later, sha);
+    let _ = banner.append_child(&later);
+
     if let Some(body) = doc().body() {
         let _ = body.append_child(&banner);
     }
+}
+
+/// dismiss the banner for this version. the poll would otherwise redraw it
+/// every 45 seconds; remembering which sha was declined keeps that from
+/// nagging until the next actual release.
+fn attach_dismiss(el: &web_sys::Element, sha: &str) {
+    let sha = sha.to_string();
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        if let Some(w) = web_sys::window() {
+            if let Ok(Some(storage)) = w.local_storage() {
+                let _ = storage.set_item(DECLINED_KEY, &sha);
+            }
+        }
+        if let Some(b) = by_id("ota") {
+            b.remove();
+        }
+    });
+    let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+    cb.forget();
 }
 
 fn reload_now() {

@@ -26,6 +26,8 @@ pub enum Command {
     ReadFile { path: String },
     /// write one file into the working tree from the editor pane.
     WriteFile { path: String, content: String },
+    /// forget the saved conversation. the ui clears its feed on confirmation.
+    ClearHistory,
 }
 
 impl Config {
@@ -118,6 +120,26 @@ pub enum Event {
         path: String,
         content: String,
     },
+    /// the saved conversation was loaded at boot; the ui should replay it so
+    /// a reload (ota or manual) does not look like amnesia.
+    /// `trimmed` reports how much of the transcript was too old to keep.
+    HistoryRestored {
+        turns: Vec<HistoryTurn>,
+        trimmed: usize,
+    },
+    /// the saved conversation was discarded at the ui's request.
+    HistoryCleared,
+}
+
+/// one exchange, replayed after a reload. this is a display shape, not the
+/// wire shape: tool traffic collapses into one line per call so restoring a
+/// hundred-step run renders in a handful of cards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryTurn {
+    pub role: String,
+    pub content: Option<String>,
+    /// "⚡ name args" summaries for assistant turns that called tools.
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

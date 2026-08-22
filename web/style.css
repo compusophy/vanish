@@ -464,6 +464,16 @@ textarea:focus {
   font-size: 12px;
   cursor: pointer;
 }
+/* the "later" choice: same affordance, no urgency */
+.ota-btn.quiet {
+  margin-top: 6px;
+  border-color: var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+.ota-btn.quiet:hover {
+  color: var(--dim);
+}
 
 /* the sparkle: a light sweep across the banner announcing something new */
 .sparkle::after {
@@ -496,6 +506,32 @@ textarea:focus {
   .ota {
     animation: none;
   }
+}
+
+/* ---- restored transcript --------------------------------------------- */
+/* marks the seam between a previous session's messages and live ones, so a
+   reloaded page is honest about where the history came from. */
+
+.restored-divider {
+  align-self: center;
+  color: var(--cyan);
+  border-color: rgba(0, 210, 255, 0.3);
+}
+
+.step.restored {
+  opacity: 0.75;
+}
+
+.tool.restored-call {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  padding: 3px 8px;
+  border-left: 2px solid rgba(0, 210, 255, 0.25);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- first-run setup guidance ---------------------------------------- */

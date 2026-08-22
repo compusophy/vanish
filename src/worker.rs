@@ -13,7 +13,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
 use crate::agent::llm::Message;
-use crate::protocol::{Command, Config, Event, FinishReason};
+use crate::protocol::{Command, Config, Event, FinishReason, HistoryTurn};
 
 struct WorkerState {
     config: Config,
@@ -91,6 +91,53 @@ pub fn boot_worker() {
     emit(Event::Ready {
         build: crate::BUILD.to_string(),
     });
+
+    // restore the previous conversation before the first command arrives, so
+    // a reload (ota or manual) resumes the thread instead of starting over.
+    // this is the fix for ota updates wiping the transcript: the messages now
+    // live in opfs, and the feed is rebuilt from them on boot.
+    wasm_bindgen_futures::spawn_local(async move {
+        let saved = crate::platform::transcript::load().await;
+        let total = saved.len();
+
+        // without this line the feed would show a history the model cannot
+        // see: the first new run would start from an empty context. the
+        // restored messages ARE the working context.
+        STATE.with(|s| s.borrow_mut().history = saved.clone());
+
+        // the system prompt is rebuilt by the loop; it is not part of what
+        // the user sees or needs replayed.
+        let turns: Vec<HistoryTurn> = saved
+            .into_iter()
+            .filter(|m| m.role != "system")
+            .map(|m| HistoryTurn {
+                tools: m
+                    .tool_calls
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|c| {
+                        format!("⚡ {} {}", c.function.name, truncate_args(&c.function.arguments))
+                    })
+                    .collect(),
+                content: m.content.filter(|c| !c.is_empty()),
+                role: m.role,
+            })
+            .collect();
+        let trimmed = total.saturating_sub(turns.len());
+        emit(Event::HistoryRestored { turns, trimmed });
+    });
+}
+
+/// tool arguments can be megabytes of file content; the restored card shows a
+/// hint, not the payload. the full text still lives in the message history.
+fn truncate_args(args: &str) -> String {
+    const MAX: usize = 80;
+    let flat = args.replace('\n', " ");
+    if flat.chars().count() <= MAX {
+        return flat;
+    }
+    let head: String = flat.chars().take(MAX).collect();
+    format!("{head}…")
 }
 
 fn handle(command: Command) {
@@ -214,10 +261,25 @@ fn handle(command: Command) {
                     st.stop_requested = false;
                 });
 
+                // flush the updated conversation to opfs *before* reporting
+                // the run finished. if the page reloads the moment this card
+                // renders, nothing is lost.
+                let saved = STATE.with(|s| s.borrow().history.clone());
+                let save_result = crate::platform::transcript::save(&saved).await;
+
                 emit(Event::RunFinished {
                     steps: outcome.steps,
                     reason: outcome.reason,
                 });
+
+                // surfaced after RunFinished so a failure never hides the
+                // run's own outcome, but never silently either (D4).
+                if let Err(e) = save_result {
+                    emit(Event::Error {
+                        scope: "transcript".to_string(),
+                        message: format!("could not save the conversation: {e}"),
+                    });
+                }
             });
         }
 
@@ -340,6 +402,22 @@ fn handle(command: Command) {
                         .map(|(p, _)| p.clone())
                         .collect(),
                 });
+            });
+        }
+
+        Command::ClearHistory => {
+            // memory first, disk second: a crash between the two leaves at
+            // worst an orphaned file, never a "cleared" ui sitting on top of
+            // a history that will reappear on the next reload.
+            STATE.with(|s| s.borrow_mut().history.clear());
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::platform::transcript::clear().await {
+                    Ok(()) => emit(Event::HistoryCleared),
+                    Err(e) => emit(Event::Error {
+                        scope: "transcript".to_string(),
+                        message: format!("could not clear the conversation: {e}"),
+                    }),
+                }
             });
         }
     }

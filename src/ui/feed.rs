@@ -349,7 +349,63 @@ pub fn render(ui: &Shared, event: Event) {
                 name.set_text_content(Some(&path));
             }
         }
+
+        Event::HistoryRestored { turns, .. } => {
+            if turns.is_empty() {
+                return;
+            }
+            append(&restored_divider());
+            for t in &turns {
+                match t.role.as_str() {
+                    "user" => {
+                        if let Some(c) = &t.content {
+                            user_message(c);
+                        }
+                    }
+                    "assistant" => {
+                        let card = create("div", "step restored");
+                        let head = create("div", "step-head");
+                        head.set_text_content(Some("earlier"));
+                        let _ = card.append_child(&head);
+                        if let Some(c) = &t.content {
+                            let body = create("div", "stream content");
+                            let text = create("div", "stream-text");
+                            text.set_text_content(Some(c));
+                            let _ = body.append_child(&text);
+                            let _ = card.append_child(&body);
+                        }
+                        for call in &t.tools {
+                            let row = create("div", "tool restored-call");
+                            row.set_text_content(Some(call));
+                            let _ = card.append_child(&row);
+                        }
+                        append(&card);
+                    }
+                    _ => {}
+                }
+            }
+            scroll_to_bottom();
+        }
+
+        Event::HistoryCleared => {
+            if let Some(feed) = feed_root() {
+                feed.set_inner_html("");
+            }
+            ACTIVE.with(|a| *a.borrow_mut() = None);
+            ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
+            ACTIVE_CONTENT.with(|c| *c.borrow_mut() = None);
+            note("conversation cleared — the agent will start fresh on the next run");
+            set_status("ready", false);
+        }
     }
+}
+
+/// the seam between what survived a reload and what happens next. without it
+/// a restored transcript reads as if this session produced it.
+fn restored_divider() -> Element {
+    let d = create("div", "note restored-divider");
+    d.set_text_content(Some("↩ restored from the previous session"));
+    d
 }
 
 /// keep one runaway tool result from making the page unusable.
