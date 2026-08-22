@@ -25,3 +25,8 @@ coverage/
 # temporary test files
 scratch/
 test-stream.js
+
+.vercel
+
+# local server log
+vanish-server.log

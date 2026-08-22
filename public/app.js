@@ -741,6 +741,69 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         }
 
+        case 'deployment_state': {
+          // run-opening health check: only worth surfacing when it is red
+          const r = ev.report || {};
+          if (r.found && !r.succeeded && (r.state === 'ERROR' || r.state === 'CANCELED')) {
+            const d = document.createElement('div');
+            d.className = 'death-report fatal';
+            d.innerHTML =
+              `<div class="death-title">🔴 production is red — build ${escapeHtml(r.sha || '')} failed</div>` +
+              `<div class="death-reason">${escapeHtml(r.error_message || r.state)}</div>` +
+              (r.build_log_tail
+                ? `<pre class="death-detail">${escapeHtml(r.build_log_tail)}</pre>`
+                : '') +
+              `<div class="death-meta">the agent has been told to fix this before anything else.</div>`;
+            el.agentStepsFeed.appendChild(d);
+            showToast('live deployment is failing — agent is on it');
+            scrollToBottom();
+          }
+          break;
+        }
+
+        case 'deployment_watch': {
+          const w = document.createElement('div');
+          w.className = 'continue-nudge retry-note';
+          w.textContent = `⏱ watching the build for ${ev.sha || 'the new commit'}…`;
+          el.agentStepsFeed.appendChild(w);
+          scrollToBottom();
+          break;
+        }
+
+        case 'deployment_result': {
+          const r = ev.report || {};
+          const d = document.createElement('div');
+          if (r.succeeded) {
+            d.className = 'continue-nudge retry-note';
+            d.textContent = `✅ ${ev.sha || 'commit'} deployed${r.url ? ` — ${r.url}` : ''}`;
+          } else if (r.timed_out) {
+            d.className = 'continue-nudge retry-note';
+            d.textContent = `⏱ build for ${ev.sha || 'commit'} still running — result will show on the next check`;
+          } else {
+            d.className = 'death-report fatal';
+            d.innerHTML =
+              `<div class="death-title">🔴 build failed for ${escapeHtml(ev.sha || '')}</div>` +
+              `<div class="death-reason">${escapeHtml(r.error_message || r.state || 'unknown')}</div>` +
+              (r.build_log_tail
+                ? `<pre class="death-detail">${escapeHtml(r.build_log_tail)}</pre>`
+                : '');
+            showToast('deploy failed — error handed back to the agent');
+          }
+          el.agentStepsFeed.appendChild(d);
+          scrollToBottom();
+          break;
+        }
+
+        case 'deployment_check_skipped':
+        case 'deployment_check_failed': {
+          const n = document.createElement('div');
+          n.className = 'continue-nudge retry-note';
+          n.textContent = `⚠ deploy check skipped: ${ev.reason || ev.error || 'unavailable'}`;
+          el.agentStepsFeed.appendChild(n);
+          scrollToBottom();
+          break;
+        }
+
         case 'agent_context': {
           if (Array.isArray(ev.messages)) {
             state.history = ev.messages;

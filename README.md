@@ -96,6 +96,43 @@ agent edits its own source
 
 committing *is* deploying.
 
+but a one-way loop is a broken loop. vercel builds on a machine the agent
+cannot reach, so before build feedback existed a single unbalanced brace
+produced fifteen consecutive red deploys that the agent never noticed — it
+kept committing on top of a dead deployment for hours.
+
+the loop is now closed at both ends:
+
+```
+agent edits its own source
+        |  git_commit
+   PARSE GATE  <-- refuses to commit .js/.json that does not parse
+        |
+   commit lands on main
+        |  continuous deployment
+    vercel rebuilds
+        |  vercel rest api (VERCEL_TOKEN)
+ build state + error log read back
+        |
+ injected into the conversation
+```
+
+- **parse gate** (`lib/syntax-check.js`) — `git_commit` runs `node --check`
+  over every changed `.js`/`.json` file and refuses the commit if any of them
+  fails, reporting the file and line back to the model. the browser-loop
+  relay `/api/git/commit-files` applies the same gate, so there is no back
+  door around it.
+- **build readback** (`lib/vercel-service.js`) — with `VERCEL_TOKEN` set, the
+  agent gets a `check_deployment` tool that returns the real deployment
+  state, the vercel error message, and the tail of the build log.
+- **automatic feedback** — every run opens with a health check on the live
+  deployment (a red build becomes the run's top priority), and every
+  successful `git_commit` is followed by a bounded watch on the build it
+  triggered. failures land in the conversation, not just the dashboard.
+
+without `VERCEL_TOKEN` the harness still works exactly as before; it just
+cannot see its own build results.
+
 ---
 
 ## quick start
@@ -173,6 +210,9 @@ vercel deploy --prod
 | `PUBLIC_BASE_URL` | no | pins the oauth callback origin |
 | `GITHUB_TOKEN` | no | headless fallback for cron runs with no browser |
 | `VERCEL_DEPLOY_HOOK_URL` | no | forces a rebuild without a commit |
+| `VERCEL_TOKEN` | no (strongly recommended) | lets the agent read its own build results; without it failed deploys are invisible to the loop |
+| `VERCEL_PROJECT_ID` | with `VERCEL_TOKEN` | the project that builds this repo (`prj_...`) |
+| `VERCEL_TEAM_ID` | with `VERCEL_TOKEN` | required when the project lives under a team (`team_...`) |
 
 rotating `SESSION_SECRET` invalidates every existing session.
 
