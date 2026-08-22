@@ -59,6 +59,69 @@ pub fn user_message(text: &str) {
     append(&card);
 }
 
+/// shown when the app loads with no usable credentials.
+///
+/// there is no server and therefore no sign-in, so an unconfigured harness
+/// used to just sit there looking ready while being unable to do anything —
+/// which is exactly how someone returning to it concludes the app is broken.
+/// say what is needed, and precisely how to get it.
+pub fn setup_required(missing_key: bool, missing_github: bool) {
+    if by_id("setup-card").is_some() {
+        return;
+    }
+    let card = create("div", "setup-card");
+    let _ = card.set_attribute("id", "setup-card");
+
+    // static markup only — no interpolated user data reaches this string.
+    card.set_inner_html(
+        "<div class=\"setup-title\">setup needed — this build has no backend</div>\
+         <div class=\"setup-body\">\
+           the old version signed you in with github oauth and read the openrouter key \
+           from a vercel environment variable. both of those needed a server, and this \
+           build has none: it runs entirely in your browser. credentials now live in \
+           this browser only, and are entered once in the panel on the right.\
+         </div>\
+         <ol class=\"setup-steps\">\
+           <li><b>openrouter key</b> — openrouter.ai/keys → create key → paste into \
+               \"openrouter api key\".</li>\
+           <li><b>github token</b> — github.com/settings/personal-access-tokens → \
+               generate a fine-grained token, scoped to only this repository, with \
+               <b>contents: read and write</b>. oauth cannot work without a server, so \
+               a token replaces the sign-in button.</li>\
+           <li>set the repository (owner/name) and branch, then press \
+               <b>save settings</b>. both credentials are checked immediately and the \
+               result is reported here.</li>\
+         </ol>",
+    );
+
+    if missing_key || missing_github {
+        let what = create("div", "setup-missing");
+        what.set_text_content(Some(&match (missing_key, missing_github) {
+            (true, true) => "missing: openrouter key and github token".to_string(),
+            (true, false) => "missing: openrouter key".to_string(),
+            (false, true) => "missing: github token or repository".to_string(),
+            (false, false) => String::new(),
+        }));
+        let _ = card.append_child(&what);
+    }
+
+    append(&card);
+
+    // draw the eye to where the work happens
+    if let Some(panel) = doc().query_selector(".rail-right").ok().flatten() {
+        let _ = panel.set_attribute("data-attention", "true");
+    }
+}
+
+fn clear_setup_card() {
+    if let Some(c) = by_id("setup-card") {
+        c.remove();
+    }
+    if let Some(panel) = doc().query_selector(".rail-right").ok().flatten() {
+        let _ = panel.remove_attribute("data-attention");
+    }
+}
+
 pub fn note(text: &str) {
     let n = create("div", "note");
     n.set_text_content(Some(text));
@@ -127,6 +190,38 @@ pub fn render(ui: &Shared, event: Event) {
                 b.set_text_content(Some(&format!("build {build}")));
             }
             set_status("ready", false);
+        }
+
+        Event::ConfigStatus {
+            openrouter_ok,
+            github_ok,
+            detail,
+        } => {
+            let both = openrouter_ok && github_ok;
+            let card = create("div", if both { "commit-card" } else { "error-card" });
+            let title = create("div", if both { "" } else { "error-title" });
+            title.set_text_content(Some(if both {
+                "✓ credentials verified"
+            } else {
+                "⚠ credentials not usable"
+            }));
+            let body = create("div", "error-body");
+            body.set_text_content(Some(&detail));
+            let _ = card.append_child(&title);
+            let _ = card.append_child(&body);
+            append(&card);
+
+            if both {
+                clear_setup_card();
+                set_status("ready", false);
+                // now that the token is known good, populating the explorer
+                // cannot produce a confusing 401.
+                let worker = ui.borrow().worker.clone();
+                super::send(&worker, &crate::protocol::Command::ListTree);
+            } else {
+                // leave the setup guidance up: it is still the answer
+                setup_required(!openrouter_ok, !github_ok);
+            }
         }
 
         Event::RunStarted { model, .. } => {

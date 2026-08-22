@@ -96,7 +96,62 @@ pub fn boot_worker() {
 fn handle(command: Command) {
     match command {
         Command::Configure(config) => {
-            STATE.with(|s| s.borrow_mut().config = config);
+            STATE.with(|s| s.borrow_mut().config = config.clone());
+
+            // credentials are pasted by hand, so the overwhelmingly likely
+            // failure is a typo or a token missing a scope. check both now
+            // and say exactly which one is wrong, instead of letting it
+            // surface as a mysterious failure twenty steps into a run.
+            if config.openrouter_key.is_empty() && config.github_token.is_empty() {
+                return;
+            }
+
+            wasm_bindgen_futures::spawn_local(async move {
+                let mut notes: Vec<String> = Vec::new();
+
+                let openrouter_ok = if config.openrouter_key.is_empty() {
+                    notes.push("no openrouter key set".to_string());
+                    false
+                } else {
+                    match crate::agent::llm::verify_key(&config.openrouter_key).await {
+                        Ok(msg) => {
+                            notes.push(msg);
+                            true
+                        }
+                        Err(e) => {
+                            notes.push(e);
+                            false
+                        }
+                    }
+                };
+
+                let github_ok = if config.github_token.is_empty() || config.repo.is_empty() {
+                    notes.push("no github token or repo set".to_string());
+                    false
+                } else {
+                    let gh = crate::agent::github::Github::new(
+                        &config.github_token,
+                        &config.repo,
+                        &config.branch,
+                    );
+                    match gh.verify().await {
+                        Ok(repo) => {
+                            notes.push(format!("github ok (write access to {repo})"));
+                            true
+                        }
+                        Err(e) => {
+                            notes.push(e);
+                            false
+                        }
+                    }
+                };
+
+                emit(Event::ConfigStatus {
+                    openrouter_ok,
+                    github_ok,
+                    detail: notes.join(" · "),
+                });
+            });
         }
 
         Command::Stop => {

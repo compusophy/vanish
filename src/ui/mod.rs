@@ -104,6 +104,10 @@ fn load_config() -> Config {
         .and_then(|s| s.get_item(STORE).ok().flatten())
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(Config {
+            // this harness edits its own repository, so defaulting to it is
+            // correct rather than presumptuous — and it removes one more
+            // field to fill in by hand.
+            repo: "compusophy/vanish".to_string(),
             branch: "main".to_string(),
             model: "stealth/ox-alpha".to_string(),
             reasoning_effort: "high".to_string(),
@@ -179,8 +183,19 @@ pub fn boot_ui(worker_url: &str) {
     // hand the worker its credentials immediately so it is usable the moment
     // the page loads rather than only after the settings panel is touched.
     let cfg = ui.borrow().config.clone();
+    let configured = cfg.is_usable();
     send(&ui.borrow().worker, &Command::Configure(cfg));
-    send(&ui.borrow().worker, &Command::ListTree);
+
+    if configured {
+        send(&ui.borrow().worker, &Command::ListTree);
+    } else {
+        // asking github for a tree with no token returns a 401 that reads
+        // like a bug. explain the actual situation instead.
+        feed::setup_required(
+            ui.borrow().config.openrouter_key.is_empty(),
+            ui.borrow().config.github_token.is_empty() || ui.borrow().config.repo.is_empty(),
+        );
+    }
 }
 
 fn hydrate_settings(cfg: &Config) {
@@ -314,8 +329,10 @@ fn wire_controls(ui: &Shared) {
                     let worker = ui.borrow().worker.clone();
                     send(&worker, &Command::Configure(cfg.clone()));
                     ui.borrow_mut().config = cfg;
-                    send(&worker, &Command::ListTree);
-                    feed::note("settings saved");
+                    // the tree is fetched only once ConfigStatus confirms the
+                    // token works; asking now would emit a 401 card that says
+                    // nothing the credential check is not about to say better.
+                    feed::note("settings saved — checking credentials");
                 }
                 Err(e) => feed::error("settings", &e),
             }

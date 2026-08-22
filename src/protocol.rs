@@ -28,6 +28,15 @@ pub enum Command {
     WriteFile { path: String, content: String },
 }
 
+impl Config {
+    /// whether there is any point contacting the services yet.
+    pub fn is_usable(&self) -> bool {
+        !self.openrouter_key.is_empty()
+            && !self.github_token.is_empty()
+            && !self.repo.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     pub openrouter_key: String,
@@ -46,6 +55,16 @@ pub struct Config {
 pub enum Event {
     Ready {
         build: String,
+    },
+    /// result of checking the saved credentials against the real services.
+    /// there is no server to validate them at sign-in time, so this is what
+    /// replaces "you are logged in": each credential is actually exercised
+    /// and the outcome is stated, rather than discovered on the first run.
+    ConfigStatus {
+        openrouter_ok: bool,
+        github_ok: bool,
+        /// human-readable, and specific about which half failed and why.
+        detail: String,
     },
     RunStarted {
         thread_id: String,

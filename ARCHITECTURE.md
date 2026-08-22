@@ -80,11 +80,35 @@ or nowhere.
 
 ## credentials
 
-there is no backend, so the openrouter key and github token live in this
-browser's `localStorage`. anything with script access to the origin can read
-them. that is the explicit price of removing the server; treat them like
-saved passwords, scope the github token to the one repo, and rotate them if
-the machine is shared.
+**github oauth is gone, and cannot come back without a server.** the
+authorization-code flow exchanges the code for a token using the client
+*secret*; a secret shipped to a browser is not a secret. github's device
+flow needs no secret, but its endpoints send no cors headers, so a browser
+cannot call them either. browser-only therefore means a **fine-grained
+personal access token**, scoped to this repository, `contents: read+write`.
+
+**`OPENROUTER_API_KEY` is still set on the vercel project and is still
+unreachable.** environment variables are injected into functions and builds,
+never into a static page at runtime. nothing was deleted; there is simply no
+longer any server-side code to read it.
+
+by explicit decision, both credentials are **entered once in the settings
+panel and stored in this browser's `localStorage`**. they never appear in
+the deployed bundle and never cross the network from this app. the cost is
+entering them per browser or device, and re-entering if site data is
+cleared.
+
+they could instead be inlined at build time from the vercel env vars, which
+would restore the old zero-setup behaviour — but the key would then sit
+inside a file the browser downloads, protected only by vercel's deployment
+protection. that was considered and rejected.
+
+because there is no sign-in, an unconfigured harness has to say so: on first
+load it renders setup instructions rather than sitting there looking ready.
+saving settings verifies both credentials for real — the openrouter key
+against `/api/v1/key` (which also catches an exhausted balance) and the
+github token against the repository (which also catches a token that can
+read but not push) — and reports which half failed.
 
 ## over-the-air updates
 

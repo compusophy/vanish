@@ -131,6 +131,44 @@ struct PartialCall {
     arguments: String,
 }
 
+/// exercise the api key before a run depends on it.
+///
+/// `/key` returns the key's own metadata, so this both proves the key is
+/// valid and surfaces a spent-out account — which otherwise appears as a
+/// mid-run failure several steps in.
+pub async fn verify_key(api_key: &str) -> Result<String, String> {
+    let headers = vec![("Authorization", format!("Bearer {api_key}"))];
+    let resp = crate::agent::http::request(
+        "GET",
+        "https://openrouter.ai/api/v1/key",
+        &headers,
+        None,
+    )
+    .await?;
+
+    if resp.status == 401 || resp.status == 403 {
+        return Err("openrouter rejected this api key".to_string());
+    }
+    if !resp.ok() {
+        return Err(format!("openrouter returned http {}", resp.status));
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_str(&resp.body).map_err(|e| format!("bad key response: {e}"))?;
+    let data = v.get("data").unwrap_or(&v);
+
+    let limit = data.get("limit").and_then(|l| l.as_f64());
+    let usage = data.get("usage").and_then(|u| u.as_f64()).unwrap_or(0.0);
+
+    match limit {
+        Some(l) if usage >= l => Err(format!(
+            "openrouter key is out of credit (used {usage:.2} of {l:.2})"
+        )),
+        Some(l) => Ok(format!("openrouter ok ({usage:.2} of {l:.2} used)")),
+        None => Ok("openrouter ok".to_string()),
+    }
+}
+
 pub struct LlmRequest<'a> {
     pub api_key: &'a str,
     pub model: &'a str,
