@@ -18,6 +18,17 @@
           </div>
         </div>
 
+        <div class="rail-section conversations-section">
+          <div class="rail-label">conversations</div>
+          <button id="new-conversation" class="btn btn-new">+ new conversation</button>
+          <div id="conversations" class="conv-list"></div>
+          <button id="clear-history" class="btn btn-quiet">clear this conversation</button>
+          <p class="hint">
+            threads are saved to this browser's storage after every run and
+            restored on load, so an update never wipes them.
+          </p>
+        </div>
+
         <div class="rail-section">
           <div class="rail-label">
             uncommitted <span class="badge" id="dirty-count" style="display: none">0</span>
@@ -107,14 +118,6 @@
           <button id="commit" class="btn">commit working tree</button>
         </div>
 
-        <div class="rail-section">
-          <div class="rail-label">conversation</div>
-          <p class="hint">
-            the transcript is saved to local storage after every run and
-            restored when the page loads, so updates do not wipe it.
-          </p>
-          <button id="clear-history" class="btn danger">clear conversation</button>
-        </div>
       </aside>
     </div>
 

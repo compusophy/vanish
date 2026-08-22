@@ -28,6 +28,14 @@ pub enum Command {
     WriteFile { path: String, content: String },
     /// forget the saved conversation. the ui clears its feed on confirmation.
     ClearHistory,
+    /// start a fresh thread, leaving existing ones intact.
+    NewConversation,
+    /// make an existing thread active and replay it.
+    SwitchConversation { id: String },
+    /// discard one thread.
+    DeleteConversation { id: String },
+    /// ask for the thread list (the ui renders it in the left rail).
+    ListConversations,
 }
 
 impl Config {
@@ -136,6 +144,19 @@ pub enum Event {
     },
     /// the saved conversation was discarded at the ui's request.
     HistoryCleared,
+    /// the full thread list plus which one is active.
+    Conversations {
+        items: Vec<ConversationSummary>,
+        active: String,
+    },
+}
+
+/// one thread as the sidebar shows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub count: usize,
 }
 
 /// one exchange, replayed after a reload. this is a display shape, not the

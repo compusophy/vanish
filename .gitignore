@@ -34,3 +34,4 @@ vanish-server.log
 # rust / wasm
 /target
 /web/pkg
+/web/build.json

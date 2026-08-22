@@ -207,6 +207,54 @@ pub fn render(ui: &Shared, event: Event) {
                 b.set_text_content(Some(&format!("build {build}")));
             }
             set_status("ready", false);
+            // the worker is listening only from this point on. sending the
+            // opening Configure any earlier means posting into a worker that
+            // has no onmessage handler yet, and the message is discarded —
+            // which is what made saved credentials require a manual "save
+            // settings" on every page load.
+            super::bootstrap_worker(ui);
+            // the running build id is only known now, so this is the earliest
+            // an update check can mean anything.
+            super::update::check_now(ui);
+        }
+
+        Event::Conversations { items, active } => {
+            let Some(list) = by_id("conversations") else {
+                return;
+            };
+            list.set_inner_html("");
+
+            for c in &items {
+                let row = create(
+                    "div",
+                    if c.id == active {
+                        "conv-row active"
+                    } else {
+                        "conv-row"
+                    },
+                );
+                let _ = row.set_attribute("data-conv-id", &c.id);
+
+                let title = create("span", "conv-title");
+                title.set_text_content(Some(&c.title));
+                let _ = row.append_child(&title);
+
+                let count = create("span", "conv-count");
+                count.set_text_content(Some(&c.count.to_string()));
+                let _ = row.append_child(&count);
+
+                // delete affordance per row; confirmation is the fact that it
+                // is a small separate target, not a modal.
+                let del = create("button", "conv-del");
+                del.set_text_content(Some("×"));
+                let _ = del.set_attribute("title", "delete this conversation");
+                let _ = del.set_attribute("data-conv-del", &c.id);
+                let _ = row.append_child(&del);
+
+                let _ = list.append_child(&row);
+            }
+
+            super::wire_conversation_rows(ui);
         }
 
         Event::ConfigStatus {

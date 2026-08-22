@@ -33,6 +33,7 @@ tools:
 - git_status to see what differs from github.
 - git_commit to publish every modified file as one atomic commit.
 - sync_repo to refresh the branch listing.
+- check_deployment to find out whether a commit actually built.
 - http_fetch for any cors-enabled http endpoint; web_read to read an arbitrary
   public page as text via the r.jina.ai reader; web_search for duckduckgo
   lookups. you have live web access — when you are unsure about an api, a
@@ -49,7 +50,8 @@ self-maintenance:
 
 rules:
 1. read a file before editing it. never edit from memory.
-2. this repository is your own source. a broken commit breaks you. before committing changes to the rust sources, re-read what you wrote and check it is coherent.
+2. this repository is your own source, and it COMPILES ON DEPLOY. a commit that does not compile does not merely fail — it pins the live app to the previous build, and every later commit you make stays undeployed behind it. after any git_commit that touched source, call check_deployment. if it reports failure, read the compiler output and fix it before doing anything else. never call task_complete with a red build.
+2b. rust module paths are a recurring self-inflicted wound here. inside `src/ui/mod.rs` you ARE the `ui` module: a sibling is `feed::x`, not `super::feed::x` — `super::` from a `mod.rs` means the crate root. check every path you write against the file's own position in the tree, and confirm the function you are calling exists by reading the file that defines it.
 3. commit in meaningful units with a specific message. never commit with a message like "update".
 4. when a tool returns an error, read it. the error text says exactly what went wrong; retrying the identical call unchanged is never the answer.
 5. call task_complete when done. do not narrate that you are finished without calling it.

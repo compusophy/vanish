@@ -7,7 +7,7 @@
 //! supposed to cancel.
 
 mod feed;
-mod update;
+pub mod update;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -157,7 +157,7 @@ fn export_corrupt_config(raw: &str) {
     ));
     let _ = card.append_child(&title);
     let _ = card.append_child(&body);
-    super::feed::append_card(&card);
+    feed::append_card(&card);
 }
 
 fn load_config() -> Config {
@@ -167,7 +167,7 @@ fn load_config() -> Config {
     // to be typed by hand for no reason.
     let mut cfg = match raw_config() {
         Err(e) => {
-            super::feed::append_error(&e);
+            feed::append_error(&e);
             Config::default()
         }
         Ok(Loaded::Fresh) => Config::default(),
@@ -267,20 +267,104 @@ pub fn boot_ui(worker_url: &str) {
     wire_controls(&ui);
     update::start_watching(&ui);
 
-    // hand the worker its credentials immediately so it is usable the moment
-    // the page loads rather than only after the settings panel is touched.
-    let cfg = ui.borrow().config.clone();
-    let configured = cfg.is_usable();
-    send(&ui.borrow().worker, &Command::Configure(cfg));
+    // NOTHING is sent to the worker here, and that is deliberate.
+    //
+    // web/worker.js attaches its onmessage handler only after `await init()`
+    // resolves — wasm has to be fetched and compiled first. a message posted
+    // before that lands during the await, dispatches against a global scope
+    // with no listener, and is silently dropped. the boot-time Configure was
+    // being lost exactly this way, which is why saved credentials looked
+    // filled in but the harness still demanded "save settings" on every
+    // single load: pressing the button re-sent Configure once the worker was
+    // finally listening.
+    //
+    // the worker announces itself with Event::Ready. bootstrap happens there,
+    // in feed::render, where the channel is known to be live.
+}
 
-    if configured {
-        send(&ui.borrow().worker, &Command::ListTree);
-    } else {
+/// attach click handlers to the freshly rendered thread rows.
+///
+/// the list is rebuilt from scratch on every `Conversations` event, so the
+/// listeners have to be reattached each time; there is no stable node to
+/// delegate from that survives the rebuild.
+pub fn wire_conversation_rows(ui: &Shared) {
+    let Some(list) = by_id("conversations") else {
+        return;
+    };
+    let rows = list.query_selector_all("[data-conv-id]").ok();
+    let Some(rows) = rows else { return };
+
+    for i in 0..rows.length() {
+        let Some(node) = rows.item(i) else { continue };
+        let Ok(row) = node.dyn_into::<Element>() else {
+            continue;
+        };
+        let Some(id) = row.get_attribute("data-conv-id") else {
+            continue;
+        };
+
+        let ui_switch = ui.clone();
+        let switch_id = id.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            // the delete button lives inside the row; let it handle its own
+            // click instead of switching to a thread we are removing.
+            if let Some(t) = ev.target().and_then(|t| t.dyn_into::<Element>().ok()) {
+                if t.has_attribute("data-conv-del") {
+                    return;
+                }
+            }
+            let worker = ui_switch.borrow().worker.clone();
+            send(
+                &worker,
+                &Command::SwitchConversation {
+                    id: switch_id.clone(),
+                },
+            );
+        });
+        let _ = row.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+
+    let dels = list.query_selector_all("[data-conv-del]").ok();
+    let Some(dels) = dels else { return };
+    for i in 0..dels.length() {
+        let Some(node) = dels.item(i) else { continue };
+        let Ok(btn) = node.dyn_into::<Element>() else {
+            continue;
+        };
+        let Some(id) = btn.get_attribute("data-conv-del") else {
+            continue;
+        };
+        let ui_del = ui.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            ev.stop_propagation();
+            let worker = ui_del.borrow().worker.clone();
+            send(&worker, &Command::DeleteConversation { id: id.clone() });
+        });
+        let _ = btn.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+}
+
+/// send the worker its opening state. called from the `Ready` handler, never
+/// from boot, because before `Ready` the worker has no message listener and
+/// anything posted is dropped on the floor.
+pub fn bootstrap_worker(ui: &Shared) {
+    let (worker, cfg) = {
+        let u = ui.borrow();
+        (u.worker.clone(), u.config.clone())
+    };
+
+    send(&worker, &Command::Configure(cfg.clone()));
+    send(&worker, &Command::ListConversations);
+
+    if !cfg.is_usable() {
         // asking github for a tree with no token returns a 401 that reads
-        // like a bug. explain the actual situation instead.
+        // like a bug. explain the actual situation instead. when the config
+        // IS usable, ListTree is sent once ConfigStatus confirms the token.
         feed::setup_required(
-            ui.borrow().config.openrouter_key.is_empty(),
-            ui.borrow().config.github_token.is_empty() || ui.borrow().config.repo.is_empty(),
+            cfg.openrouter_key.is_empty(),
+            cfg.github_token.is_empty() || cfg.repo.is_empty(),
         );
     }
 }
@@ -444,6 +528,16 @@ fn wire_controls(ui: &Shared) {
     // forget the conversation. the worker clears memory and opfs, then
     // confirms; the feed is wiped only on that confirmation, so a failed
     // clear never shows an empty transcript over a live history.
+    {
+        let ui = ui.clone();
+        on_click("new-conversation", {
+            let ui = ui.clone();
+            move || {
+                let worker = ui.borrow().worker.clone();
+                send(&worker, &Command::NewConversation);
+            }
+        });
+    }
     {
         let ui = ui.clone();
         on_click("clear-history", move || {

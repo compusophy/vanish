@@ -63,6 +63,57 @@ struct TreeResponse {
     truncated: bool,
 }
 
+fn field(v: &serde_json::Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CheckSummary {
+    pub name: String,
+    pub state: String,
+    pub detail: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeployState {
+    /// "success" | "failure" | "pending" | "none"
+    pub verdict: String,
+    pub checks: Vec<CheckSummary>,
+}
+
+impl DeployState {
+    /// any failure wins; otherwise anything still running means pending.
+    /// reporting "success" while a build is mid-flight is worse than
+    /// reporting pending, because the agent would move on from broken code.
+    fn from(checks: Vec<CheckSummary>) -> Self {
+        let failed = |s: &str| matches!(s, "failure" | "error" | "timed_out" | "cancelled");
+        let running = |s: &str| matches!(s, "pending" | "queued" | "in_progress" | "waiting");
+
+        let verdict = if checks.is_empty() {
+            "none"
+        } else if checks.iter().any(|c| failed(&c.state)) {
+            "failure"
+        } else if checks.iter().any(|c| running(&c.state)) {
+            "pending"
+        } else {
+            "success"
+        };
+
+        Self {
+            verdict: verdict.to_string(),
+            checks,
+        }
+    }
+
+    pub fn settled(&self) -> bool {
+        self.verdict == "success" || self.verdict == "failure"
+    }
+}
+
 /// one file destined for a commit. `content: None` means delete.
 pub struct FileChange {
     pub path: String,
@@ -172,6 +223,90 @@ impl Github {
         );
         let resp = request("GET", &url, &headers, None).await?;
         Self::check(resp, &format!("reading {path}"))
+    }
+
+    /// the head commit sha of the branch.
+    pub async fn head_sha(&self) -> Result<String, String> {
+        let body = self
+            .get(
+                &format!("/repos/{}/commits/{}", self.repo, self.branch),
+                "reading branch head",
+            )
+            .await?;
+        let v: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("bad commit response: {e}"))?;
+        v.get("sha")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "commit response had no sha".to_string())
+    }
+
+    /// build/deploy outcome for a commit.
+    ///
+    /// vercel reports build results back to github as commit statuses and
+    /// check runs, so the agent can read whether its own commit compiled
+    /// using the token it already has — no vercel token, and no api key for
+    /// a second vendor. without this the agent commits broken code, is told
+    /// nothing, and believes it succeeded.
+    pub async fn deployment_state(&self, sha: &str) -> Result<DeployState, String> {
+        let mut checks: Vec<CheckSummary> = Vec::new();
+
+        // combined status api (what vercel has historically posted)
+        if let Ok(body) = self
+            .get(
+                &format!("/repos/{}/commits/{}/status", self.repo, sha),
+                "reading commit status",
+            )
+            .await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                for s in v.get("statuses").and_then(|s| s.as_array()).into_iter().flatten() {
+                    checks.push(CheckSummary {
+                        name: field(s, "context"),
+                        state: field(s, "state"),
+                        detail: field(s, "description"),
+                        url: field(s, "target_url"),
+                    });
+                }
+            }
+        }
+
+        // check-runs api (the newer surface; vercel uses this too)
+        if let Ok(body) = self
+            .get(
+                &format!("/repos/{}/commits/{}/check-runs", self.repo, sha),
+                "reading check runs",
+            )
+            .await
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                for c in v
+                    .get("check_runs")
+                    .and_then(|s| s.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    let status = field(c, "status");
+                    let conclusion = field(c, "conclusion");
+                    checks.push(CheckSummary {
+                        name: field(c, "name"),
+                        // an unfinished run has no conclusion yet
+                        state: if conclusion.is_empty() {
+                            status
+                        } else {
+                            conclusion
+                        },
+                        detail: c
+                            .get("output")
+                            .map(|o| field(o, "title"))
+                            .unwrap_or_default(),
+                        url: field(c, "details_url"),
+                    });
+                }
+            }
+        }
+
+        Ok(DeployState::from(checks))
     }
 
     /// land every change as a single atomic commit and move the branch.

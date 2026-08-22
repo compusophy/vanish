@@ -236,19 +236,45 @@ pub async fn write(path: &str, content: &str) -> Result<(), String> {
     handle_write(handle.as_ref(), content, path).await
 }
 
+/// a DOMException carries the useful discriminator in `name`, not `message`.
+/// matching on message text is brittle across browsers and locales — chrome
+/// says "A requested file or directory could not be found", which contains
+/// none of the tokens you would naively grep for.
+fn is_not_found(e: &JsValue) -> bool {
+    Reflect::get(e, &JsValue::from_str("name"))
+        .ok()
+        .and_then(|n| n.as_string())
+        .map(|n| n == "NotFoundError")
+        .unwrap_or(false)
+}
+
+/// delete is idempotent: removing something that is already gone is success.
+///
+/// callers delete records that may never have been written — a conversation
+/// closed before it was ever run has no messages file — and forcing every one
+/// of them to distinguish "missing" from "broken" just spreads the same
+/// mistake around.
 pub async fn delete(path: &str) -> Result<(), String> {
     let parts = normalize(path)?;
-    let dir = parent_of(&parts, false).await?;
+
+    // a missing parent directory means the file cannot exist either.
+    let dir = match parent_of(&parts, false).await {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+
     let f = method(&dir, "removeEntry")?;
     let p = as_promise(
         f.call1(&dir, &JsValue::from_str(parts.last().unwrap()))
             .map_err(|e| err("removeEntry threw", e))?,
         "removeEntry",
     )?;
-    JsFuture::from(p)
-        .await
-        .map_err(|e| err(&format!("deleting {path}"), e))?;
-    Ok(())
+
+    match JsFuture::from(p).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(err(&format!("deleting {path}"), e)),
+    }
 }
 
 // ---- index -----------------------------------------------------------

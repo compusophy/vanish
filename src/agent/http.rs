@@ -12,6 +12,24 @@ use web_sys::{ReadableStreamDefaultReader, Response};
 
 use crate::platform::opfs::describe;
 
+/// await a timer. the loop has no deadline, so it can afford to wait for a
+/// ci build to settle rather than guessing whether its commit was good.
+pub async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let Ok(set_timeout) = Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .and_then(|f| f.dyn_into::<Function>().map_err(|e| e))
+        else {
+            // no timer available: resolve immediately rather than hanging the
+            // caller forever.
+            let _ = resolve.call0(&JsValue::NULL);
+            return;
+        };
+        let _ = set_timeout.call2(&global, &resolve, &JsValue::from_f64(ms as f64));
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
 pub struct HttpResponse {
     pub status: u16,
     pub body: String,

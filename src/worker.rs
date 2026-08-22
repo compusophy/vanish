@@ -20,6 +20,10 @@ struct WorkerState {
     history: Vec<Message>,
     running: bool,
     stop_requested: bool,
+    /// which thread `history` belongs to. every save is addressed to this id,
+    /// so switching threads mid-session cannot write one conversation's
+    /// messages into another's file.
+    conversation: String,
 }
 
 impl Default for WorkerState {
@@ -29,6 +33,7 @@ impl Default for WorkerState {
             history: Vec::new(),
             running: false,
             stop_requested: false,
+            conversation: String::new(),
         }
     }
 }
@@ -97,7 +102,17 @@ pub fn boot_worker() {
     // this is the fix for ota updates wiping the transcript: the messages now
     // live in opfs, and the feed is rebuilt from them on boot.
     wasm_bindgen_futures::spawn_local(async move {
-        let saved = crate::platform::transcript::load().await;
+        let mut index = crate::platform::transcript::load_index().await;
+        if index.active.is_empty() {
+            // first ever boot, or every thread was deleted: open one so the
+            // user always has somewhere to type.
+            let _ = crate::platform::transcript::create().await;
+            index = crate::platform::transcript::load_index().await;
+        }
+        let active = index.active.clone();
+        STATE.with(|s| s.borrow_mut().conversation = active.clone());
+
+        let saved = crate::platform::transcript::load(&active).await;
         let total = saved.len();
 
         // without this line the feed would show a history the model cannot
@@ -125,7 +140,54 @@ pub fn boot_worker() {
             .collect();
         let trimmed = total.saturating_sub(turns.len());
         emit(Event::HistoryRestored { turns, trimmed });
+        publish_conversations(&index);
     });
+}
+
+/// switching or deleting a thread mid-run would pull the context out from
+/// under the loop. refuse, and say why, rather than corrupting the run.
+fn reject_while_running(action: &str) -> bool {
+    let running = STATE.with(|s| s.borrow().running);
+    if running {
+        emit(Event::Error {
+            scope: "conversation".to_string(),
+            message: format!("cannot {action} while a run is in progress — press stop first."),
+        });
+    }
+    running
+}
+
+fn publish_conversations(index: &crate::platform::transcript::Index) {
+    emit(Event::Conversations {
+        items: index
+            .sorted()
+            .into_iter()
+            .map(|c| crate::protocol::ConversationSummary {
+                id: c.id,
+                title: c.title,
+                count: c.count,
+            })
+            .collect(),
+        active: index.active.clone(),
+    });
+}
+
+/// collapse stored messages into the display shape the feed replays.
+fn replay_turns(messages: Vec<Message>) -> Vec<HistoryTurn> {
+    messages
+        .into_iter()
+        .filter(|m| m.role != "system")
+        .map(|m| HistoryTurn {
+            tools: m
+                .tool_calls
+                .unwrap_or_default()
+                .iter()
+                .map(|c| format!("⚡ {} {}", c.function.name, truncate_args(&c.function.arguments)))
+                .collect(),
+            content: m.content.filter(|c| !c.is_empty()),
+            role: m.role,
+        })
+        .collect()
 }
 
 /// tool arguments can be megabytes of file content; the restored card shows a
@@ -264,8 +326,9 @@ fn handle(command: Command) {
                 // flush the updated conversation to opfs *before* reporting
                 // the run finished. if the page reloads the moment this card
                 // renders, nothing is lost.
-                let saved = STATE.with(|s| s.borrow().history.clone());
-                let save_result = crate::platform::transcript::save(&saved).await;
+                let (saved, conversation) =
+                    STATE.with(|s| (s.borrow().history.clone(), s.borrow().conversation.clone()));
+                let save_result = crate::platform::transcript::save(&conversation, &saved).await;
 
                 emit(Event::RunFinished {
                     steps: outcome.steps,
@@ -274,11 +337,17 @@ fn handle(command: Command) {
 
                 // surfaced after RunFinished so a failure never hides the
                 // run's own outcome, but never silently either (D4).
-                if let Err(e) = save_result {
-                    emit(Event::Error {
+                match save_result {
+                    Ok(()) => {
+                        // the title is derived from the first prompt, so the
+                        // sidebar entry only becomes meaningful after a save.
+                        let index = crate::platform::transcript::load_index().await;
+                        publish_conversations(&index);
+                    }
+                    Err(e) => emit(Event::Error {
                         scope: "transcript".to_string(),
                         message: format!("could not save the conversation: {e}"),
-                    });
+                    }),
                 }
             });
         }
@@ -410,14 +479,117 @@ fn handle(command: Command) {
             // worst an orphaned file, never a "cleared" ui sitting on top of
             // a history that will reappear on the next reload.
             STATE.with(|s| s.borrow_mut().history.clear());
+            let id = STATE.with(|s| s.borrow().conversation.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                match crate::platform::transcript::clear().await {
-                    Ok(()) => emit(Event::HistoryCleared),
+                // clear empties THIS thread and opens a fresh one; the other
+                // threads are untouched.
+                match crate::platform::transcript::delete(&id).await {
+                    Ok(_) => {
+                        if let Ok(new_id) = crate::platform::transcript::create().await {
+                            STATE.with(|s| s.borrow_mut().conversation = new_id);
+                        }
+                        emit(Event::HistoryCleared);
+                        let index = crate::platform::transcript::load_index().await;
+                        publish_conversations(&index);
+                    }
                     Err(e) => emit(Event::Error {
                         scope: "transcript".to_string(),
                         message: format!("could not clear the conversation: {e}"),
                     }),
                 }
+            });
+        }
+
+        Command::NewConversation => {
+            if reject_while_running("start a new conversation") {
+                return;
+            }
+            STATE.with(|s| s.borrow_mut().history.clear());
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::platform::transcript::create().await {
+                    Ok(id) => {
+                        STATE.with(|s| s.borrow_mut().conversation = id);
+                        emit(Event::HistoryCleared);
+                        let index = crate::platform::transcript::load_index().await;
+                        publish_conversations(&index);
+                    }
+                    Err(e) => emit(Event::Error {
+                        scope: "transcript".to_string(),
+                        message: format!("could not start a conversation: {e}"),
+                    }),
+                }
+            });
+        }
+
+        Command::SwitchConversation { id } => {
+            if reject_while_running("switch conversations") {
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(async move {
+                let messages = crate::platform::transcript::load(&id).await;
+                let total = messages.len();
+                STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    st.conversation = id.clone();
+                    st.history = messages.clone();
+                });
+
+                let mut index = crate::platform::transcript::load_index().await;
+                index.active = id;
+                let _ = crate::platform::transcript::save_index(&index).await;
+
+                let turns = replay_turns(messages);
+                emit(Event::HistoryCleared);
+                emit(Event::HistoryRestored {
+                    trimmed: total.saturating_sub(turns.len()),
+                    turns,
+                });
+                publish_conversations(&index);
+            });
+        }
+
+        Command::DeleteConversation { id } => {
+            if reject_while_running("delete a conversation") {
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(async move {
+                match crate::platform::transcript::delete(&id).await {
+                    Ok(next) => {
+                        let active = if next.is_empty() {
+                            crate::platform::transcript::create()
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            next
+                        };
+                        let messages = crate::platform::transcript::load(&active).await;
+                        let total = messages.len();
+                        STATE.with(|s| {
+                            let mut st = s.borrow_mut();
+                            st.conversation = active.clone();
+                            st.history = messages.clone();
+                        });
+                        let turns = replay_turns(messages);
+                        emit(Event::HistoryCleared);
+                        emit(Event::HistoryRestored {
+                            trimmed: total.saturating_sub(turns.len()),
+                            turns,
+                        });
+                        let index = crate::platform::transcript::load_index().await;
+                        publish_conversations(&index);
+                    }
+                    Err(e) => emit(Event::Error {
+                        scope: "transcript".to_string(),
+                        message: format!("could not delete the conversation: {e}"),
+                    }),
+                }
+            });
+        }
+
+        Command::ListConversations => {
+            wasm_bindgen_futures::spawn_local(async move {
+                let index = crate::platform::transcript::load_index().await;
+                publish_conversations(&index);
             });
         }
     }

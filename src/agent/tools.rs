@@ -150,6 +150,20 @@ pub fn definitions() -> serde_json::Value {
       {
         "type": "function",
         "function": {
+          "name": "check_deployment",
+          "description": "check whether a commit actually built and deployed. THIS REPOSITORY COMPILES ON DEPLOY: a commit that does not compile takes the live app down and you will not find out any other way. call this after every git_commit that touched source. by default it waits for the build to finish and reports the failure reason.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "sha": { "type": "string", "description": "commit to check; omit for the current branch head" },
+              "wait": { "type": "boolean", "description": "wait for the build to settle instead of returning a pending snapshot (default true)" }
+            }
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "task_complete",
           "description": "declare the task finished. call this only when the work is done and committed.",
           "parameters": {
@@ -481,6 +495,47 @@ impl Workspace {
                     "answer": parsed.get("Answer"),
                     "definition": parsed.get("Definition"),
                     "related": parsed.get("RelatedTopics"),
+                })
+                .to_string())
+            }
+
+            "check_deployment" => {
+                let sha = match arg(&args, "sha") {
+                    Some(s) if !s.trim().is_empty() => s.to_string(),
+                    _ => self.github.head_sha().await?,
+                };
+                let wait = args
+                    .get("wait")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+
+                let mut state = self.github.deployment_state(&sha).await?;
+
+                if wait {
+                    // builds take roughly a minute. poll rather than guess.
+                    // there is no run deadline, so waiting is free — and a
+                    // wrong "success" is far more expensive than a slow one.
+                    let mut waited = 0;
+                    while !state.settled() && waited < 300 {
+                        crate::agent::http::sleep_ms(10_000).await;
+                        waited += 10;
+                        state = self.github.deployment_state(&sha).await?;
+                    }
+                }
+
+                let short: String = sha.chars().take(7).collect();
+                let guidance = match state.verdict.as_str() {
+                    "failure" => "the build FAILED. the live app is now serving the last good build, not your commit. open the check url for the compiler output, fix the cause, and commit the fix.",
+                    "success" => "the build succeeded and this commit is live.",
+                    "pending" => "still building. call check_deployment again before you finish.",
+                    _ => "no build checks reported for this commit yet. if this repository deploys on push, wait a few seconds and check again.",
+                };
+
+                Ok(serde_json::json!({
+                    "sha": short,
+                    "verdict": state.verdict,
+                    "checks": state.checks,
+                    "guidance": guidance,
                 })
                 .to_string())
             }

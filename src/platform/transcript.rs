@@ -4,21 +4,28 @@
 //! in-memory `Vec<Message>` and the ui's dom. an ota reload destroyed both,
 //! so every deploy read as total amnesia — the agent lost the thread it was
 //! mid-way through. the working tree already survived reloads because it was
-//! written through to opfs; the conversation now gets the same treatment.
+//! written through to opfs; the conversation gets the same treatment.
 //!
 //! storage layout (opfs, not localStorage: transcripts get large, and opfs
 //! is what the tree itself uses):
-//!   /transcript/messages.json  — the full message list, one line per message
-//!   /transcript/meta.json      — `{ "seq": n }`, bumped on every append
+//!   /vanish-transcript/index.json     — {active, items:[{id,title,updated,count}]}
+//!   /vanish-transcript/conv-<id>.json — that conversation's messages
+//!
+//! one file per conversation rather than one big blob: switching threads
+//! should not deserialize every thread you have ever had.
 //!
 //! every mutation is written through immediately, matching directive D2:
 //! nothing is held only in memory across a reload boundary.
 
+use serde::{Deserialize, Serialize};
+
 use super::opfs;
+use crate::agent::llm::Message;
 
 const DIR: &str = "vanish-transcript";
-const MESSAGES: &str = "messages.json";
-const META: &str = "meta.json";
+const INDEX: &str = "index.json";
+/// the pre-multi-conversation file. still read once, to migrate.
+const LEGACY_MESSAGES: &str = "messages.json";
 
 /// how much of a long conversation stays hot. everything older than this is
 /// dropped from the *stored* copy at save time — the model still sees it for
@@ -26,31 +33,136 @@ const META: &str = "meta.json";
 /// also what keeps a months-old thread from growing the request without
 /// bound forever.
 pub const KEEP_MESSAGES: usize = 200;
-/// hard cap on stored bytes; transcripts with enormous tool payloads are
-/// truncated here rather than being allowed to fill the disk silently.
+/// hard cap on stored bytes per conversation; transcripts with enormous tool
+/// payloads are truncated here rather than filling the disk silently.
 const MAX_BYTES: usize = 4_000_000;
 
 fn path(name: &str) -> String {
     format!("{DIR}/{name}")
 }
 
-/// load the saved conversation. an absent or corrupt file means "no history",
-/// never "fail": a fresh session is a valid state, and a torn write from a
+fn conv_path(id: &str) -> String {
+    path(&format!("conv-{id}.json"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMeta {
+    pub id: String,
+    pub title: String,
+    /// epoch millis of the last write.
+    pub updated: f64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Index {
+    pub active: String,
+    pub items: Vec<ConversationMeta>,
+}
+
+impl Index {
+    pub fn sorted(&self) -> Vec<ConversationMeta> {
+        let mut v = self.items.clone();
+        // most recently touched first: that is what the user is looking for.
+        v.sort_by(|a, b| b.updated.partial_cmp(&a.updated).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+}
+
+fn now() -> f64 {
+    js_sys::Date::now()
+}
+
+pub fn new_id() -> String {
+    // millisecond timestamps are unique enough for threads created by hand,
+    // and they sort chronologically as a bonus.
+    format!("{}", now() as u64)
+}
+
+/// first line of the first user message, which is what a person recognises a
+/// thread by. falls back to something neutral rather than an empty row.
+pub fn title_from(messages: &[Message]) -> String {
+    let raw = messages
+        .iter()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.clone())
+        .unwrap_or_default();
+    let line = raw.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if line.is_empty() {
+        return "new conversation".to_string();
+    }
+    const MAX: usize = 48;
+    if line.chars().count() <= MAX {
+        line.to_string()
+    } else {
+        format!("{}…", line.chars().take(MAX).collect::<String>())
+    }
+}
+
+pub async fn load_index() -> Index {
+    if let Ok(raw) = opfs::read(&path(INDEX)).await {
+        if let Ok(idx) = serde_json::from_str::<Index>(&raw) {
+            return idx;
+        }
+    }
+    // no index yet. if a pre-multi-conversation transcript exists, adopt it
+    // rather than orphaning the thread the user was in the middle of.
+    migrate_legacy().await
+}
+
+async fn migrate_legacy() -> Index {
+    let Ok(raw) = opfs::read(&path(LEGACY_MESSAGES)).await else {
+        return Index::default();
+    };
+    let messages: Vec<Message> = match serde_json::from_str(&raw) {
+        Ok(m) => m,
+        Err(_) => return Index::default(),
+    };
+    if messages.is_empty() {
+        return Index::default();
+    }
+
+    let id = new_id();
+    let meta = ConversationMeta {
+        title: title_from(&messages),
+        count: messages.len(),
+        updated: now(),
+        id: id.clone(),
+    };
+    let index = Index {
+        active: id.clone(),
+        items: vec![meta],
+    };
+
+    if opfs::write(&conv_path(&id), &raw).await.is_ok() {
+        let _ = save_index(&index).await;
+        // the legacy file has been copied; removing it prevents a second
+        // migration creating a duplicate thread on the next boot.
+        let _ = opfs::delete(&path(LEGACY_MESSAGES)).await;
+    }
+    index
+}
+
+pub async fn save_index(index: &Index) -> Result<(), String> {
+    let body = serde_json::to_string(index).map_err(|e| format!("serialize index: {e}"))?;
+    opfs::write(&path(INDEX), &body).await
+}
+
+/// load one conversation. an absent or corrupt file means "no history",
+/// never "fail": a fresh thread is a valid state, and a torn write from a
 /// crash must not brick boot.
-pub async fn load() -> Vec<crate::agent::llm::Message> {
-    let Ok(raw) = opfs::read(&path(MESSAGES)).await else {
+pub async fn load(id: &str) -> Vec<Message> {
+    let Ok(raw) = opfs::read(&conv_path(id)).await else {
         return Vec::new();
     };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-/// replace the whole stored conversation.
-///
-/// truncation happens here rather than in the caller so that both append and
-/// clear paths share the same budget rules.
-pub async fn save(messages: &[crate::agent::llm::Message]) -> Result<(), String> {
+/// replace one conversation's stored messages and refresh its index entry.
+pub async fn save(id: &str, messages: &[Message]) -> Result<(), String> {
     if messages.is_empty() {
-        return clear().await;
+        return Ok(());
     }
 
     // newest wins: keep the last KEEP_MESSAGES entries, then trim whole
@@ -58,35 +170,76 @@ pub async fn save(messages: &[crate::agent::llm::Message]) -> Result<(), String>
     // it alone).
     let start = messages.len().saturating_sub(KEEP_MESSAGES);
     let mut kept = &messages[start..];
-    let mut trimmed = start;
-    while serde_json::to_string(kept)
-        .map(|s| s.len())
-        .unwrap_or(0) > MAX_BYTES
-        && kept.len() > 1
-    {
+    while serde_json::to_string(kept).map(|s| s.len()).unwrap_or(0) > MAX_BYTES && kept.len() > 1 {
         kept = &kept[1..];
-        trimmed += 1;
     }
 
-    let body = serde_json::to_string_pretty(kept).map_err(|e| format!("serialize history: {e}"))?;
-    opfs::write(&path(MESSAGES), &body).await?;
+    let body = serde_json::to_string(kept).map_err(|e| format!("serialize history: {e}"))?;
+    opfs::write(&conv_path(id), &body).await?;
 
-    // the meta file doubles as a corruption canary: if messages.json is ever
-    // half-written (crash mid-write), meta.seq will disagree with reality on
-    // the next load and the caller can say so instead of guessing.
-    let seq = kept.len();
-    let meta = serde_json::json!({ "seq": seq });
-    opfs::write(&path(META), &meta.to_string()).await?;
-    Ok(())
+    let mut index = load_index().await;
+    let title = title_from(kept);
+    match index.items.iter_mut().find(|c| c.id == id) {
+        Some(existing) => {
+            existing.count = kept.len();
+            existing.updated = now();
+            // a thread named from its first prompt keeps that name; only a
+            // placeholder gets replaced once a real prompt exists.
+            if existing.title == "new conversation" {
+                existing.title = title;
+            }
+        }
+        None => index.items.push(ConversationMeta {
+            id: id.to_string(),
+            title,
+            updated: now(),
+            count: kept.len(),
+        }),
+    }
+    index.active = id.to_string();
+    save_index(&index).await
 }
 
-/// drop the stored conversation entirely.
-pub async fn clear() -> Result<(), String> {
-    match opfs::delete(&path(MESSAGES)).await {
-        Ok(()) => Ok(()),
+/// start a new empty thread and make it active.
+pub async fn create() -> Result<String, String> {
+    let id = new_id();
+    let mut index = load_index().await;
+    index.items.push(ConversationMeta {
+        id: id.clone(),
+        title: "new conversation".to_string(),
+        updated: now(),
+        count: 0,
+    });
+    index.active = id.clone();
+    save_index(&index).await?;
+    Ok(id)
+}
+
+/// drop one conversation. returns the id that should now be active.
+pub async fn delete(id: &str) -> Result<String, String> {
+    let mut index = load_index().await;
+    index.items.retain(|c| c.id != id);
+
+    match opfs::delete(&conv_path(id)).await {
+        Ok(()) => {}
         // browsers reject a missing removeEntry with NotFoundError; deleting
         // something already gone is success as far as callers care.
-        Err(e) if e.to_lowercase().contains("notfound") => Ok(()),
-        Err(e) => Err(e),
+        Err(e) if e.to_lowercase().contains("notfound") => {}
+        Err(e) => return Err(e),
     }
+
+    if index.active == id {
+        index.active = index.sorted().first().map(|c| c.id.clone()).unwrap_or_default();
+    }
+    save_index(&index).await?;
+    Ok(index.active.clone())
+}
+
+/// forget every conversation.
+pub async fn clear_all() -> Result<(), String> {
+    let index = load_index().await;
+    for c in &index.items {
+        let _ = opfs::delete(&conv_path(&c.id)).await;
+    }
+    save_index(&Index::default()).await
 }

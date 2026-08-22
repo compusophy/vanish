@@ -22,7 +22,7 @@ features = [
   "console",
   "Window", "Document", "Element", "HtmlElement", "HtmlTextAreaElement",
   "HtmlInputElement", "HtmlSelectElement", "Navigator", "Location",
-  "Event", "EventTarget", "MessageEvent", "KeyboardEvent", "CustomEvent",
+  "Event", "EventTarget", "MessageEvent", "KeyboardEvent", "CustomEvent", "NodeList",
   "Worker", "WorkerGlobalScope", "WorkerOptions", "WorkerType",
   "DedicatedWorkerGlobalScope",
   "Request", "RequestInit", "RequestMode", "Response", "Headers",
