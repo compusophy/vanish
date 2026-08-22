@@ -70,9 +70,11 @@ taskboard) asked for four things. all four are resolved:
 - [x] rail collapse buttons mirrored — both now sit on the middle-facing
       edge of their panel (left rail: trailing in header; right rail:
       leading). 778f294.
-- [ ] wire the file tree: clicking a path should open it in an editor pane
-      (`Command::ReadFile` and `Event::FileContent` already exist and work;
-      only the click handler and the editor element are missing).
+- [x] wire the file tree: clicking a path opens it in an editor pane
+      (f59e491). delegation on #tree survives re-renders; save writes through
+      Command::WriteFile; TreeChanged confirms. next iteration: a "commit"
+      button in the editor footer driving Command::Commit for the current
+      path set, and dirty-state highlighting of the open file.
 - [ ] settings persistence was hardened in 4480fc9 (serde defaults,
       corrupt-store recovery, boot write-back). verify after the next
       deploy that a plain reload no longer asks for save settings; if the

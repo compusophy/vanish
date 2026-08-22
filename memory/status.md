@@ -156,6 +156,17 @@
   field missing" report is answered fast: the fields were simply never added
   to the panel.
 
+## landed this run (loop mode: editor pane)
+
+- [x] **file tree → editor pane wired** (f59e491). the last missing piece of
+      the agent-inspecting-its-own-source loop from the ui. clicking a path
+      in the workspace tree sends Command::ReadFile; FileContent reveals an
+      editor pane between the rails and fills it; save goes through
+      Command::WriteFile and TreeChanged confirms ("saved to the working
+      tree — uncommitted"). delegation on #tree so the listener survives
+      re-renders. next iterations noted on the taskboard (per-file commit
+      button, dirty highlight of the open file).
+
 ## still open
 
 - [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,
