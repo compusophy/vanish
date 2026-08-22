@@ -258,22 +258,33 @@ fn handle(command: Command) {
                 // optional: absent is fine and not an error, but a token that
                 // is present and broken must be reported now rather than
                 // during the incident it exists to diagnose.
-                if !config.vercel_token.trim().is_empty() {
+                let vercel_ok = if config.vercel_token.trim().is_empty() {
+                    notes.push(
+                        "no vercel token (build failures will have no compiler output)".to_string(),
+                    );
+                    None
+                } else {
                     let v = crate::agent::vercel::Vercel::new(
                         &config.vercel_token,
                         &config.vercel_team_id,
+                        crate::agent::vercel::Vercel::project_from_repo(&config.repo),
                     );
                     match v.verify().await {
-                        Ok(msg) => notes.push(msg),
-                        Err(e) => notes.push(format!("vercel token unusable: {e}")),
+                        Ok(msg) => {
+                            notes.push(msg);
+                            Some(true)
+                        }
+                        Err(e) => {
+                            notes.push(format!("vercel token unusable: {e}"));
+                            Some(false)
+                        }
                     }
-                } else {
-                    notes.push("no vercel token (build failures will have no compiler output)".to_string());
-                }
+                };
 
                 emit(Event::ConfigStatus {
                     openrouter_ok,
                     github_ok,
+                    vercel_ok,
                     detail: notes.join(" · "),
                 });
             });

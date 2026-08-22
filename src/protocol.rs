@@ -85,6 +85,9 @@ pub enum Event {
     ConfigStatus {
         openrouter_ok: bool,
         github_ok: bool,
+        /// `None` when no vercel token is set — which is a valid state, not a
+        /// failure. `Some(false)` means one was set and does not work.
+        vercel_ok: Option<bool>,
         /// human-readable, and specific about which half failed and why.
         detail: String,
     },

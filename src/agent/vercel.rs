@@ -18,6 +18,9 @@ pub struct Vercel {
     token: String,
     /// team-scoped projects need this; personal accounts can leave it blank.
     team_id: String,
+    /// vercel project name, used to scope lookups. a token scoped to a single
+    /// project can only see that project, so every call must name it.
+    project: String,
 }
 
 pub struct Deployment {
@@ -27,11 +30,22 @@ pub struct Deployment {
 }
 
 impl Vercel {
-    pub fn new(token: impl Into<String>, team_id: impl Into<String>) -> Self {
+    pub fn new(
+        token: impl Into<String>,
+        team_id: impl Into<String>,
+        project: impl Into<String>,
+    ) -> Self {
         Self {
             token: token.into(),
             team_id: team_id.into(),
+            project: project.into(),
         }
+    }
+
+    /// vercel projects created from a repo take the repository's name, so
+    /// "owner/name" -> "name" is the right default and saves a settings field.
+    pub fn project_from_repo(repo: &str) -> String {
+        repo.rsplit('/').next().unwrap_or(repo).trim().to_string()
     }
 
     pub fn configured(&self) -> bool {
@@ -52,22 +66,52 @@ impl Vercel {
 
     /// verify the token works, so a bad one is reported at save time rather
     /// than discovered during an incident.
+    ///
+    /// this deliberately exercises the deployments endpoint — the same call
+    /// the build-log path depends on — rather than something like `/v2/user`.
+    /// a token scoped to a single project has no user scope and answers 404
+    /// there, so checking it would fail a token that is in fact perfectly
+    /// good for the one job it has.
     pub async fn verify(&self) -> Result<String, String> {
-        let resp = request("GET", &format!("{API}/v2/user"), &self.headers(), None).await?;
+        let url = format!(
+            "{API}/v6/deployments?limit=1&app={}{}",
+            self.project,
+            self.team_param()
+        );
+        let resp = request("GET", &url, &self.headers(), None).await?;
+
         if resp.status == 401 || resp.status == 403 {
-            return Err("vercel rejected this token".to_string());
+            return Err(format!(
+                "vercel rejected this token for project '{}'. check it is scoped to that project (or to the whole team).",
+                self.project
+            ));
+        }
+        if resp.status == 404 {
+            return Err(format!(
+                "vercel has no project named '{}' visible to this token. the project name is taken from the repository name; rename the repo field or the vercel project so they match.",
+                self.project
+            ));
         }
         if !resp.ok() {
             return Err(format!("vercel returned http {}", resp.status));
         }
+
         let v: serde_json::Value =
             serde_json::from_str(&resp.body).map_err(|e| format!("bad vercel response: {e}"))?;
-        let who = v
-            .get("user")
-            .and_then(|u| u.get("username"))
-            .and_then(|u| u.as_str())
-            .unwrap_or("ok");
-        Ok(format!("vercel ok ({who})"))
+        let seen = v
+            .get("deployments")
+            .and_then(|d| d.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        Ok(format!(
+            "vercel ok (build logs available for '{}'{})",
+            self.project,
+            if seen == 0 {
+                "; no deployments yet"
+            } else {
+                ""
+            }
+        ))
     }
 
     /// the deployment produced by a given commit.

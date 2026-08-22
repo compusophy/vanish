@@ -425,6 +425,66 @@ pub fn wire_conversation_rows(ui: &Shared) {
     }
 }
 
+// ---- settings-save throttle ------------------------------------------
+// verification makes three live api calls. a fast double-click fired three
+// more, and nothing stopped a held-down mouse from hammering openrouter,
+// github and vercel as fast as they answered.
+
+thread_local! {
+    /// epoch millis of the last accepted save, and whether one is in flight.
+    static LAST_SAVE: RefCell<(f64, bool)> = const { RefCell::new((0.0, false)) };
+}
+
+/// minimum gap between accepted saves. long enough to swallow a double
+/// click, short enough that a real correction is never blocked.
+const SAVE_COOLDOWN_MS: f64 = 3_000.0;
+
+/// returns false when this click should be ignored.
+fn begin_settings_check() -> bool {
+    let now = js_sys::Date::now();
+    let accepted = LAST_SAVE.with(|s| {
+        let (last, in_flight) = *s.borrow();
+        if in_flight || now - last < SAVE_COOLDOWN_MS {
+            return false;
+        }
+        *s.borrow_mut() = (now, true);
+        true
+    });
+
+    if accepted {
+        if let Some(btn) = by_id("cfg-save") {
+            let _ = btn.set_attribute("disabled", "true");
+            btn.set_text_content(Some("checking…"));
+        }
+        // last resort: if the worker never answers — it crashed, or a request
+        // hangs — re-arm anyway rather than stranding the user with a dead
+        // button and no way to retry.
+        let cb = Closure::<dyn FnMut()>::new(finish_settings_check);
+        if let Some(w) = web_sys::window() {
+            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                30_000,
+            );
+        }
+        cb.forget();
+    }
+    accepted
+}
+
+/// re-arm the button. called when verification reports back — and also on
+/// error paths, because a lock that only clears on success is a lock that
+/// eventually never clears.
+pub fn finish_settings_check() {
+    LAST_SAVE.with(|s| {
+        let last = s.borrow().0;
+        *s.borrow_mut() = (last, false);
+    });
+    if let Some(btn) = by_id("cfg-save") {
+        let _ = btn.remove_attribute("disabled");
+        btn.set_text_content(Some("save settings"));
+    }
+}
+
 /// send the worker its opening state. called from the `Ready` handler, never
 /// from boot, because before `Ready` the worker has no message listener and
 /// anything posted is dropped on the floor.
@@ -577,6 +637,11 @@ fn wire_controls(ui: &Shared) {
     {
         let ui = ui.clone();
         on_click("cfg-save", move || {
+            // each save costs three live api calls. swallow the second click
+            // of a double-click rather than tripling that.
+            if !begin_settings_check() {
+                return;
+            }
             let cfg = collect_settings();
             match save_config(&cfg) {
                 Ok(()) => {
@@ -588,7 +653,12 @@ fn wire_controls(ui: &Shared) {
                     // nothing the credential check is not about to say better.
                     feed::note("settings saved — checking credentials");
                 }
-                Err(e) => feed::error("settings", &e),
+                Err(e) => {
+                    // release the lock: a storage failure must not leave the
+                    // button disabled forever.
+                    finish_settings_check();
+                    feed::error("settings", &e);
+                }
             }
         });
     }

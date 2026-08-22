@@ -103,6 +103,7 @@ where
         Some(crate::agent::vercel::Vercel::new(
             &config.vercel_token,
             &config.vercel_team_id,
+            crate::agent::vercel::Vercel::project_from_repo(&config.repo),
         ))
     };
     let mut workspace = Workspace::with_vercel(github, vercel).await;

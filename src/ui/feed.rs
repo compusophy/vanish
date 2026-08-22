@@ -260,16 +260,30 @@ pub fn render(ui: &Shared, event: Event) {
         Event::ConfigStatus {
             openrouter_ok,
             github_ok,
+            vercel_ok,
             detail,
         } => {
-            let both = openrouter_ok && github_ok;
-            let card = create("div", if both { "commit-card" } else { "error-card" });
-            let title = create("div", if both { "" } else { "error-title" });
-            title.set_text_content(Some(if both {
-                "✓ credentials verified"
+            super::finish_settings_check();
+
+            let core = openrouter_ok && github_ok;
+            let vercel_broken = vercel_ok == Some(false);
+            // the header used to read "✓ credentials verified" while the line
+            // underneath said a token was unusable. say one thing.
+            let (class, heading) = if !core {
+                ("error-card", "⚠ credentials not usable")
+            } else if vercel_broken {
+                (
+                    "error-card",
+                    "⚠ core credentials fine — vercel token not usable",
+                )
             } else {
-                "⚠ credentials not usable"
-            }));
+                ("commit-card", "✓ credentials verified")
+            };
+
+            let both = core;
+            let card = create("div", class);
+            let title = create("div", if class == "error-card" { "error-title" } else { "" });
+            title.set_text_content(Some(heading));
             let body = create("div", "error-body");
             body.set_text_content(Some(&detail));
             let _ = card.append_child(&title);
@@ -392,7 +406,12 @@ pub fn render(ui: &Shared, event: Event) {
             super::update::apply_pending_if_any();
         }
 
-        Event::Error { scope, message } => error(&scope, &message),
+        Event::Error { scope, message } => {
+            // any failure path also re-arms the save button; a lock that only
+            // clears on success is one that eventually never clears.
+            super::finish_settings_check();
+            error(&scope, &message)
+        }
 
         Event::Tree { entries } => {
             let Some(tree) = by_id("tree") else { return };
