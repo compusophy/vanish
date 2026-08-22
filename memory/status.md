@@ -30,6 +30,10 @@
 
 ## verified live
 
+- researched compusophy/localharness via GitHub API + its llms.txt; full
+  notes in memory/notes/localharness.md (closest cousin project: one
+  Rust crate, wasm32, OPFS, self-sovereign agents).
+
 - all three web tools exercised successfully in one run: `web_search`
   (empty result for "latest stable version" style query — expected),
   `http_fetch` (correctly blocked by non-CORS site), `web_read` (full
