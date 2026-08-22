@@ -42,6 +42,25 @@
 - remaining options to run longer: upgrade vercel plan (pro = 300s real),
   or lower reasoning effort for more steps per second.
 
+## next run — user request (top priority)
+
+- [ ] **ota hot reload (mvp)** — add `/api/version` endpoint in lib/app.js
+      returning build id (git short sha); client polls every 30s in app.js;
+      on change → sparkle toast with changelog (recent_commits from
+      /api/status) + enforced `location.reload()` after short delay; defer
+      while `state.isAgentRunning`, apply when run ends.
+- [ ] **right-hand config panel** — `#config-panel` aside exists in
+      index.html (~lines 302–410) but `.config-panel` has NO css. style it
+      as flex sibling of `.content-viewport`: width var(--sidebar-w),
+      border-left, bg-sidebar, column flex; move account/sign-out into its
+      footer.
+- [ ] sparkle shimmer css for update toast + changelog list styling.
+- [ ] **infra decision needed (user):** repeated 60s hobby-tier kills lose
+      staged work mid-run. options: (a) vercel pro = 300s, zero code
+      change; (b) self-host on fly.io/railway/vps via existing server.js +
+      dockerfile — long-lived process, no wall, local mode tools work;
+      wasm is NOT the fix — the problem is function lifetime, not runtime.
+
 ## backlog
 
 - [ ] verify deaths.md gets written on next failure; if empty, logDeath is
