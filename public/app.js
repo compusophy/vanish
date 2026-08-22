@@ -753,6 +753,9 @@ document.addEventListener('DOMContentLoaded', () => {
               (r.build_log_tail
                 ? `<pre class="death-detail">${escapeHtml(r.build_log_tail)}</pre>`
                 : '') +
+              (r.inspector_url
+                ? `<div class="death-meta"><a href="${escapeHtml(r.inspector_url)}" target="_blank" rel="noopener">open build log on vercel</a></div>`
+                : '') +
               `<div class="death-meta">the agent has been told to fix this before anything else.</div>`;
             el.agentStepsFeed.appendChild(d);
             showToast('live deployment is failing — agent is on it');
@@ -786,6 +789,9 @@ document.addEventListener('DOMContentLoaded', () => {
               `<div class="death-reason">${escapeHtml(r.error_message || r.state || 'unknown')}</div>` +
               (r.build_log_tail
                 ? `<pre class="death-detail">${escapeHtml(r.build_log_tail)}</pre>`
+                : '') +
+              (r.inspector_url
+                ? `<div class="death-meta"><a href="${escapeHtml(r.inspector_url)}" target="_blank" rel="noopener">open build log on vercel</a></div>`
                 : '');
             showToast('deploy failed — error handed back to the agent');
           }
