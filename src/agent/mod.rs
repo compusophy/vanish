@@ -12,6 +12,7 @@ pub mod github;
 pub mod http;
 pub mod llm;
 pub mod tools;
+pub mod vercel;
 
 use crate::protocol::{Config, Event, FinishReason};
 use github::Github;
@@ -33,7 +34,10 @@ tools:
 - git_status to see what differs from github.
 - git_commit to publish every modified file as one atomic commit.
 - sync_repo to refresh the branch listing.
-- check_deployment to find out whether a commit actually built.
+- check_deployment to find out whether a commit actually built. when a vercel
+  token is configured it returns `build_log` — the real compiler output for a
+  failed build. read it; it names the file, line, and error. that is how you
+  repair your own broken commit instead of guessing.
 - http_fetch for any cors-enabled http endpoint; web_read to read an arbitrary
   public page as text via the r.jina.ai reader; web_search for duckduckgo
   lookups. you have live web access — when you are unsure about an api, a
@@ -93,7 +97,15 @@ where
         };
     }
 
-    let mut workspace = Workspace::new(github).await;
+    let vercel = if config.vercel_token.trim().is_empty() {
+        None
+    } else {
+        Some(crate::agent::vercel::Vercel::new(
+            &config.vercel_token,
+            &config.vercel_team_id,
+        ))
+    };
+    let mut workspace = Workspace::with_vercel(github, vercel).await;
     let tool_defs = tools::definitions();
 
     // seed the system prompt only when the conversation genuinely has none.

@@ -192,6 +192,12 @@ fn load_config() -> Config {
     if cfg.reasoning_effort.trim().is_empty() {
         cfg.reasoning_effort = "high".to_string();
     }
+    if cfg.vercel_team_id.trim().is_empty() {
+        // this project lives under a team, and a team-scoped deployment
+        // lookup returns nothing without it — which would look like "vercel
+        // has no record of your commit" rather than a missing setting.
+        cfg.vercel_team_id = "team_DYlw1hPeilK5o3w1uPWqt8Mi".to_string();
+    }
 
     // whatever reached this point — defaults, a stored config with gaps, or
     // the healing of a corrupt store — is what the ui is now showing. write
@@ -456,12 +462,16 @@ fn hydrate_settings(cfg: &Config) {
     if let Some(c) = by_id("cfg-loop").and_then(|e| e.dyn_into::<HtmlInputElement>().ok()) {
         c.set_checked(cfg.loop_mode);
     }
+    set_input("cfg-vercel-token", &cfg.vercel_token);
+    set_input("cfg-vercel-team", &cfg.vercel_team_id);
 }
 
 fn collect_settings() -> Config {
     Config {
         openrouter_key: input_value("cfg-key"),
         github_token: input_value("cfg-token"),
+        vercel_token: input_value("cfg-vercel-token").trim().to_string(),
+        vercel_team_id: input_value("cfg-vercel-team").trim().to_string(),
         repo: input_value("cfg-repo").trim().to_string(),
         branch: {
             let b = input_value("cfg-branch");

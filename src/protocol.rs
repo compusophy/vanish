@@ -62,6 +62,11 @@ pub struct Config {
     pub branch: String,
     pub model: String,
     pub reasoning_effort: String,
+    /// optional. without it the agent learns only THAT a build failed;
+    /// with it, it can read the compiler output and fix its own commit.
+    pub vercel_token: String,
+    /// only needed for team-scoped projects.
+    pub vercel_team_id: String,
     /// when true the loop never self-terminates; it runs until Stop.
     pub loop_mode: bool,
 }

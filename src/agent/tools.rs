@@ -12,6 +12,9 @@ use crate::platform::opfs::{self, Index, IndexEntry};
 
 pub struct Workspace {
     pub github: Github,
+    /// optional build-log reader. absent means check_deployment can report a
+    /// verdict but not a cause.
+    pub vercel: Option<crate::agent::vercel::Vercel>,
     pub index: Index,
     /// set by `task_complete`; the loop reads it to know the model is done.
     pub completed: Option<String>,
@@ -195,9 +198,17 @@ fn number_lines(content: &str, start: usize, end: usize) -> String {
 
 impl Workspace {
     pub async fn new(github: Github) -> Self {
+        Self::with_vercel(github, None).await
+    }
+
+    pub async fn with_vercel(
+        github: Github,
+        vercel: Option<crate::agent::vercel::Vercel>,
+    ) -> Self {
         let index = opfs::load_index().await;
         Self {
             github,
+            vercel,
             index,
             completed: None,
         }
@@ -524,6 +535,32 @@ impl Workspace {
                 }
 
                 let short: String = sha.chars().take(7).collect();
+
+                // a verdict without a cause is not actionable. when a vercel
+                // token is configured, pull the real build output so a failed
+                // commit can be repaired in the same run that broke it.
+                let mut build_log = serde_json::Value::Null;
+                if state.verdict == "failure" {
+                    build_log = match &self.vercel {
+                        None => serde_json::json!(
+                            "no vercel token configured, so the compiler output is unavailable — \
+                             only the pass/fail verdict. add one in settings to see why builds fail."
+                        ),
+                        Some(v) => match v.deployment_for_commit(&sha).await {
+                            Err(e) => serde_json::json!(format!("could not reach vercel: {e}")),
+                            Ok(None) => serde_json::json!(
+                                "vercel has no deployment recorded for this commit yet."
+                            ),
+                            Ok(Some(dep)) => match v.build_logs(&dep.id).await {
+                                Err(e) => serde_json::json!(format!("could not read build logs: {e}")),
+                                Ok(lines) => {
+                                    serde_json::json!(crate::agent::vercel::extract_errors(&lines))
+                                }
+                            },
+                        },
+                    };
+                }
+
                 let guidance = match state.verdict.as_str() {
                     "failure" => "the build FAILED. the live app is now serving the last good build, not your commit. open the check url for the compiler output, fix the cause, and commit the fix.",
                     "success" => "the build succeeded and this commit is live.",
@@ -535,6 +572,7 @@ impl Workspace {
                     "sha": short,
                     "verdict": state.verdict,
                     "checks": state.checks,
+                    "build_log": build_log,
                     "guidance": guidance,
                 })
                 .to_string())

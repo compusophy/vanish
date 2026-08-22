@@ -94,6 +94,21 @@
         </div>
 
         <div class="rail-section">
+          <div class="rail-label">build logs (optional)</div>
+          <p class="hint">
+            without this, the agent learns only <em>that</em> a build failed —
+            github's check carries no compiler output. with it, it reads the
+            actual error and can repair its own broken commit. create one at
+            vercel.com/account/tokens.
+          </p>
+          <label for="cfg-vercel-token">vercel token</label>
+          <input id="cfg-vercel-token" type="password" autocomplete="off" placeholder="optional" />
+
+          <label for="cfg-vercel-team">vercel team id</label>
+          <input id="cfg-vercel-team" type="text" placeholder="team_… (only for team projects)" />
+        </div>
+
+        <div class="rail-section">
           <div class="rail-label">model</div>
           <label for="cfg-model">model id</label>
           <input id="cfg-model" type="text" placeholder="stealth/ox-alpha" />
