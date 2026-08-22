@@ -72,8 +72,13 @@ taskboard) asked for four things. all four are resolved:
       only the click handler and the editor element are missing).
 - [ ] conversation threads — the old client had multiple persisted threads.
       the rust client currently keeps one history in the worker.
-- [ ] persist conversation history to opfs so a reload does not lose the
-      thread (the working tree already survives; the transcript does not).
+- [x] persist conversation history to opfs so a reload does not lose the
+      thread — done: `src/platform/transcript.rs`, `Event::HistoryRestored`
+      replay on boot, retention cap (200 messages / 4MB), clear-conversation
+      button. ota reloads are now non-destructive.
+- [ ] save the transcript after each step, not just at run end, so even
+      "update now anyway" clicked mid-run loses nothing. transcript.rs is
+      the place; worker.rs Run handler calls save() once today.
 - [ ] `sync_repo` only refreshes the tree listing; it does not yet reconcile
       upstream changes against dirty local files.
 - [ ] wasm64 is a one-line target change once `wasm64-unknown-unknown` leaves

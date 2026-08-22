@@ -3,7 +3,7 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed this run (web access + self-improvement directive)
+## landed in an earlier run (web access + self-improvement directive)
 
 - [x] `src/agent/tools.rs`: three new tools wired to the existing fetch
       client in `src/agent/http.rs`:
@@ -38,6 +38,41 @@
   (empty result for "latest stable version" style query — expected),
   `http_fetch` (correctly blocked by non-CORS site), `web_read` (full
   markdown of rust-lang.org). pipeline is healthy end to end.
+
+## landed this run (durable conversation history)
+
+- [x] **transcript persistence** — `src/platform/transcript.rs` (new). the
+      full `Vec<Message>` is written through to opfs (`vanish-transcript/
+      messages.json`) after every run; retention keeps the last 200 messages
+      under a 4MB cap. previously the transcript lived only in worker memory
+      + the dom, so every ota reload read as total amnesia.
+- [x] **boot replay** — `boot_worker` loads the saved conversation into live
+      state (the model sees it as context again) and emits the new
+      `Event::HistoryRestored`; `feed.rs` renders user/assistant turns behind
+      a "↩ restored from the previous session" divider, collapsing tool calls
+      into one-line summaries.
+- [x] **system-prompt seeding fixed** — the loop now inserts the prompt when
+      no system role exists rather than when history is empty, so a restored
+      transcript whose prompt aged out of retention still gets instructions.
+- [x] **clear conversation** — `Command::ClearHistory` + a button in the
+      right rail. memory clears first, disk second, ui wipes on confirmation.
+- [x] **ota "later" button** — dismiss records the declined sha in
+      localStorage (`vanish.ota.declined`); the poll stops re-nagging until
+      a newer commit lands.
+- [x] build.rs already stamps VANISH_BUILD from VERCEL_GIT_COMMIT_SHA first —
+      an ls-remote stamp in build.sh was tried and reverted as redundant.
+
+## what was learned this run
+
+- "live reconfiguration without refresh" is not possible for wasm: a loaded
+  module cannot be replaced in place while the page holds it. the honest fix
+  is making the reload non-destructive instead — persistence converts a data
+  loss event into a non-event.
+- the subtle bug class here: replaying history to the *ui* without loading it
+  into the *worker's* state would show context the model cannot see. restore
+  must land in both places.
+- edit_file's ambiguity refusal also fires after your own previous edit made
+  the target stale — re-read before retrying, same as tool rule 4.
 
 ## still open
 
