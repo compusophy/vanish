@@ -70,6 +70,11 @@ taskboard) asked for four things. all four are resolved:
 - [ ] wire the file tree: clicking a path should open it in an editor pane
       (`Command::ReadFile` and `Event::FileContent` already exist and work;
       only the click handler and the editor element are missing).
+- [ ] settings persistence was hardened in 4480fc9 (serde defaults,
+      corrupt-store recovery, boot write-back). verify after the next
+      deploy that a plain reload no longer asks for save settings; if the
+      user still sees the symptom, the next suspect is the deploy pipeline
+      serving a stale pkg/ against fresh html.
 - [ ] conversation threads — the old client had multiple persisted threads.
       the rust client currently keeps one history in the worker.
 - [x] persist conversation history to opfs so a reload does not lose the

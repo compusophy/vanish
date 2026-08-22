@@ -74,6 +74,32 @@
 - edit_file's ambiguity refusal also fires after your own previous edit made
   the target stale — re-read before retrying, same as tool rule 4.
 
+## landed this run (settings persistence)
+
+- [x] **settings survive reloads without pressing save** — three fixes in
+      4480fc9:
+      1. `protocol.rs` `Config` has `#[serde(default)]` — shape drift
+         between builds no longer silently discards the whole stored
+         config (the likely cause of the reported symptom).
+      2. `ui/mod.rs` `load_config` distinguishes fresh/stored/corrupt; a
+         corrupt store renders an error card and parks the raw json under
+         `vanish.config.corrupt` instead of being overwritten.
+      3. the merged config is written back to localStorage at boot, so
+         defaults filled in at load persist and reloads read exactly what
+         the panel shows.
+- [x] `ui/feed.rs`: `append_error` / `append_card` for boot-time failures
+      with no run context (D4).
+
+## what was learned this run
+
+- the user's symptom ("fields look remembered but i must hit save") had a
+  two-layer explanation: browser password autofill fills the inputs while
+  our own load had discarded the stored config. the visible state and the
+  loaded state can disagree; hydrate-from-storage must be total or loud.
+- edit_file consumed a function signature once because the replacement
+  text omitted it — re-read after every multi-line edit, not just after
+  failures.
+
 ## still open
 
 - [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,
