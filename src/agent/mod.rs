@@ -12,7 +12,6 @@ pub mod github;
 pub mod http;
 pub mod llm;
 pub mod tools;
-pub mod vercel;
 
 use crate::protocol::{Config, Event, FinishReason};
 use github::Github;
@@ -34,10 +33,7 @@ tools:
 - git_status to see what differs from github.
 - git_commit to publish every modified file as one atomic commit.
 - sync_repo to refresh the branch listing.
-- check_deployment to find out whether a commit actually built. when a vercel
-  token is configured it returns `build_log` — the real compiler output for a
-  failed build. read it; it names the file, line, and error. that is how you
-  repair your own broken commit instead of guessing.
+- check_deployment to find out whether a commit actually built.
 - http_fetch for any cors-enabled http endpoint; web_read to read an arbitrary
   public page as text via the r.jina.ai reader; web_search for duckduckgo
   lookups. you have live web access — when you are unsure about an api, a
@@ -71,16 +67,23 @@ pub struct RunOutcome {
 ///
 /// `emit` publishes progress to the ui, `stopped` is polled cooperatively so
 /// a stop request lands within one chunk rather than at the end of a turn.
-pub async fn run<E, S>(
+pub async fn run<E, S, P>(
     config: &Config,
     prompt: &str,
     history: &mut Vec<Message>,
     emit: E,
     stopped: S,
+    persist: P,
 ) -> RunOutcome
 where
     E: Fn(Event),
     S: Fn() -> bool + Copy,
+    /// called with the history every time it has grown by a durable unit.
+    /// the worker uses this to checkpoint the conversation to disk mid-run;
+    /// without it a reload (ota, crash, stray f5) destroys every step taken
+    /// since the run began, because the worker dies with the page and the
+    /// only previous save happened before the run started.
+    P: Fn(&[Message]),
 {
     let github = Github::new(&config.github_token, &config.repo, &config.branch);
 
@@ -97,16 +100,7 @@ where
         };
     }
 
-    let vercel = if config.vercel_token.trim().is_empty() {
-        None
-    } else {
-        Some(crate::agent::vercel::Vercel::new(
-            &config.vercel_token,
-            &config.vercel_team_id,
-            crate::agent::vercel::Vercel::project_from_repo(&config.repo),
-        ))
-    };
-    let mut workspace = Workspace::with_vercel(github, vercel).await;
+    let mut workspace = Workspace::new(github).await;
     let tool_defs = tools::definitions();
 
     // seed the system prompt only when the conversation genuinely has none.
@@ -119,6 +113,9 @@ where
     }
     if !prompt.is_empty() {
         history.push(Message::user(prompt));
+        persist(history);
+        // the user's prompt is durable before the first model call, so even
+        // a reload during it leaves a record that the run was asked for.
     }
 
     let mut step = 0u32;
@@ -201,6 +198,7 @@ where
                 history.push(Message::user(
                     "continue. if the task is genuinely finished, call task_complete.",
                 ));
+                persist(history);
                 continue;
             }
             return RunOutcome {
@@ -239,6 +237,11 @@ where
 
             history.push(Message::tool_result(call.id.clone(), payload));
 
+            // one tool result is a durable unit of work: persist it before
+            // the next call starts, so the loop can be killed at any step
+            // boundary without losing what it already did.
+            persist(history);
+
             if call.function.name == "git_commit" && ok {
                 emit(Event::TreeChanged {
                     dirty: workspace.dirty(),
@@ -256,6 +259,7 @@ where
                 history.push(Message::user(
                     "task_complete acknowledged. loop mode is on: find the next most valuable improvement and continue.",
                 ));
+                persist(history);
                 continue;
             }
             emit(Event::Content {

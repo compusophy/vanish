@@ -255,36 +255,9 @@ fn handle(command: Command) {
                     }
                 };
 
-                // optional: absent is fine and not an error, but a token that
-                // is present and broken must be reported now rather than
-                // during the incident it exists to diagnose.
-                let vercel_ok = if config.vercel_token.trim().is_empty() {
-                    notes.push(
-                        "no vercel token (build failures will have no compiler output)".to_string(),
-                    );
-                    None
-                } else {
-                    let v = crate::agent::vercel::Vercel::new(
-                        &config.vercel_token,
-                        &config.vercel_team_id,
-                        crate::agent::vercel::Vercel::project_from_repo(&config.repo),
-                    );
-                    match v.verify().await {
-                        Ok(msg) => {
-                            notes.push(msg);
-                            Some(true)
-                        }
-                        Err(e) => {
-                            notes.push(format!("vercel token unusable: {e}"));
-                            Some(false)
-                        }
-                    }
-                };
-
                 emit(Event::ConfigStatus {
                     openrouter_ok,
                     github_ok,
-                    vercel_ok,
                     detail: notes.join(" · "),
                 });
             });
@@ -334,12 +307,64 @@ fn handle(command: Command) {
             wasm_bindgen_futures::spawn_local(async move {
                 let mut history = STATE.with(|s| s.borrow().history.clone());
 
+                // mid-run checkpoints. the loop persists after every durable
+                // unit (the prompt, each tool result), so a reload — ota or
+                // manual — or a crash costs at most the step in flight, not
+                // the whole run.
+                //
+                // the writes are serialized through a single drain queue: a
+                // checkpoint arriving while a write is in flight parks its
+                // snapshot in `pending`, and the one writer task drains the
+                // queue in order. without this, two overlapping opfs writes
+                // could complete out of order and an older history would
+                // land after a newer one.
+                let queue: Rc<RefCell<(Option<Vec<Message>>, bool)>> =
+                    Rc::new(RefCell::new((None, false)));
+
+                let persist = {
+                    let queue = queue.clone();
+                    let conversation = STATE.with(|s| s.borrow().conversation.clone());
+                    move |messages: &[Message]| {
+                        let snapshot: Vec<Message> = messages.to_vec();
+                        let mut q = queue.borrow_mut();
+                        if q.1 {
+                            // a write is in flight; the writer will pick
+                            // this snapshot up after the current one.
+                            q.0 = Some(snapshot);
+                            return;
+                        }
+                        q.1 = true;
+                        q.0 = Some(snapshot);
+                        drop(q);
+                        let queue = queue.clone();
+                        let conversation = conversation.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            loop {
+                                let snapshot = queue.borrow_mut().0.take();
+                                match snapshot {
+                                    Some(s) => {
+                                        let _ = crate::platform::transcript::save(
+                                            &conversation, &s,
+                                        )
+                                        .await;
+                                    }
+                                    None => {
+                                        queue.borrow_mut().1 = false;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                };
+
                 let outcome = crate::agent::run(
                     &config,
                     &prompt,
                     &mut history,
                     emit,
                     || STATE.with(|s| s.borrow().stop_requested),
+                    persist,
                 )
                 .await;
 
@@ -353,6 +378,21 @@ fn handle(command: Command) {
                 // flush the updated conversation to opfs *before* reporting
                 // the run finished. if the page reloads the moment this card
                 // renders, nothing is lost.
+                //
+                // first, let any in-flight checkpoint finish: the queue's
+                // writer task runs on the same microtask queue, so yielding
+                // on a resolved promise lets it drain. skipping this wait
+                // would allow a slower older snapshot to land after — and
+                // overwrite — this authoritative final save.
+                while *queue.borrow() != (None, false) {
+                    let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
+                        &mut |resolve, _reject| {
+                            let _ = resolve.call0(&JsValue::NULL);
+                        },
+                    ))
+                    .await;
+                }
+
                 let (saved, conversation) =
                     STATE.with(|s| (s.borrow().history.clone(), s.borrow().conversation.clone()));
                 let save_result = crate::platform::transcript::save(&conversation, &saved).await;
