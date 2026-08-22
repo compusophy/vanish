@@ -1,12 +1,19 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "api/index.js": {
-      "maxDuration": 300,
-      "memory": 1024
+  "framework": null,
+  "buildCommand": "bash ./build.sh",
+  "outputDirectory": "web",
+  "installCommand": "echo 'no package install: this project has no javascript dependencies'",
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, max-age=0, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/pkg/(.*)\\.wasm",
+      "headers": [{ "key": "Content-Type", "value": "application/wasm" }]
     }
-  },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" }
   ]
 }

@@ -1,0 +1,12 @@
+# build artefacts and toolchain state must never be uploaded: target/ alone
+# is hundreds of megabytes and is rebuilt in the build container anyway.
+target
+.rustup
+.cargo-home
+.bin
+web/pkg
+
+node_modules
+.git
+.claude
+memory

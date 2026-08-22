@@ -30,3 +30,7 @@ test-stream.js
 
 # local server log
 vanish-server.log
+
+# rust / wasm
+/target
+/web/pkg

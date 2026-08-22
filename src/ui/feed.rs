@@ -1,0 +1,267 @@
+//! rendering the run as it happens.
+//!
+//! every event has a visible outcome. the previous client swallowed several
+//! failure paths in empty catch blocks, which is how it shipped a dropdown
+//! that looked fine and did nothing — so here, an error always draws.
+
+use std::cell::RefCell;
+
+use wasm_bindgen::JsCast;
+use web_sys::Element;
+
+use super::{by_id, create, doc, Shared};
+use crate::protocol::{Event, FinishReason};
+
+thread_local! {
+    /// the card the current step is streaming into, so deltas append to one
+    /// element instead of creating thousands of nodes.
+    static ACTIVE: RefCell<Option<Element>> = const { RefCell::new(None) };
+    static ACTIVE_REASONING: RefCell<Option<Element>> = const { RefCell::new(None) };
+    static ACTIVE_CONTENT: RefCell<Option<Element>> = const { RefCell::new(None) };
+}
+
+fn feed_root() -> Option<Element> {
+    by_id("feed")
+}
+
+fn append(node: &Element) {
+    if let Some(feed) = feed_root() {
+        let _ = feed.append_child(node);
+        scroll_to_bottom();
+    }
+}
+
+fn scroll_to_bottom() {
+    if let Some(feed) = feed_root() {
+        feed.set_scroll_top(feed.scroll_height());
+    }
+}
+
+fn set_status(text: &str, running: bool) {
+    if let Some(s) = by_id("status") {
+        s.set_text_content(Some(text));
+        s.set_class_name(if running { "status running" } else { "status" });
+    }
+    if let (Some(run), Some(stop)) = (by_id("run"), by_id("stop")) {
+        let _ = run.set_attribute("style", if running { "display:none" } else { "" });
+        let _ = stop.set_attribute("style", if running { "" } else { "display:none" });
+    }
+}
+
+pub fn user_message(text: &str) {
+    let card = create("div", "msg user");
+    let label = create("div", "msg-label");
+    label.set_text_content(Some("you"));
+    let body = create("div", "msg-body");
+    body.set_text_content(Some(text));
+    let _ = card.append_child(&label);
+    let _ = card.append_child(&body);
+    append(&card);
+}
+
+pub fn note(text: &str) {
+    let n = create("div", "note");
+    n.set_text_content(Some(text));
+    append(&n);
+}
+
+pub fn error(scope: &str, message: &str) {
+    let card = create("div", "error-card");
+    let title = create("div", "error-title");
+    title.set_text_content(Some(&format!("⚠ {scope} error")));
+    let body = create("div", "error-body");
+    body.set_text_content(Some(message));
+    let _ = card.append_child(&title);
+    let _ = card.append_child(&body);
+    append(&card);
+    set_status("error", false);
+}
+
+/// lazily create the streaming target for the current step.
+fn stream_target(kind: &str) -> Option<Element> {
+    let cell = if kind == "reasoning" {
+        &ACTIVE_REASONING
+    } else {
+        &ACTIVE_CONTENT
+    };
+
+    cell.with(|c| {
+        if let Some(e) = c.borrow().as_ref() {
+            return Some(e.clone());
+        }
+        let parent = ACTIVE.with(|a| a.borrow().clone())?;
+        let block = create(
+            "div",
+            if kind == "reasoning" {
+                "stream reasoning"
+            } else {
+                "stream content"
+            },
+        );
+        if kind == "reasoning" {
+            let label = create("div", "stream-label");
+            label.set_text_content(Some("thinking"));
+            let _ = block.append_child(&label);
+        }
+        let text = create("div", "stream-text");
+        let _ = block.append_child(&text);
+        let _ = parent.append_child(&block);
+        *c.borrow_mut() = Some(text.clone());
+        Some(text)
+    })
+}
+
+fn append_delta(kind: &str, delta: &str) {
+    if let Some(target) = stream_target(kind) {
+        let existing = target.text_content().unwrap_or_default();
+        target.set_text_content(Some(&format!("{existing}{delta}")));
+        scroll_to_bottom();
+    }
+}
+
+pub fn render(ui: &Shared, event: Event) {
+    match event {
+        Event::Ready { build } => {
+            ui.borrow_mut().build = build.clone();
+            if let Some(b) = by_id("build-id") {
+                b.set_text_content(Some(&format!("build {build}")));
+            }
+            set_status("ready", false);
+        }
+
+        Event::RunStarted { model, .. } => {
+            ui.borrow_mut().running = true;
+            set_status(&format!("running · {model}"), true);
+        }
+
+        Event::StepStarted { step } => {
+            // close out the previous step's streaming targets
+            ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
+            ACTIVE_CONTENT.with(|c| *c.borrow_mut() = None);
+
+            let card = create("div", "step");
+            let head = create("div", "step-head");
+            head.set_text_content(Some(&format!("step {step}")));
+            let _ = card.append_child(&head);
+            append(&card);
+            ACTIVE.with(|a| *a.borrow_mut() = Some(card));
+        }
+
+        Event::Reasoning { delta } => append_delta("reasoning", &delta),
+        Event::Content { delta } => append_delta("content", &delta),
+
+        Event::ToolStarted { id, name, args } => {
+            let Some(parent) = ACTIVE.with(|a| a.borrow().clone()) else {
+                return;
+            };
+            let card = create("div", "tool pending");
+            let _ = card.set_attribute("data-tool-id", &id);
+            let head = create("div", "tool-head");
+            head.set_text_content(Some(&format!("⚡ {name}")));
+            let argline = create("pre", "tool-args");
+            argline.set_text_content(Some(&truncate(&args, 400)));
+            let _ = card.append_child(&head);
+            let _ = card.append_child(&argline);
+            let _ = parent.append_child(&card);
+            scroll_to_bottom();
+        }
+
+        Event::ToolFinished {
+            id, ok, result, ..
+        } => {
+            let selector = format!("[data-tool-id=\"{id}\"]");
+            let Ok(Some(card)) = doc().query_selector(&selector) else {
+                return;
+            };
+            card.set_class_name(if ok { "tool ok" } else { "tool failed" });
+            let out = create("pre", "tool-result");
+            out.set_text_content(Some(&truncate(&result, 1200)));
+            let _ = card.append_child(&out);
+            scroll_to_bottom();
+        }
+
+        Event::TreeChanged { dirty } => {
+            if let Some(badge) = by_id("dirty-count") {
+                badge.set_text_content(Some(&dirty.len().to_string()));
+                let _ = badge.set_attribute(
+                    "style",
+                    if dirty.is_empty() { "display:none" } else { "" },
+                );
+            }
+            if let Some(list) = by_id("dirty-list") {
+                list.set_inner_html("");
+                for path in &dirty {
+                    let row = create("div", "dirty-row");
+                    row.set_text_content(Some(path));
+                    let _ = list.append_child(&row);
+                }
+            }
+        }
+
+        Event::Committed {
+            sha,
+            message,
+            files,
+        } => {
+            let card = create("div", "commit-card");
+            card.set_text_content(Some(&format!(
+                "✓ committed {sha} — {files} file(s): {message}"
+            )));
+            append(&card);
+        }
+
+        Event::RunFinished { steps, reason } => {
+            ui.borrow_mut().running = false;
+            ACTIVE.with(|a| *a.borrow_mut() = None);
+            ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
+            ACTIVE_CONTENT.with(|c| *c.borrow_mut() = None);
+
+            let label = match reason {
+                FinishReason::Completed => "completed",
+                FinishReason::Stopped => "stopped",
+                FinishReason::StepLimit => "hit the step ceiling",
+                FinishReason::Failed => "failed",
+            };
+            let card = create("div", "note finish");
+            card.set_text_content(Some(&format!("run {label} after {steps} step(s)")));
+            append(&card);
+            set_status(label, false);
+
+            // an update that arrived mid-run was held back so it could not
+            // cut the run off. it is safe to apply now.
+            super::update::apply_pending_if_any();
+        }
+
+        Event::Error { scope, message } => error(&scope, &message),
+
+        Event::Tree { entries } => {
+            let Some(tree) = by_id("tree") else { return };
+            tree.set_inner_html("");
+            for e in entries.iter().filter(|e| !e.is_dir) {
+                let row = create("div", if e.dirty { "file dirty" } else { "file" });
+                row.set_text_content(Some(&e.path));
+                let _ = tree.append_child(&row);
+            }
+        }
+
+        Event::FileContent { path, content } => {
+            if let Some(ed) = by_id("editor").and_then(|e| {
+                e.dyn_into::<web_sys::HtmlTextAreaElement>().ok()
+            }) {
+                ed.set_value(&content);
+            }
+            if let Some(name) = by_id("editor-path") {
+                name.set_text_content(Some(&path));
+            }
+        }
+    }
+}
+
+/// keep one runaway tool result from making the page unusable.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}\n… truncated ({} chars total)", s.chars().count())
+}

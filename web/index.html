@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>vanish</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- left: workspace -->
+      <aside class="rail rail-left">
+        <div class="rail-head">
+          <span class="glyph">vα</span>
+          <div>
+            <div class="rail-title">vanish</div>
+            <div class="rail-sub" id="build-id">booting…</div>
+          </div>
+        </div>
+
+        <div class="rail-section">
+          <div class="rail-label">
+            uncommitted <span class="badge" id="dirty-count" style="display: none">0</span>
+          </div>
+          <div id="dirty-list" class="dirty-list"></div>
+        </div>
+
+        <div class="rail-section grow">
+          <div class="rail-label">workspace files</div>
+          <div id="tree" class="tree"></div>
+        </div>
+      </aside>
+
+      <!-- centre: the run -->
+      <main class="main">
+        <div id="feed" class="feed"></div>
+
+        <div class="dock">
+          <div class="dock-status">
+            <span id="status" class="status">booting…</span>
+          </div>
+          <div class="dock-row">
+            <textarea
+              id="prompt"
+              rows="1"
+              placeholder="give vanish a goal… (enter to run, shift+enter for a newline)"
+            ></textarea>
+            <button id="run" class="btn primary">run</button>
+            <button id="stop" class="btn danger" style="display: none">stop</button>
+          </div>
+        </div>
+      </main>
+
+      <!-- right: configuration -->
+      <aside class="rail rail-right">
+        <div class="rail-head">
+          <span class="glyph cfg">⚙</span>
+          <div>
+            <div class="rail-title">harness</div>
+            <div class="rail-sub">configuration</div>
+          </div>
+        </div>
+
+        <div class="rail-section">
+          <div class="rail-label">credentials</div>
+          <p class="hint">
+            stored in this browser only. there is no server holding them —
+            treat them like saved passwords and rotate if the machine is shared.
+          </p>
+          <label for="cfg-key">openrouter api key</label>
+          <input id="cfg-key" type="password" autocomplete="off" placeholder="sk-or-…" />
+
+          <label for="cfg-token">github token</label>
+          <input id="cfg-token" type="password" autocomplete="off" placeholder="github_pat_…" />
+
+          <label for="cfg-repo">repository</label>
+          <input id="cfg-repo" type="text" placeholder="owner/name" />
+
+          <label for="cfg-branch">branch</label>
+          <input id="cfg-branch" type="text" placeholder="main" />
+        </div>
+
+        <div class="rail-section">
+          <div class="rail-label">model</div>
+          <label for="cfg-model">model id</label>
+          <input id="cfg-model" type="text" placeholder="stealth/ox-alpha" />
+
+          <label for="cfg-effort">reasoning effort</label>
+          <select id="cfg-effort">
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+            <option value="none">none</option>
+          </select>
+
+          <label class="toggle">
+            <input id="cfg-loop" type="checkbox" />
+            <span>∞ loop mode — run until stopped</span>
+          </label>
+
+          <button id="cfg-save" class="btn">save settings</button>
+        </div>
+
+        <div class="rail-section">
+          <div class="rail-label">manual commit</div>
+          <input id="commit-msg" type="text" placeholder="commit message…" />
+          <button id="commit" class="btn">commit working tree</button>
+        </div>
+      </aside>
+    </div>
+
+    <!--
+      the only hand-written javascript in the project: load the wasm module
+      and hand it the worker url. everything else — dom, state, networking,
+      the agent loop — is rust.
+    -->
+    <script type="module">
+      import init, { boot_ui } from "./pkg/vanish.js";
+      await init();
+      boot_ui(new URL("./worker.js", import.meta.url).href);
+    </script>
+  </body>
+</html>

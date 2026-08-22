@@ -1,58 +1,62 @@
-# vanish task board — persistent project management
+# vanish task board
 
-> this file is the single source of truth for standing directives and open
-> work. the agent MUST read it at the start of every run and MUST update it
-> at the end. user feedback lands here ONCE and stays honored forever.
+> standing directives and open work. read at the start of a run, update at
+> the end. user feedback lands here once and stays honored.
 
-## standing directives (permanent — never regress these)
+## the architecture (as of the rust/wasm rebuild)
 
-- [ ] **D1 — default max autonomy steps = 20.** asked THREE times by the
-      user; shipped as 8 twice. now set to 20 in: sidebar slider default,
-      client state config, server-side fallback. never ship a lower
-      default again.
-- [ ] **D2 — steps are a BUDGET, not a target.** tasks are dynamic: simple
-      tasks finish in few steps, hard ones take many. slider caps at 100.
-      keepGoing = verify-before-finishing, not burning the full count.
-- [ ] **D3 — loop mode: agents run until HUMAN intervention.** a looping
-      agent never self-terminates; only the stop button / abort ends it.
-      maxSteps does not apply in loop mode.
-- [ ] **D4 — multi-agent parallelism with separate chat threads.** this is
-      agent management, not a single input/output pipe: distinct named
-      conversations (threads) per agent/workflow, switchable without
-      losing history. phase 1 landed; true parallel runs next.
-- [ ] **D5 — feedback & error capture.** failures must be recorded with
-      enough context to fix exactly what failed (expected vs actual),
-      not rediscovered from scratch each run.
+vanish is a single rust crate compiled to wasm and loaded twice in the
+browser: `boot_ui()` on the main thread (dom only) and `boot_worker()` in a
+web worker (the agent loop, the working tree, all networking). they speak
+`src/protocol.rs` and nothing else. **there is no server and no serverless
+function.** vercel is a static host for `web/`, nothing more.
 
-## in progress this run
+see ARCHITECTURE.md for the full map and for why the previous design failed.
 
-- [x] D1 applied: defaults = 20 everywhere (slider, client, server).
-- [x] D2 applied: slider max 20 → 100; keepGoing reworked from "burn full
-      budget" to ≤2 verification nudges then dynamic finish.
-- [x] D3 applied: `loopMode` added — ignores maxSteps, refuses every early
-      finish with a "pick next most valuable action" instruction, ends only
-      on human abort. UI: "∞ loop" toggle beside "keep going".
-- [x] D4 phase 1: persistent named chat threads (localStorage), thread
-      switcher select in dock header, "new chat" spawns a fresh thread and
-      preserves old ones.
-- [x] D5 phase 1: this board + memory/status.md carry expectations vs
-      results forward.
+## standing directives — never regress these
 
-## backlog
+- **D1 — no deadlines in the loop.** the old harness hard-killed runs at 52s
+  (`RUN_HARD_DEADLINE_MS`) and blamed the platform. a worker has no request
+  and no time limit. never reintroduce clock-watching, wrap-up injection, or
+  "time budget" logic. a run ends when the task is done, the step ceiling is
+  hit, or the user stops it.
+- **D2 — never hold work only in memory.** every file write goes through
+  `src/platform/opfs.rs` immediately. the old `staged: new Map()` was
+  per-request and lost everything on an early exit. "uncommitted" means bytes
+  on disk that differ from the last synced github blob.
+- **D3 — no javascript beyond the two boot files.** `web/index.html` and
+  `web/worker.js` contain 8 lines of hand-written js between them. everything
+  else is rust. `web/pkg/` is wasm-bindgen output and is never edited by hand.
+- **D4 — surface every failure.** a silent catch is what shipped a dropdown
+  that looked fine and did nothing. errors render; missing dom ids are
+  reported loudly, not skipped.
+- **D5 — steps are a budget, not a target.** simple tasks end fast, hard ones
+  run long. `MAX_STEPS` is a runaway backstop, not a goal.
+- **D6 — lowercase throughout the ui.**
 
-- [ ] D5 phase 2: memory/errors.md append-only error ledger (attempted /
-      expected / actual / root cause / fix / verification). agent reviews
-      tail before similar work.
-- [ ] D4 phase 2: true parallel agent runs — multiple simultaneous SSE
-      loops from the ui, one per thread, per-thread live feeds.
-- [ ] D4 phase 3: agent-to-agent delegation (a tool call that spawns a
-      sub-run with its own thread and returns a summary).
-- [ ] loop guardrails: wall-clock cap + periodic non-blocking human
-      checkpoint notifications (never auto-stop).
+## open work
 
-## rules (unchanged)
+- [ ] wire the file tree: clicking a path should open it in an editor pane
+      (`Command::ReadFile` and `Event::FileContent` already exist and work;
+      only the click handler and the editor element are missing).
+- [ ] conversation threads — the old client had multiple persisted threads.
+      the rust client currently keeps one history in the worker.
+- [ ] persist conversation history to opfs so a reload does not lose the
+      thread (the working tree already survives; the transcript does not).
+- [ ] `sync_repo` only refreshes the tree listing; it does not yet reconcile
+      upstream changes against dirty local files.
+- [ ] wasm64 is a one-line target change once `wasm64-unknown-unknown` leaves
+      tier 3 and wasm-bindgen supports it. wasm32 gives a 4gb address space,
+      which is far past what this needs.
 
-- commit early, commit often — staged work dies with the run.
-- markdown-only commits are safe checkpoints.
-- code commits: review git_diff first. committing is deploying.
-- disk files are camelCase; ui transcript lowercases for display.
+## history worth not repeating
+
+three separate failures had one cause — a long-lived stateful process inside
+a short-lived stateless container:
+
+1. runs died at a self-imposed 52s wall while `vercel.json` said 300s.
+2. staged edits lived in per-request memory and vanished with the request.
+3. a browser-owned loop was written to fix (1) and (2) and then never wired
+   up — `public/app.js` still called the old endpoint. dead code.
+
+the rebuild removes the container, so none of the three has anywhere to live.
