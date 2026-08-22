@@ -67,6 +67,9 @@ taskboard) asked for four things. all four are resolved:
       wired to the existing `src/agent/http.rs` fetch client. no new infra.
       open follow-ups: r.jina.ai may rate-limit anonymous requests; if
       `web_read` starts returning 429, consider caching reads in opfs.
+- [x] rail collapse buttons mirrored — both now sit on the middle-facing
+      edge of their panel (left rail: trailing in header; right rail:
+      leading). 778f294.
 - [ ] wire the file tree: clicking a path should open it in an editor pane
       (`Command::ReadFile` and `Event::FileContent` already exist and work;
       only the click handler and the editor element are missing).

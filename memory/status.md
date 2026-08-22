@@ -100,6 +100,16 @@
   text omitted it — re-read after every multi-line edit, not just after
   failures.
 
+## landed this run (rail collapse button mirroring)
+
+- [x] `web/index.html`: the right rail's `#collapse-right` button moved from
+      the end of `.rail-head` to the start, so it sits on the inner edge —
+      the same middle-facing side as the left rail's trailing button. the
+      two collapse affordances are now true mirror images. css needed no
+      change: `.rail-collapse` has no positional selectors and the collapsed
+      state centers it via `margin: 0 auto` either way. deployed green
+      (778f294).
+
 ## still open
 
 - [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,
