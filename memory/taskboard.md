@@ -28,13 +28,19 @@
   crashes render in-feed instead of silent catch{}, scrolltobottom typo fixed,
   step_error/agent_died/agent_stopped/step_retry handlers + styles.
 
-## known failure mode (root cause of repeated run deaths)
+## known failure mode — SOLVED (ae665dd)
 
-- runs die at ~step 11-13 mid-edit. staged-but-uncommitted edits are lost.
-  mitigation so far: small atomic commits after each file. still unproven
-  whether the cause is vercel function timeout (~10-60s?), openrouter drop,
-  or something else — check memory/deaths.md next run for actual reason
-  (logDeath should now capture it).
+- root cause confirmed: vercel hobby tier hard-kills functions at ~60s
+  regardless of vercel.json maxDuration=300. high reasoning effort ≈ 12-13
+  llm round-trips in 60s → the "always step 13" wall. platform kill is not
+  an exception: no catch fires, logDeath never ran, deaths.md never existed,
+  staged work evaporated.
+- fix shipped: soft deadline 42s injects wrap-up directive (commit staged
+  work + summarize), hard deadline 52s stops cleanly so agent_complete and
+  context handoff still fire. runs now end gracefully with an honest
+  explanation in the ui instead of vanishing.
+- remaining options to run longer: upgrade vercel plan (pro = 300s real),
+  or lower reasoning effort for more steps per second.
 
 ## backlog
 
