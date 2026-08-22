@@ -66,12 +66,14 @@
       <!-- right: configuration -->
       <aside class="rail rail-right">
         <div class="rail-head">
+          <!-- button leads so it sits on the inner edge, mirroring the left
+               rail where it trails on the same (middle-facing) side -->
+          <button id="collapse-right" class="rail-collapse" aria-expanded="true" title="collapse panel">›</button>
           <span class="glyph cfg">⚙</span>
           <div>
             <div class="rail-title">harness</div>
             <div class="rail-sub">configuration</div>
           </div>
-          <button id="collapse-right" class="rail-collapse" aria-expanded="true" title="collapse panel">›</button>
         </div>
 
         <div class="rail-section">
@@ -91,21 +93,6 @@
 
           <label for="cfg-branch">branch</label>
           <input id="cfg-branch" type="text" placeholder="main" />
-        </div>
-
-        <div class="rail-section">
-          <div class="rail-label">build logs (optional)</div>
-          <p class="hint">
-            without this, the agent learns only <em>that</em> a build failed —
-            github's check carries no compiler output. with it, it reads the
-            actual error and can repair its own broken commit. create one at
-            vercel.com/account/tokens.
-          </p>
-          <label for="cfg-vercel-token">vercel token</label>
-          <input id="cfg-vercel-token" type="password" autocomplete="off" placeholder="optional" />
-
-          <label for="cfg-vercel-team">vercel team id</label>
-          <input id="cfg-vercel-team" type="text" placeholder="team_… (only for team projects)" />
         </div>
 
         <div class="rail-section">
