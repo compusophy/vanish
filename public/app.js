@@ -25,36 +25,87 @@ document.addEventListener('DOMContentLoaded', () => {
     state.loopMode = localStorage.getItem('vanish_loop_mode') === 'true';
   } catch (e) {}
 
-  // ---- chat threads (d4 phase 1) -------------------------------------
+  // ---- chat threads (d4) ----------------------------------------------
   // each thread owns its own conversation history; switching preserves it.
+  // threads render as a list in the LEFT sidebar (#thread-list).
+  //
+  // storage: localStorage primary, in-memory fallback. every failure is
+  // surfaced to the ui — a silent catch here is exactly what produced the
+  // "empty dropdown doing nothing" bug.
+
+  let storageAvailable = true;
+  function probeStorage() {
+    try {
+      localStorage.setItem('vanish_storage_probe', '1');
+      localStorage.removeItem('vanish_storage_probe');
+    } catch (e) {
+      storageAvailable = false;
+    }
+  }
+  probeStorage();
+
   function loadThreads() {
+    if (!storageAvailable) return {};
     try {
       const parsed = JSON.parse(localStorage.getItem(THREADS_KEY) || '{}');
       if (parsed && typeof parsed === 'object') return parsed;
-    } catch (e) {}
+    } catch (e) {
+      console.error('vanish: failed to parse saved threads', e);
+    }
     return {};
   }
 
   function persistThreads() {
+    if (!storageAvailable) {
+      showStorageWarning();
+      return;
+    }
     try {
       localStorage.setItem(THREADS_KEY, JSON.stringify(state.threads));
       localStorage.setItem(ACTIVE_THREAD_KEY, String(state.activeThread));
-    } catch (e) {}
+    } catch (e) {
+      storageAvailable = false;
+      showStorageWarning();
+    }
+  }
+
+  let storageWarned = false;
+  function showStorageWarning() {
+    if (storageWarned || !el.agentStepsFeed) return;
+    storageWarned = true;
+    const warn = document.createElement('div');
+    warn.className = 'death-report';
+    warn.innerHTML =
+      '<div class="death-title">⚠ conversations will not persist</div>' +
+      '<div class="death-reason">browser storage is unavailable (private mode or blocked cookies?). threads work this session but are lost on refresh.</div>';
+    el.agentStepsFeed.appendChild(warn);
   }
 
   function currentThread() {
     return state.threads[state.activeThread] || null;
   }
 
-  function renderThreadSelect() {
-    if (!el.threadSelect) return;
-    el.threadSelect.innerHTML = '';
+  // renders threads into the left-sidebar conversation list
+  function renderThreadList() {
+    if (!el.threadList) return;
+    el.threadList.innerHTML = '';
     for (const [id, t] of Object.entries(state.threads)) {
-      const opt = document.createElement('option');
-      opt.value = id;
-      opt.textContent = t.name.toLowerCase();
-      opt.selected = id === state.activeThread;
-      el.threadSelect.appendChild(opt);
+      const item = document.createElement('button');
+      item.className = `thread-item ${id === state.activeThread ? 'active' : ''}`;
+      item.dataset.threadId = id;
+
+      const dot = document.createElement('span');
+      dot.className = 'thread-dot';
+      dot.textContent = t.history && t.history.length > 0 ? '●' : '○';
+
+      const name = document.createElement('span');
+      name.className = 'thread-name';
+      name.textContent = t.name.toLowerCase();
+
+      item.appendChild(dot);
+      item.appendChild(name);
+      item.addEventListener('click', () => switchThread(id));
+      el.threadList.appendChild(item);
     }
     if (el.configThreadLabel) {
       el.configThreadLabel.textContent =
@@ -71,9 +122,10 @@ document.addEventListener('DOMContentLoaded', () => {
     state.activeThread = id;
     state.history = [];
     persistThreads();
-    renderThreadSelect();
+    renderThreadList();
     el.agentStepsFeed.innerHTML = '';
     el.agentHero.classList.remove('hidden');
+    showToast('new conversation started — previous ones stay listed');
   }
 
   function switchThread(id) {
@@ -84,7 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
     state.activeThread = id;
     state.history = state.threads[id].history || [];
     persistThreads();
-    renderThreadSelect();
+    renderThreadList();
     el.agentStepsFeed.innerHTML = '';
     el.agentHero.classList.toggle('hidden', state.history.length > 0);
     showToast(`switched to ${state.threads[id].name.toLowerCase()}`);
@@ -94,11 +146,12 @@ document.addEventListener('DOMContentLoaded', () => {
     state.threads = loadThreads();
     if (!state.threads['main']) state.threads['main'] = { name: 'main', history: [] };
     let saved = null;
-    try { saved = localStorage.getItem(ACTIVE_THREAD_KEY); } catch (e) {}
+    try { saved = storageAvailable ? localStorage.getItem(ACTIVE_THREAD_KEY) : null; } catch (e) {}
     state.activeThread = saved && state.threads[saved] ? saved : 'main';
     state.history = state.threads[state.activeThread].history || [];
     persistThreads();
-    renderThreadSelect();
+    renderThreadList();
+    if (!storageAvailable) showStorageWarning();
   }
 
   function saveHistory() {
@@ -128,7 +181,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btnNewFile: document.getElementById('btn-new-file'),
     paramEffort: document.getElementById('param-effort'),
     valEffort: document.getElementById('val-effort'),
-    threadSelect: document.getElementById('thread-select'),
+    threadList: document.getElementById('thread-list'),
     configThreadLabel: document.getElementById('config-thread-label'),
     sidebarGithubLabel: document.getElementById('sidebar-github-label'),
     sidebarVercelLabel: document.getElementById('sidebar-vercel-label'),
@@ -758,25 +811,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // chat thread switcher (d4 phase 1)
-  if (el.threadSelect) {
-    el.threadSelect.addEventListener('change', () => switchThread(el.threadSelect.value));
-  }
-
   el.btnToggleSidebar.addEventListener('click', () => {
     el.sidebar.classList.toggle('open');
   });
 
-  // new chat: spawn a fresh thread (old threads stay in the switcher)
-  const btnNewChat = document.getElementById('btn-new-chat');
-  if (btnNewChat) {
-    btnNewChat.addEventListener('click', () => {
+  // new chat: spawn a fresh thread (old threads stay listed in the sidebar)
+  if (el.threadList) {
+    document.getElementById('btn-new-chat')?.addEventListener('click', () => {
       if (state.isAgentRunning) {
-        showToast('stop the agent before starting a new chat');
+        showToast('stop the agent before starting a new conversation');
         return;
       }
       createThread();
-      showToast('new thread started — previous threads kept in the switcher');
     });
   }
 
