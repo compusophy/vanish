@@ -125,15 +125,15 @@
           <span class="sidebar-section-title">harness config</span>
           <div class="param-row">
             <div class="param-header">
-              <label for="param-steps">max autonomy steps</label>
-              <span class="param-num" id="val-steps">8</span>
+              <label for="param-steps">step budget (soft cap)</label>
+              <span class="param-num" id="val-steps">20</span>
             </div>
             <input
               type="range"
               id="param-steps"
               min="1"
-              max="20"
-              value="8"
+              max="100"
+              value="20"
             />
           </div>
 
@@ -225,7 +225,7 @@
                 >
                   <circle cx="12" cy="12" r="3"></circle>
                   <path
-                    d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41"
+                    d="M12 2v2m0 16v2m4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M22 12h2M0 12h2m4.93-7.07L8.34 6.34M16.95 17.66l1.41 1.41"
                   ></path>
                 </svg>
                 <span>agent loop</span>
@@ -386,9 +386,18 @@
                 <span>autonomous self-editing loop</span>
               </div>
               <div class="dock-header-right">
+                <select id="thread-select" class="select-dark-inline" title="chat threads — separate conversations per agent"></select>
                 <label
                   class="keep-going-toggle"
                   title="force the agent to use its full step budget before finishing"
+                >
+                  <input type="checkbox" id="chk-loop-mode" />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  <span class="toggle-label">∞ loop</span>
+                </label>
+                <label
+                  class="keep-going-toggle"
+                  title="let the agent verify its work instead of stopping at first draft"
                 >
                   <input type="checkbox" id="chk-keep-going" />
                   <span class="toggle-track"><span class="toggle-thumb"></span></span>
