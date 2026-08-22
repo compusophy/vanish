@@ -2,18 +2,37 @@
 // all labels, logs, tool outputs, and rendering enforced in lowercase
 
 document.addEventListener('DOMContentLoaded', () => {
+  const HISTORY_KEY = 'vanish_chat_history';
+
   const state = {
     activeTab: 'agent',
     activeFile: null,
     fileContentOriginal: '',
     isAgentRunning: false,
     abortController: null,
+    history: loadHistory(),
     config: {
       maxSteps: 8,
       reasoningEffort: 'high',
       model: 'stealth/ox-alpha'
     }
   };
+
+  function loadHistory() {
+    try {
+      const raw = sessionStorage.getItem(HISTORY_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveHistory() {
+    try {
+      sessionStorage.setItem(HISTORY_KEY, JSON.stringify(state.history));
+    } catch (e) {}
+  }
 
   // dom elements
   const el = {
@@ -323,6 +342,7 @@ document.addEventListener('DOMContentLoaded', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: promptText,
+          history: state.history,
           model: state.config.model,
           reasoningEffort: state.config.reasoningEffort,
           maxSteps: state.config.maxSteps
@@ -467,8 +487,16 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         }
 
+        case 'agent_context': {
+          if (Array.isArray(ev.messages)) {
+            state.history = ev.messages;
+            saveHistory();
+          }
+          break;
+        }
+
         case 'agent_complete': {
-          showToast(`agent finished in ${ev.totalSteps} steps (${ev.duration})`);
+          showToast(`agent finished in ${ev.totalSteps} steps (${ev.duration}) — history saved, keep chatting`);
           break;
         }
       }
@@ -520,6 +548,22 @@ document.addEventListener('DOMContentLoaded', () => {
   el.btnToggleSidebar.addEventListener('click', () => {
     el.sidebar.classList.toggle('open');
   });
+
+  // new chat: wipe persisted history and reset the feed
+  const btnNewChat = document.getElementById('btn-new-chat');
+  if (btnNewChat) {
+    btnNewChat.addEventListener('click', () => {
+      if (state.isAgentRunning) {
+        showToast('stop the agent before starting a new chat');
+        return;
+      }
+      state.history = [];
+      saveHistory();
+      el.agentStepsFeed.innerHTML = '';
+      el.agentHero.classList.remove('hidden');
+      showToast('new chat — conversation history cleared');
+    });
+  }
 
   // bottom dock run & stop
   el.btnAgentRun.addEventListener('click', () => {
