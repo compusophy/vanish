@@ -2,7 +2,8 @@
 // all labels, logs, tool outputs, and rendering enforced in lowercase
 
 document.addEventListener('DOMContentLoaded', () => {
-  const HISTORY_KEY = 'vanish_chat_history';
+  const THREADS_KEY = 'vanish_threads';
+  const ACTIVE_THREAD_KEY = 'vanish_active_thread';
 
   const state = {
     activeTab: 'agent',
@@ -10,34 +11,102 @@ document.addEventListener('DOMContentLoaded', () => {
     fileContentOriginal: '',
     isAgentRunning: false,
     abortController: null,
-    history: loadHistory(),
+    history: [],
     config: {
-      maxSteps: 8,
       reasoningEffort: 'high',
       model: 'stealth/ox-alpha'
     },
-    keepGoing: false
+    loopMode: false,
+    threads: {},
+    activeThread: null
   };
 
-  // restore the keep-going toggle across reloads
   try {
-    state.keepGoing = localStorage.getItem('vanish_keep_going') === 'true';
+    state.loopMode = localStorage.getItem('vanish_loop_mode') === 'true';
   } catch (e) {}
 
-  function loadHistory() {
+  // ---- chat threads (d4 phase 1) -------------------------------------
+  // each thread owns its own conversation history; switching preserves it.
+  function loadThreads() {
     try {
-      const raw = sessionStorage.getItem(HISTORY_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (e) {
-      return [];
+      const parsed = JSON.parse(localStorage.getItem(THREADS_KEY) || '{}');
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch (e) {}
+    return {};
+  }
+
+  function persistThreads() {
+    try {
+      localStorage.setItem(THREADS_KEY, JSON.stringify(state.threads));
+      localStorage.setItem(ACTIVE_THREAD_KEY, String(state.activeThread));
+    } catch (e) {}
+  }
+
+  function currentThread() {
+    return state.threads[state.activeThread] || null;
+  }
+
+  function renderThreadSelect() {
+    if (!el.threadSelect) return;
+    el.threadSelect.innerHTML = '';
+    for (const [id, t] of Object.entries(state.threads)) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = t.name.toLowerCase();
+      opt.selected = id === state.activeThread;
+      el.threadSelect.appendChild(opt);
+    }
+    if (el.configThreadLabel) {
+      el.configThreadLabel.textContent =
+        `thread: ${currentThread()?.name.toLowerCase() || 'main'}`;
     }
   }
 
+  function createThread() {
+    const id = `t_${Date.now()}_${Math.floor(Math.random() * 1e4)}`;
+    state.threads[id] = {
+      name: `thread ${Object.keys(state.threads).length + 1}`,
+      history: []
+    };
+    state.activeThread = id;
+    state.history = [];
+    persistThreads();
+    renderThreadSelect();
+    el.agentStepsFeed.innerHTML = '';
+    el.agentHero.classList.remove('hidden');
+  }
+
+  function switchThread(id) {
+    if (!state.threads[id] || state.isAgentRunning || id === state.activeThread) return;
+    const cur = currentThread();
+    if (cur) cur.history = state.history;
+
+    state.activeThread = id;
+    state.history = state.threads[id].history || [];
+    persistThreads();
+    renderThreadSelect();
+    el.agentStepsFeed.innerHTML = '';
+    el.agentHero.classList.toggle('hidden', state.history.length > 0);
+    showToast(`switched to ${state.threads[id].name.toLowerCase()}`);
+  }
+
+  function initThreads() {
+    state.threads = loadThreads();
+    if (!state.threads['main']) state.threads['main'] = { name: 'main', history: [] };
+    let saved = null;
+    try { saved = localStorage.getItem(ACTIVE_THREAD_KEY); } catch (e) {}
+    state.activeThread = saved && state.threads[saved] ? saved : 'main';
+    state.history = state.threads[state.activeThread].history || [];
+    persistThreads();
+    renderThreadSelect();
+  }
+
   function saveHistory() {
-    try {
-      sessionStorage.setItem(HISTORY_KEY, JSON.stringify(state.history));
-    } catch (e) {}
+    const cur = currentThread();
+    if (cur) {
+      cur.history = state.history;
+      persistThreads();
+    }
   }
 
   // dom elements
@@ -57,10 +126,10 @@ document.addEventListener('DOMContentLoaded', () => {
     btnRefreshWorkspace: document.getElementById('btn-refresh-workspace'),
     fileTreeList: document.getElementById('file-tree-list'),
     btnNewFile: document.getElementById('btn-new-file'),
-    paramSteps: document.getElementById('param-steps'),
-    valSteps: document.getElementById('val-steps'),
     paramEffort: document.getElementById('param-effort'),
     valEffort: document.getElementById('val-effort'),
+    threadSelect: document.getElementById('thread-select'),
+    configThreadLabel: document.getElementById('config-thread-label'),
     sidebarGithubLabel: document.getElementById('sidebar-github-label'),
     sidebarVercelLabel: document.getElementById('sidebar-vercel-label'),
 
@@ -72,7 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btnAgentRun: document.getElementById('btn-agent-run'),
     btnAgentStop: document.getElementById('btn-agent-stop'),
     dockAgentStatus: document.getElementById('dock-agent-status'),
-    chkKeepGoing: document.getElementById('chk-keep-going'),
+    chkLoopMode: document.getElementById('chk-loop-mode'),
 
     // editor
     editorActiveFile: document.getElementById('editor-active-file'),
@@ -352,8 +421,9 @@ document.addEventListener('DOMContentLoaded', () => {
           history: state.history,
           model: state.config.model,
           reasoningEffort: state.config.reasoningEffort,
-          maxSteps: state.config.maxSteps,
-          keepGoing: state.keepGoing
+          maxSteps: state.loopMode ? 100 : 20,
+          keepGoing: true, // smart default: verify before finishing (d2)
+          loopMode: state.loopMode
         }),
         signal: state.abortController.signal
       });
@@ -557,37 +627,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  el.paramSteps.addEventListener('input', () => {
-    state.config.maxSteps = parseInt(el.paramSteps.value);
-    el.valSteps.textContent = state.config.maxSteps;
-  });
-
   el.paramEffort.addEventListener('change', () => {
     state.config.reasoningEffort = el.paramEffort.value;
     el.valEffort.textContent = state.config.reasoningEffort;
   });
 
-  // keep-going toggle: forces the agent to spend its full step budget
-  if (el.chkKeepGoing) {
-    el.chkKeepGoing.checked = state.keepGoing;
-    el.chkKeepGoing.addEventListener('change', () => {
-      state.keepGoing = el.chkKeepGoing.checked;
+  // ∞ loop toggle: the only user-facing autonomy control. loop mode means
+  // the agent never self-terminates — only the stop button ends it.
+  if (el.chkLoopMode) {
+    el.chkLoopMode.checked = state.loopMode;
+    el.chkLoopMode.addEventListener('change', () => {
+      state.loopMode = el.chkLoopMode.checked;
       try {
-        localStorage.setItem('vanish_keep_going', String(state.keepGoing));
+        localStorage.setItem('vanish_loop_mode', String(state.loopMode));
       } catch (e) {}
       showToast(
-        state.keepGoing
-          ? 'keep going on — agent will use its full step budget'
-          : 'keep going off — agent may finish early when done'
+        state.loopMode
+          ? '∞ loop on — agent runs until you press stop'
+          : '∞ loop off — agent finishes when its work is verified done'
       );
     });
+  }
+
+  // chat thread switcher (d4 phase 1)
+  if (el.threadSelect) {
+    el.threadSelect.addEventListener('change', () => switchThread(el.threadSelect.value));
   }
 
   el.btnToggleSidebar.addEventListener('click', () => {
     el.sidebar.classList.toggle('open');
   });
 
-  // new chat: wipe persisted history and reset the feed
+  // new chat: spawn a fresh thread (old threads stay in the switcher)
   const btnNewChat = document.getElementById('btn-new-chat');
   if (btnNewChat) {
     btnNewChat.addEventListener('click', () => {
@@ -595,11 +666,8 @@ document.addEventListener('DOMContentLoaded', () => {
         showToast('stop the agent before starting a new chat');
         return;
       }
-      state.history = [];
-      saveHistory();
-      el.agentStepsFeed.innerHTML = '';
-      el.agentHero.classList.remove('hidden');
-      showToast('new chat — conversation history cleared');
+      createThread();
+      showToast('new thread started — previous threads kept in the switcher');
     });
   }
 
@@ -641,6 +709,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // initial load
+  initThreads();
   loadFileTree();
   checkGitStatus();
 });
