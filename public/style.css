@@ -44,6 +44,90 @@
   --shadow-glow: 0 0 25px rgba(0, 240, 180, 0.12);
 }
 
+/* user prompt bubble — shows what the human asked, above each run */
+.user-bubble {
+  margin: 14px auto 6px;
+  max-width: 720px;
+  width: fit-content;
+  padding: 10px 16px;
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-lg);
+  border-bottom-right-radius: var(--radius-sm);
+  background: rgba(0, 240, 180, 0.07);
+}
+
+.user-bubble-label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--accent-emerald);
+  margin-bottom: 4px;
+}
+
+.user-bubble-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* fatal failure rendering */
+.death-report {
+  margin: 10px auto;
+  max-width: 760px;
+  padding: 12px 16px;
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  border-left: 3px solid #f85149;
+  border-radius: var(--radius-md);
+  background: rgba(248, 81, 73, 0.06);
+  animation: nudge-pulse 2s ease-in-out 1;
+}
+
+.death-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #f85149;
+  margin-bottom: 6px;
+}
+
+.death-reason {
+  font-size: 12px;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.death-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.death-detail {
+  margin: 6px 0 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: rgba(248, 81, 73, 0.05);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.fatal-status {
+  color: #f85149 !important;
+}
+
+.continue-nudge.retry-note {
+  border-color: rgba(255, 193, 7, 0.35);
+  color: #ffc107;
+  background: rgba(255, 193, 7, 0.06);
+  animation: none;
+}
+
 /* keep-going toggle (dock header, left of "new chat") */
 .keep-going-toggle {
   display: inline-flex;

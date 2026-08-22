@@ -407,6 +407,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     state.abortController = new AbortController();
 
+    // show what the human asked for, right above the run's steps
+    const userBubble = document.createElement('div');
+    userBubble.className = 'user-bubble';
+    const bubbleLabel = document.createElement('span');
+    bubbleLabel.className = 'user-bubble-label';
+    bubbleLabel.textContent = 'you';
+    const bubbleText = document.createElement('div');
+    bubbleText.className = 'user-bubble-text';
+    bubbleText.textContent = promptText;
+    userBubble.appendChild(bubbleLabel);
+    userBubble.appendChild(bubbleText);
+    el.agentStepsFeed.appendChild(userBubble);
+    scrollToBottom();
+
     // build step card tracker
     let currentStepCard = null;
     let currentThinkingContent = null;
@@ -450,10 +464,21 @@ document.addEventListener('DOMContentLoaded', () => {
           const jsonStr = trimmed.slice(6);
           if (jsonStr === '[DONE]') continue;
 
+          let parsedEvent = null;
           try {
-            const event = JSON.parse(jsonStr);
-            handleAgentEvent(event);
-          } catch (e) {}
+            parsedEvent = JSON.parse(jsonStr);
+          } catch (e) { continue; }
+          try {
+            handleAgentEvent(parsedEvent);
+          } catch (handlerErr) {
+            // never swallow handler crashes — render them where the human sees
+            console.error('vanish: agent event handler crashed', handlerErr, parsedEvent);
+            const crash = document.createElement('div');
+            crash.className = 'continue-nudge retry-note';
+            crash.textContent =
+              `☠ ui handler crash on "${parsedEvent.type}": ${handlerErr.message}`;
+            el.agentStepsFeed.appendChild(crash);
+          }
         }
       }
     } catch (err) {
@@ -567,15 +592,76 @@ document.addEventListener('DOMContentLoaded', () => {
 
         case 'continue_nudge': {
           if (currentStepCard) {
-            currentStepCard.querySelector('.step-status').textContent =
-              'keep going — nudged to continue';
+            currentStepCard.querySelector('.step-status').textContent = ev.loopMode
+              ? '∞ loop — continuing'
+              : 'keep going — verifying before finish';
             const nudge = document.createElement('div');
             nudge.className = 'continue-nudge';
-            nudge.textContent =
-              `↻ keep going: early finish refused, ${ev.remainingSteps} steps remaining in budget`;
+            nudge.textContent = ev.loopMode
+              ? `↻ ∞ loop: early finish refused at step ${ev.step} — agent continues until you press stop`
+              : `↻ keep going: early finish refused, ${ev.remainingSteps || 1} verification step(s) left`;
             el.agentStepsFeed.appendChild(nudge);
-            scrolltobottom();
+            scrollToBottom();
           }
+          break;
+        }
+
+        case 'step_retry': {
+          if (currentStepCard) {
+            currentStepCard.querySelector('.step-status').textContent =
+              `transient error — retry ${ev.attempt}/${ev.maxAttempts}`;
+            const note = document.createElement('div');
+            note.className = 'continue-nudge retry-note';
+            note.textContent = `↻ transient llm error (attempt ${ev.attempt}/${ev.maxAttempts}): ${ev.error || 'unknown'}`;
+            el.agentStepsFeed.appendChild(note);
+            scrollToBottom();
+          }
+          break;
+        }
+
+        case 'step_error': {
+          state.isAgentRunning = false;
+          if (currentStepCard) {
+            const statusEl = currentStepCard.querySelector('.step-status');
+            statusEl.textContent = 'step failed';
+            statusEl.classList.add('fatal-status');
+          }
+          const box = document.createElement('div');
+          box.className = 'death-report';
+          box.innerHTML =
+            `<div class="death-title">☠ step ${ev.step} failed</div>` +
+            `<pre class="death-detail">${escapeHtml(ev.error || 'unknown error')}</pre>`;
+          el.agentStepsFeed.appendChild(box);
+          showToast(`agent failed at step ${ev.step} — cause shown above`);
+          scrollToBottom();
+          break;
+        }
+
+        case 'agent_died': {
+          state.isAgentRunning = false;
+          if (currentStepCard) {
+            const statusEl = currentStepCard.querySelector('.step-status');
+            statusEl.textContent = 'died';
+            statusEl.classList.add('fatal-status');
+          }
+          const report = document.createElement('div');
+          report.className = 'death-report fatal';
+          report.innerHTML =
+            `<div class="death-title">☠ agent died at step ${ev.step} / ${ev.maxSteps}</div>` +
+            `<div class="death-reason">cause: ${escapeHtml(ev.reason || 'unknown')}</div>` +
+            `<div class="death-meta">full post-mortem committed to memory/deaths.md (${ev.timestamp})</div>`;
+          el.agentStepsFeed.appendChild(report);
+          showToast('agent died — post-mortem logged to memory/deaths.md');
+          scrollToBottom();
+          break;
+        }
+
+        case 'agent_stopped': {
+          state.isAgentRunning = false;
+          if (currentStepCard) {
+            currentStepCard.querySelector('.step-status').textContent = 'stopped by user';
+          }
+          showToast(`agent stopped: ${ev.reason || 'aborted'}`);
           break;
         }
 
