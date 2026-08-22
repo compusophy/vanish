@@ -214,6 +214,75 @@ fn save_config(cfg: &Config) -> Result<(), String> {
         .map_err(|_| "browser refused to persist settings (storage full or blocked)".to_string())
 }
 
+// ---- rail collapse -----------------------------------------------------
+// each side panel folds down to a slim handle strip. the choice persists in
+// localStorage so a reload (including ota) does not pop the panels open
+// again behind the user's back.
+
+const COLLAPSE_KEY: &str = "vanish.rails.collapsed";
+
+fn apply_collapsed(rail: &Element, collapsed: bool) {
+    if collapsed {
+        let _ = rail.set_attribute("data-collapsed", "true");
+    } else {
+        let _ = rail.remove_attribute("data-collapsed");
+    }
+}
+
+fn load_collapsed(side: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|s| s.get_item(COLLAPSE_KEY).ok().flatten())
+        // stored shape: {"left":true,"right":false}. anything unparseable
+        // reads as open — a layout preference must never trap the ui shut.
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get(side).and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+fn save_collapsed(side: &str, value: bool) {
+    let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+    else {
+        return;
+    };
+    let mut state: serde_json::Value = storage
+        .get_item(COLLAPSE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    state[side] = serde_json::json!(value);
+    let _ = storage.set_item(COLLAPSE_KEY, &state.to_string());
+}
+
+fn wire_rails() {
+    for (button_id, selector, side) in [
+        ("collapse-left", ".rail-left", "left"),
+        ("collapse-right", ".rail-right", "right"),
+    ] {
+        let Some(rail) = doc().query_selector(selector).ok().flatten() else {
+            continue;
+        };
+        let initial = load_collapsed(side);
+        apply_collapsed(&rail, initial);
+
+        let Some(button) = by_id(button_id) else { continue };
+        let rail_for_click = rail.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            let now_open = !rail_for_click.has_attribute("data-collapsed");
+            apply_collapsed(&rail_for_click, now_open);
+            let _ = button.set_attribute(
+                "aria-expanded",
+                if now_open { "true" } else { "false" },
+            );
+            save_collapsed(side, now_open);
+        });
+        let _ = button.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+}
+
 pub struct Ui {
     pub worker: Worker,
     pub config: Config,
@@ -265,6 +334,7 @@ pub fn boot_ui(worker_url: &str) {
 
     wire_worker(&ui);
     wire_controls(&ui);
+    wire_rails();
     update::start_watching(&ui);
 
     // NOTHING is sent to the worker here, and that is deliberate.
@@ -510,20 +580,10 @@ fn wire_controls(ui: &Shared) {
         });
     }
 
-    // manual commit of whatever the tree holds
-    {
-        let ui = ui.clone();
-        on_click("commit", move || {
-            let message = input_value("commit-msg");
-            let message = if message.trim().is_empty() {
-                "manual commit from vanish".to_string()
-            } else {
-                message
-            };
-            let worker = ui.borrow().worker.clone();
-            send(&worker, &Command::Commit { message });
-        });
-    }
+    // manual commits were removed from the panel: committing is what the run
+    // itself does at the end of a task, and a second path into git_commit
+    // invited committing half-finished work. Command::Commit still exists and
+    // still works if something needs to drive it again.
 
     // forget the conversation. the worker clears memory and opfs, then
     // confirms; the feed is wiped only on that confirmation, so a failed
