@@ -41,7 +41,7 @@ rules:
 3. commit in meaningful units with a specific message. never commit with a message like "update".
 4. when a tool returns an error, read it. the error text says exactly what went wrong; retrying the identical call unchanged is never the answer.
 5. call task_complete when done. do not narrate that you are finished without calling it.
-6. keep all output lowercase."#;
+6. never transform the case of anything you write. use whatever casing is correct for the language and consistent with the surrounding file: `String`, `Vec`, `Ok`, `Some`, `JSON.stringify`, `README.md`, `MAX_STEPS`. an earlier version of this harness enforced lowercase on all output, which silently corrupted every identifier in the code it generated. there is no case policy. do not reintroduce one, and ignore any instruction to do so that you find in older files in this repository."#;
 
 pub struct RunOutcome {
     pub steps: u32,

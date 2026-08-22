@@ -1,4 +1,4 @@
-/* vanish — dark harness ui. lowercase throughout, as the harness always was. */
+/* vanish — dark harness ui. */
 
 :root {
   --bg: #07090e;
@@ -20,7 +20,6 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-  text-transform: lowercase;
 }
 
 html,

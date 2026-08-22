@@ -32,7 +32,14 @@ see ARCHITECTURE.md for the full map and for why the previous design failed.
   reported loudly, not skipped.
 - **D5 — steps are a budget, not a target.** simple tasks end fast, hard ones
   run long. `MAX_STEPS` is a runaway backstop, not a goal.
-- **D6 — lowercase throughout the ui.**
+- **D6 — there is no case policy, and never will be again.** an earlier
+  version enforced lowercase in three places at once: a global css
+  `text-transform`, a system-prompt rule, and this directive. the css made
+  the ui misreport every filename and code sample; the prompt rule made the
+  agent lowercase the code it generated, corrupting identifiers wholesale.
+  `memory/status.md` even carried a warning telling the agent to work around
+  its own ui. write code and prose in the casing correct for the language.
+  do not reintroduce this rule in any form.
 
 ## landed in the rebuild
 

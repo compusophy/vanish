@@ -1,233 +1,93 @@
 # vanish
 
-> **vanish** is an autonomous, self-editing, and self-improving coding agent harness powered by `stealth/ox-alpha` via openrouter.
+An autonomous, self-editing coding agent that runs **entirely in your
+browser**. One Rust crate compiled to WebAssembly. No server, no serverless
+functions, no runtime dependencies.
 
----
+The agent edits this repository — its own source — and commits the result to
+GitHub.
 
-## core features
+## How it works
 
-- **autonomous self-editing loop**: `ox-alpha` can inspect, modify, test, and evolve its own source code in multi-turn reasoning loops.
-- **integrated tool engine**:
-  - `read_file`: view workspace files with line indexing
-  - `write_file`: create or overwrite files
-  - `edit_file`: precise contextual substring replacements
-  - `list_dir`: workspace exploration
-  - `run_command`: execute local terminal commands, test runners, linters
-  - `git_status` & `git_diff`: real-time working tree change inspection
-  - `git_commit` & `git_push`: instant synchronizations to github
-  - `deploy_vercel`: automated vercel deployments
-- **web ide & live harness monitor**:
-  - live thought process inspection drawer with elapsed duration
-  - real-time tool execution tracking
-  - in-browser code editor with save / reload capabilities
-  - interactive git diff viewer with colorized additions & deletions
-  - 100% strict lowercase ui aesthetic
-- **github repository & vercel sync**:
-  - connected to `compusophy/vanish` on github
-  - vercel continuous deployment integration
-
----
-
-## architecture
+The same wasm binary is loaded twice:
 
 ```
-vanish/
-├── .env                    # OPENROUTER_API_KEY / API_KEY (local only)
-├── .env.example            # every supported environment variable
-├── .gitignore              # secrets, node_modules, and cache protection
-├── package.json            # dependencies & scripts
-├── vercel.json             # serverless routing + 300s function duration
-├── server.js               # local listener
-├── api/
-│   └── index.js            # vercel serverless entry (mounts the same app)
-├── lib/
-│   ├── app.js              # express app: routes, auth gating, ide endpoints
-│   ├── agent.js            # multi-turn autonomous tool execution loop
-│   ├── tools.js            # mode-aware tool surface (local fs vs github api)
-│   ├── github-service.js   # github rest backend: reads, atomic commits, diffs
-│   ├── auth.js             # github oauth flow, allowlist, route gating
-│   ├── session.js          # aes-256-gcm sealed stateless session cookie
-│   ├── git-service.js      # local git status, diff, commit, and push helpers
-│   └── vercel-service.js   # vercel deploy and status helpers
-└── public/
-    ├── index.html          # vanish harness web interface
-    ├── style.css           # dark glassmorphism styling
-    ├── auth.js             # sign-in gate and session chip
-    └── app.js              # client state, sse stream receiver, and ide logic
+browser tab
+├── main thread   boot_ui()      src/ui/       DOM only
+│        ▲ Event          │ Command            typed by src/protocol.rs
+└── web worker    boot_worker()  src/worker.rs
+                  ├── src/agent/mod.rs      the loop — no deadline
+                  ├── src/agent/llm.rs      OpenRouter, streamed
+                  ├── src/agent/github.rs   blobs → tree → commit → ref
+                  ├── src/agent/tools.rs    the tool surface
+                  └── src/platform/opfs.rs  the working tree, on disk
 ```
 
----
+The loop runs in a Web Worker, so it has no request bounding it and no
+execution deadline. The working tree lives in the Origin Private File
+System, so a write is durable the moment it happens — it survives the run, a
+reload, a crash, and a closed tab.
 
-## two execution modes
+Both halves compile against `src/protocol.rs`, so a UI/logic mismatch is a
+build error rather than a blank page.
 
-vanish detects where it is running and swaps its tool backend accordingly.
-the tool surface the model sees is identical in both, so prompts transfer.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for why the previous serverless design
+failed and how each of its failure modes is now structurally impossible.
 
-| | **local** | **cloud** (vercel) |
-| --- | --- | --- |
-| detection | default | `process.env.VERCEL` |
-| reads | filesystem | github contents api |
-| writes | filesystem | in-memory staging area |
-| `git_commit` | `git` binary | atomic multi-file commit via git data api |
-| `git_diff` | `git diff` | lcs line diff over staged changes |
-| `run_command` | available | **withheld** |
-| auth | open when oauth is unconfigured | always required |
+## Tools
 
-a vercel function has a read-only filesystem, no `git` binary, and no vercel
-cli, so the local tools cannot work there. in cloud mode `write_file` and
-`edit_file` stage changes in memory for the duration of one agent run, and
-`git_commit` flushes them all to github as a single atomic commit.
-
-`run_command` is deliberately not offered in cloud mode. the harness sits on a
-public url, and handing a model arbitrary shell execution there would be
-remote code execution on the deployment.
-
-### the self-deploy loop
-
-```
-agent edits its own source
-        ↓  git_commit  (github git data api)
-   commit lands on main
-        ↓  continuous deployment
-    vercel rebuilds
-        ↓
- the harness redeploys itself
-```
-
-committing *is* deploying.
-
-but a one-way loop is a broken loop. vercel builds on a machine the agent
-cannot reach, so before build feedback existed a single unbalanced brace
-produced fifteen consecutive red deploys that the agent never noticed — it
-kept committing on top of a dead deployment for hours.
-
-the loop is now closed at both ends:
-
-```
-agent edits its own source
-        |  git_commit
-   PARSE GATE  <-- refuses to commit .js/.json that does not parse
-        |
-   commit lands on main
-        |  continuous deployment
-    vercel rebuilds
-        |  vercel rest api (VERCEL_TOKEN)
- build state + error log read back
-        |
- injected into the conversation
-```
-
-- **parse gate** (`lib/syntax-check.js`) — `git_commit` runs `node --check`
-  over every changed `.js`/`.json` file and refuses the commit if any of them
-  fails, reporting the file and line back to the model. the browser-loop
-  relay `/api/git/commit-files` applies the same gate, so there is no back
-  door around it.
-- **build readback** (`lib/deploy-feedback.js`) — the `check_deployment` tool
-  reports the real result of the build a commit triggered. it reads from the
-  best source available:
-
-  | source | needs | gives you |
-  | --- | --- | --- |
-  | github commit status | the github token the harness already holds | pass / fail / pending, deployment id, inspector url |
-  | vercel rest api | `VERCEL_TOKEN` | all of the above **plus** vercel's error message and the build log tail |
-
-  the github path is why a fresh clone gets a closed loop with zero extra
-  configuration: vercel's github integration posts a commit status for every
-  build it runs, and that status is readable with the same token used to
-  commit. statuses are scoped to this project by name, so an unrelated (or
-  deleted) vercel project wired to the same repo cannot report a false red.
-- **automatic feedback** — every run opens with a health check on the live
-  deployment (a red build becomes the run's top priority), and every
-  successful `git_commit` is followed by a bounded watch on the build it
-  triggered. failures land in the conversation, not just the dashboard.
-
----
-
-## quick start
-
-### 1. configure credentials
-set your openrouter api key in `.env`:
-```env
-OPENROUTER_API_KEY=sk-or-v1-...
-```
-
-### 2. install dependencies & run server
-```bash
-npm install
-npm start
-```
-open `http://localhost:3000` (or `http://localhost:3001`).
-
-### 3. run via terminal cli
-```bash
-npm run cli -- "your prompt here"
-```
-
-### 4. deploy to vercel
-```bash
-npm run deploy
-```
-
----
-
-## deployment & github oauth
-
-the deployed harness is gated behind github oauth. this does double duty: it
-keeps the public url from letting anyone drain the openrouter key, and the
-token it returns is what gives the agent write access to the repository.
-
-### 1. create a github oauth app
-
-at **github.com → settings → developer settings → oauth apps → new oauth app**:
-
-| field | value |
+| tool | effect |
 | --- | --- |
-| application name | `vanish` |
-| homepage url | your deployment url |
-| authorization callback url | `<deployment url>/api/auth/github/callback` |
+| `read_file` | read from the working tree, falling back to GitHub on first touch |
+| `write_file` | create or overwrite; durable immediately |
+| `edit_file` | exact substring replacement; refuses ambiguous matches |
+| `list_dir` | list the branch, flagging locally modified files |
+| `git_status` | what differs from the last synced blob |
+| `git_commit` | every modified file as one atomic commit |
+| `sync_repo` | refresh the branch listing |
+| `task_complete` | declare the work finished |
 
-then generate a client secret.
+There is no `run_command`. Nothing executes shell commands in a browser.
 
-### 2. set the environment variables
+## Running it
 
-```bash
-vercel env add GITHUB_CLIENT_ID production
-vercel env add GITHUB_CLIENT_SECRET production
+```sh
+wasm-pack build --target web --out-dir web/pkg --no-typescript
+cargo run --features devserver --bin serve      # http://localhost:8787
 ```
 
-repeat for `preview` if you want sign-in on preview deployments. note that
-each deployment url must be registered as a callback url on the oauth app.
+`src/bin/serve.rs` is std-only Rust and exists only because wasm modules and
+workers need correct MIME types over HTTP. It is never deployed — `web/` is
+static files.
 
-### 3. redeploy so the new variables are picked up
+## Credentials
 
-```bash
-vercel deploy --prod
-```
+There is no backend, so there is no sign-in. GitHub OAuth cannot work here:
+the code-for-token exchange needs a client secret, and a secret shipped to a
+browser is not secret. Instead, in the settings panel:
 
-### environment variables
+- **OpenRouter API key** — from openrouter.ai/keys
+- **GitHub token** — a fine-grained PAT scoped to this repository with
+  `Contents: read and write`
 
-| variable | required | purpose |
-| --- | --- | --- |
-| `OPENROUTER_API_KEY` | yes | model access (`API_KEY` also accepted) |
-| `SESSION_SECRET` | yes (cloud) | seals the session cookie |
-| `GITHUB_CLIENT_ID` | yes (cloud) | oauth app id |
-| `GITHUB_CLIENT_SECRET` | yes (cloud) | oauth app secret |
-| `GITHUB_REPO` | no | repo the agent may edit (default `compusophy/vanish`) |
-| `GITHUB_BRANCH` | no | branch it commits to (default `main`) |
-| `ALLOWED_GITHUB_LOGINS` | no | comma separated allowlist; defaults to the repo owner |
-| `PUBLIC_BASE_URL` | no | pins the oauth callback origin |
-| `GITHUB_TOKEN` | no | headless fallback for cron runs with no browser |
-| `VERCEL_DEPLOY_HOOK_URL` | no | forces a rebuild without a commit |
-| `VERCEL_TOKEN` | no | upgrades build feedback from pass/fail to the full build log |
-| `VERCEL_PROJECT_ID` | no | auto-injected on vercel; set it for local runs |
-| `VERCEL_TEAM_ID` | with `VERCEL_TOKEN` | required when the project lives under a team (`team_...`) |
-| `VERCEL_PROJECT_NAME` | no | pins which vercel project's commit status counts; derived from `VERCEL_BRANCH_URL` otherwise |
+Both are stored in your browser's `localStorage`, never in the deployed
+bundle. Saving verifies each against the real service and reports which half
+failed.
 
-rotating `SESSION_SECRET` invalidates every existing session.
+## Deployment
 
-### continuous deployment
+Vercel hosts `web/` as static files and compiles the Rust at build time
+(`build.sh`). The wasm is deliberately **not** committed: this repository
+edits itself, so a checked-in artifact would never reflect the agent's own
+changes.
 
-the vercel project is connected to the github repository, so every push to
-`main` deploys to production and every push to another branch gets a preview
-url. that is what closes the self-editing loop: when the agent commits, the
-harness redeploys itself.
+The running build is stamped with its commit. The UI polls the branch head
+and, when a newer build exists, shows the changelog and reloads itself —
+deferring while a run is in flight.
+
+## Conventions
+
+Write code in the casing correct for its language. There is no case policy.
+An earlier version enforced lowercase globally, which corrupted every
+identifier the agent generated; see `D6` in
+[memory/TASKBOARD.md](memory/TASKBOARD.md).

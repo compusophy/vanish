@@ -1,3 +1,10 @@
+> **HISTORICAL — do not act on this document.**
+>
+> This plan targets the pre-rebuild Express/serverless harness (`lib/app.js`,
+> `lib/tools.js`, `run_command`, two-mode local/github). None of that code
+> exists any more. It is kept for the benchmark reasoning only. For the
+> current architecture see ARCHITECTURE.md.
+
 # vanish refactor plan — benchmark-first self-improvement
 
 > prime directive: make vanish score higher on terminal-bench 3.0, swe-bench

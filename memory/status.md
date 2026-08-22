@@ -51,5 +51,5 @@
 - markdown-only commits are safe (cannot break the deploy) — use them
   to checkpoint progress.
 - code commits: review git_diff first. committing is deploying.
-- note: file contents are camelCase on disk; the ui transcript lowercases
-  everything for display. match casing exactly when editing.
+- the ui no longer transforms case. what you read in a tool result is what
+  is on disk, so no casing workaround is needed when editing.
