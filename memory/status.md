@@ -3,46 +3,37 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed this run (commit: keep-going + step budget semantics)
+## landed this run (web access + self-improvement directive)
 
-- [x] `lib/agent.js`: new `keepGoing` option on `runAgentLoop`. when true and
-      the model tries to finish early (0 tool calls) with steps left in the
-      budget, the loop refuses the exit, pushes a "keep going" user nudge
-      into the conversation, emits a `continue_nudge` event, and continues
-      until the full `maxSteps` budget is exhausted (or abort).
-- [x] `lib/app.js`: `/api/agent/run` reads `keepGoing` from the body and
-      passes it into the loop (`keepGoing === true`).
-- [x] `public/index.html`: added `#chk-keep-going` toggle in the dock header,
-      positioned immediately left of the "new chat" button (user requirement).
-- [x] `public/app.js`: persists toggle state in localStorage
-      (`vanish_keep_going`), sends `keepGoing` in the run request, renders
-      `continue_nudge` as a glowing chip in the agent feed.
-- [x] `public/style.css`: `.keep-going-toggle` switch styles (emerald when on)
-      + `.continue-nudge` chip with pulse animation.
+- [x] `src/agent/tools.rs`: three new tools wired to the existing fetch
+      client in `src/agent/http.rs`:
+      - `http_fetch` — arbitrary method/headers/body, 20k-char truncation
+        (char-boundary safe), returns status + body.
+      - `web_read` — any https page as text via `https://r.jina.ai/{url}`
+        reader proxy, which sends permissive cors headers.
+      - `web_search` — duckduckgo instant-answer api (`api.duckduckgo.com`),
+        abstract/answer/definition/related topics.
+- [x] `src/agent/mod.rs` system prompt: web tools documented; new
+      "self-maintenance" section making capability-gaps into work items; new
+      rule 7 requiring memory/ updates before task_complete.
+- [x] `memory/TASKBOARD.md`: lesson recorded — describe your limits from the
+      substrate, not the tool list.
 
-## semantics now
+## what was learned this run
 
-- keep going off (default): agent finishes as soon as it stops calling tools
-  (previous behavior).
-- keep going on: agent is forced to spend the entire step budget; each early
-  finish attempt gets a nudge to verify/refine/harden until steps run out.
+- the agent claimed "no network access" while its own runtime made network
+  requests every turn. the tool list is an interface, not a description of
+  capability. read the source before stating a limit.
+- the user's framing ("change yourself so this happens automatically") is
+  the right shape for self-editing agents: fixes that live only in a reply
+  evaporate; fixes that live in the prompt + memory files recur every run.
 
-## lesson learned this run
+## still open
 
-- a 20-step run died at exactly step 20 trying to git_commit: all staged
-  edits were lost and had to be redone from scratch. commit EARLY — after
-  the first couple of file edits, not at the end of the run. staged work
-  does NOT survive between runs, ever.
-
-## still open (from docs/refactor_plan.md)
-
-- [ ] re-land hardened agent loop: retry with backoff on 429/5xx,
-      consecutive-error threshold 3, finish_reason handling
-- [ ] shared edit engine in lib/tools.js: occurrence-indexed replace,
-      replace_all, fuzzy fallback
-- [ ] .github/workflows/ci.yml (node --test on push)
-- [ ] test/session.test.js + test/edit-engine.test.js
-- [ ] ci_status tool (github checks api)
+- [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,
+      add an opfs cache keyed by url with a ttl.
+- [ ] duckduckgo instant answers only cover abstract-style queries; for
+      full results pages, chain `web_search` → `web_read` on a result url.
 
 ## rules for the next run
 

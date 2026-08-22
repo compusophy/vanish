@@ -62,6 +62,11 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] web access — `http_fetch`, `web_read` (r.jina.ai reader proxy),
+      `web_search` (duckduckgo instant answers) in `src/agent/tools.rs`,
+      wired to the existing `src/agent/http.rs` fetch client. no new infra.
+      open follow-ups: r.jina.ai may rate-limit anonymous requests; if
+      `web_read` starts returning 429, consider caching reads in opfs.
 - [ ] wire the file tree: clicking a path should open it in an editor pane
       (`Command::ReadFile` and `Event::FileContent` already exist and work;
       only the click handler and the editor element are missing).
@@ -86,3 +91,15 @@ a short-lived stateless container:
    up — `public/app.js` still called the old endpoint. dead code.
 
 the rebuild removes the container, so none of the three has anywhere to live.
+
+## history worth not repeating, part 2
+
+the agent once told the user it had no network access and no way to search
+the web. this was false: `src/agent/http.rs` already had a full fetch client
+(openrouter, github api, sse streaming) — the capability existed one layer
+below the tool list, and the agent described itself from the tool list
+instead of reading its own source. lesson: **inventory the substrate before
+declaring a limit.** "i don't have a tool for X" and "X is impossible" are
+different claims, and only the first is usually true. the standing fix is in
+the system prompt: notice a missing capability → treat it as a work item →
+edit the source → write the lesson to memory/.

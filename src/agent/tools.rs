@@ -7,6 +7,7 @@
 //! that outlives the run, the tab, and the browser.
 
 use crate::agent::github::{FileChange, Github};
+use crate::agent::http;
 use crate::platform::opfs::{self, Index, IndexEntry};
 
 pub struct Workspace {
@@ -103,6 +104,47 @@ pub fn definitions() -> serde_json::Value {
           "name": "sync_repo",
           "description": "pull the branch head from github into the working tree. this DISCARDS local edits to files that changed upstream, so commit first.",
           "parameters": { "type": "object", "properties": {} }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "http_fetch",
+          "description": "make an arbitrary http request and return the status and body as text (truncated). works against any cors-enabled endpoint (github api, wikipedia, open-meteo, most public apis). endpoints that omit cors headers cannot be called from a browser — use web_read for those.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "url": { "type": "string" },
+              "method": { "type": "string", "description": "default GET" },
+              "headers": { "type": "object", "description": "optional string-to-string header map" },
+              "body": { "type": "string", "description": "optional request body" }
+            },
+            "required": ["url"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_read",
+          "description": "fetch an arbitrary public web page as readable text via the https://r.jina.ai reader proxy, which sends permissive cors headers. use this to read documentation, articles, or any page http_fetch cannot reach directly.",
+          "parameters": {
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "required": ["url"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "web_search",
+          "description": "search the web via the duckduckgo instant-answer api. returns an abstract plus related topics. good for facts and lookups; follow up with web_read on a specific url for depth.",
+          "parameters": {
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+          }
         }
       },
       {
@@ -340,6 +382,105 @@ impl Workspace {
                     "branch": self.github.branch,
                     "uncommitted_local_files": dirty,
                     "note": "tree listing refreshed. files are fetched lazily on first read.",
+                })
+                .to_string())
+            }
+
+            "http_fetch" => {
+                let url = arg(&args, "url").ok_or("http_fetch requires 'url'")?;
+                let method = arg(&args, "method").unwrap_or("GET").to_uppercase();
+                let mut headers: Vec<(String, String)> = Vec::new();
+                if let Some(h) = args.get("headers").and_then(|v| v.as_object()) {
+                    for (k, v) in h {
+                        if let Some(s) = v.as_str() {
+                            headers.push((k.clone(), s.to_string()));
+                        }
+                    }
+                }
+                let header_refs: Vec<(&str, String)> =
+                    headers.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                let body = arg(&args, "body").map(|s| s.to_string());
+
+                // the underlying client is the same one openrouter and github
+                // already use; there is no proxy and no server in between.
+                let resp = http::request(
+                    &method,
+                    url,
+                    &header_refs,
+                    body.as_deref(),
+                )
+                .await?;
+
+                // capture status before the body is moved into the
+                // truncation branch below.
+                let status = resp.status;
+
+                let truncated = if resp.body.len() > 20_000 {
+                    let head: String = resp.body.chars().take(20_000).collect();
+                    // char-boundary-safe truncation: byte length of what was kept
+                    let kept = head.len();
+                    format!(
+                        "{head}\n\n[truncated: {kept} of {} bytes shown]",
+                        resp.body.len()
+                    )
+                } else {
+                    resp.body
+                };
+
+                Ok(serde_json::json!({
+                    "status": status,
+                    "ok": (200..300).contains(&status),
+                    "body": truncated,
+                })
+                .to_string())
+            }
+
+            "web_read" => {
+                let url = arg(&args, "url").ok_or("web_read requires 'url'")?;
+                if !url.starts_with("https://") {
+                    return Err("web_read requires an https:// url".to_string());
+                }
+                let reader_url = format!("https://r.jina.ai/{url}");
+                let resp = http::request("GET", &reader_url, &[], None).await?;
+                if !resp.ok() {
+                    return Err(format!(
+                        "reader returned http {} for {url}: {}",
+                        resp.status,
+                        resp.body.chars().take(300).collect::<String>()
+                    ));
+                }
+                Ok(serde_json::json!({
+                    "url": url,
+                    "content": resp.body.chars().take(30_000).collect::<String>(),
+                })
+                .to_string())
+            }
+
+            "web_search" => {
+                let query = arg(&args, "query").ok_or("web_search requires 'query'")?;
+                let encoded = js_sys::encode_uri_component(query)
+                    .as_string()
+                    .unwrap_or_else(|| query.to_string());
+                let url = format!(
+                    "https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&no_redirect=1"
+                );
+                let resp = http::request("GET", &url, &[], None).await?;
+                if !resp.ok() {
+                    return Err(format!(
+                        "search returned http {}: {}",
+                        resp.status,
+                        resp.body.chars().take(300).collect::<String>()
+                    ));
+                }
+                let parsed: serde_json::Value = serde_json::from_str(&resp.body)
+                    .map_err(|e| format!("could not parse search response: {e}"))?;
+                Ok(serde_json::json!({
+                    "query": query,
+                    "abstract": parsed.get("AbstractText"),
+                    "abstract_url": parsed.get("AbstractURL"),
+                    "answer": parsed.get("Answer"),
+                    "definition": parsed.get("Definition"),
+                    "related": parsed.get("RelatedTopics"),
                 })
                 .to_string())
             }
