@@ -84,11 +84,21 @@ taskboard) asked for four things. all four are resolved:
       thread — done: `src/platform/transcript.rs`, `Event::HistoryRestored`
       replay on boot, retention cap (200 messages / 4MB), clear-conversation
       button. ota reloads are now non-destructive.
-- [ ] save the transcript after each step, not just at run end, so even
-      "update now anyway" clicked mid-run loses nothing. transcript.rs is
-      the place; worker.rs Run handler calls save() once today.
+- [x] save the transcript after each step, not just at run end, so even
+      "update now anyway" clicked mid-run loses nothing. done in 030256f +
+      761eaaa: agent::run takes a persist callback (prompt / each tool
+      result / loop nudges) and the worker checkpoints through a serialized
+      drain queue. a reload mid-run now costs at most the step in flight.
+- [x] prompt drafts survive reloads — localStorage write-through on input,
+      restored at boot (`vanish.prompt.draft`), cleared when sent.
+- [ ] web/index.html has no inputs for the vercel token/team-id that the
+      Config struct and hydrate/collect already support. adding two fields
+      to the credentials section would make build-log reading configurable;
+      today it relies on set_input no-oping and a hardcoded team default.
 - [ ] `sync_repo` only refreshes the tree listing; it does not yet reconcile
-      upstream changes against dirty local files.
+      upstream changes against dirty local files. related incident: local
+      read_file served stale content for tools.rs even after sync_repo; when
+      versions disagree, fetch the raw blob from github.
 - [ ] wasm64 is a one-line target change once `wasm64-unknown-unknown` leaves
       tier 3 and wasm-bindgen supports it. wasm32 gives a 4gb address space,
       which is far past what this needs.

@@ -110,6 +110,52 @@
       state centers it via `margin: 0 auto` either way. deployed green
       (778f294).
 
+## landed this run (durability + the great reconciliation)
+
+- [x] **prompt drafts survive reloads** (030256f): every keystroke in the
+      prompt box writes through to localStorage (`vanish.prompt.draft`) and
+      is restored on boot; cleared when the message is actually sent or the
+      box emptied by hand. an ota reload mid-typing no longer destroys work.
+- [x] **mid-run transcript checkpoints** (030256f + 761eaaa): agent::run now
+      takes a `persist` callback fired after every durable unit — the user's
+      prompt, each tool result, each loop-mode nudge. the worker serializes
+      these through a drain queue (`Rc<RefCell<(Option<Vec<Message>>, bool)>>`)
+      so overlapping opfs writes can never land out of order, and the final
+      authoritative save waits for the queue to drain first. a reload mid-run
+      now costs at most the step in flight, not the whole run.
+- [x] **main un-broken** (761eaaa). what happened: an earlier session added
+      the vercel build-log integration to tools.rs / feed.rs / protocol.rs
+      but never updated agent/mod.rs, worker.rs, ui/mod.rs. main failed to
+      compile from that moment and every subsequent deploy was pinned to the
+      last good build. my durability commit inherited that red state, and its
+      build log exposed both my real errors and the pre-existing ones:
+      - mine: doc comments inside a where clause are unstable rust (use `//`);
+        tuple != on a non-PartialEq element; fixed directly.
+      - pre-existing: missing `pub mod vercel`, ConfigStatus without
+        vercel_ok, Config missing vercel_token/vercel_team_id,
+        finish_settings_check never defined, move-borrow of the collapse
+        button in wire_rails.
+      fix: fetched the vercel-era versions of the three straggler files from
+      the parent commit via raw.githubusercontent (the local read_file was
+      serving stale content for tools.rs even after sync_repo — trust the raw
+      fetch when versions disagree), then re-applied my changes on top.
+
+## what was learned this run
+
+- the local working tree can serve stale file contents even after sync_repo.
+  when a build error references code that does not match what read_file
+  shows, fetch the raw blob from github before concluding anything.
+- committing to main while main is red means inheriting someone else's
+  failure. check_deployment on the *parent* state (or just reading the last
+  build log) would have shown the vercel breakage before I built on it.
+- doc comments are attributes; attributes in where clauses are unstable.
+  comments there must be plain `//`.
+- the settings-save throttle, vercel fields, etc. exist upstream but have no
+  inputs in web/index.html — set_input/input_value no-op on missing ids, so
+  this is deliberate-ish and harmless; noted here so a future "vercel token
+  field missing" report is answered fast: the fields were simply never added
+  to the panel.
+
 ## still open
 
 - [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,
