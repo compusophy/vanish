@@ -122,24 +122,10 @@
 
         <!-- autonomy settings -->
         <div class="sidebar-section config-section">
-          <span class="sidebar-section-title">harness config</span>
+          <span class="sidebar-section-title">reasoning</span>
           <div class="param-row">
             <div class="param-header">
-              <label for="param-steps">step budget (soft cap)</label>
-              <span class="param-num" id="val-steps">20</span>
-            </div>
-            <input
-              type="range"
-              id="param-steps"
-              min="1"
-              max="100"
-              value="20"
-            />
-          </div>
-
-          <div class="param-row">
-            <div class="param-header">
-              <label for="param-effort">reasoning effort</label>
+              <label for="param-effort">effort</label>
               <span class="param-num" id="val-effort">high</span>
             </div>
             <select id="param-effort" class="select-dark">
@@ -377,6 +363,81 @@
           </section>
         </div>
 
+        <!-- right-hand harness config panel (mirrors left sidebar) -->
+        <aside class="config-panel" id="config-panel">
+          <div class="sidebar-header">
+            <div class="brand">
+              <div class="brand-glyph">⚙</div>
+              <div class="brand-text">
+                <span class="brand-title">harness</span>
+                <span class="brand-subtitle">agent configuration</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- autonomy: fully managed by the system, no user-facing budget -->
+          <div class="sidebar-section config-section">
+            <span class="sidebar-section-title">autonomy</span>
+            <div class="config-note">
+              the agent manages its own step budget. it works until its task is
+              verified done — simple tasks end fast, hard ones run long.
+            </div>
+            <label
+              class="keep-going-toggle config-row"
+              title="loop mode: never self-terminate — run until human intervention"
+            >
+              <input type="checkbox" id="chk-loop-mode" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-label">∞ loop mode — run until i press stop</span>
+            </label>
+          </div>
+
+          <!-- reasoning effort -->
+          <div class="sidebar-section config-section">
+            <span class="sidebar-section-title">reasoning</span>
+            <div class="param-row">
+              <div class="param-header">
+                <label for="param-effort">effort</label>
+                <span class="param-num" id="val-effort">high</span>
+              </div>
+              <select id="param-effort" class="select-dark">
+                <option value="high" selected>high (deep reflection)</option>
+                <option value="medium">medium (balanced)</option>
+                <option value="low">low (rapid)</option>
+                <option value="none">none (direct)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- session info -->
+          <div class="sidebar-section config-section">
+            <span class="sidebar-section-title">session</span>
+            <div class="footer-status-item">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
+                <polyline points="16 18 22 12 16 6"></polyline>
+                <polyline points="8 6 2 12 8 18"></polyline>
+              </svg>
+              <span id="config-thread-label">thread: main</span>
+            </div>
+            <div class="footer-status-item">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M12 2v2m0 16v2m4.93-4.93l1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+              </svg>
+              <span id="config-model-label">stealth/ox-alpha</span>
+            </div>
+          </div>
+
+          <div class="sidebar-footer">
+            <div class="footer-status-item">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none">
+                <polygon points="12 2 2 22 22 22"></polygon>
+              </svg>
+              <span id="sidebar-vercel-label-right">vercel ready</span>
+            </div>
+          </div>
+        </aside>
+
         <!-- floating bottom prompt dock for agent loop -->
         <div class="harness-dock">
           <div class="dock-inner">
@@ -389,24 +450,16 @@
                 <select id="thread-select" class="select-dark-inline" title="chat threads — separate conversations per agent"></select>
                 <label
                   class="keep-going-toggle"
-                  title="force the agent to use its full step budget before finishing"
+                  title="loop mode: the agent never self-terminates — it runs until you press stop, always finding the next most valuable action"
                 >
                   <input type="checkbox" id="chk-loop-mode" />
                   <span class="toggle-track"><span class="toggle-thumb"></span></span>
                   <span class="toggle-label">∞ loop</span>
                 </label>
-                <label
-                  class="keep-going-toggle"
-                  title="let the agent verify its work instead of stopping at first draft"
-                >
-                  <input type="checkbox" id="chk-keep-going" />
-                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                  <span class="toggle-label">keep going</span>
-                </label>
                 <button
                   class="btn-sm"
                   id="btn-new-chat"
-                  title="clear conversation history and start a fresh session"
+                  title="start a fresh thread (old threads stay in the switcher)"
                 >
                   new chat
                 </button>
