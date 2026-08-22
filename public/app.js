@@ -665,6 +665,29 @@ document.addEventListener('DOMContentLoaded', () => {
           break;
         }
 
+        case 'time_wrapup': {
+          const w = document.createElement('div');
+          w.className = 'continue-nudge retry-note';
+          w.textContent = '⏳ time budget low — agent told to commit staged work and wrap up';
+          el.agentStepsFeed.appendChild(w);
+          scrollToBottom();
+          break;
+        }
+
+        case 'time_budget_exhausted': {
+          state.isAgentRunning = false;
+          const t = document.createElement('div');
+          t.className = 'death-report';
+          t.innerHTML =
+            `<div class="death-title">⏳ run ended at the serverless time wall</div>` +
+            `<div class="death-reason">stopped gracefully after ${ev.elapsedMs ? Math.round(ev.elapsedMs / 1000) : '?'}s — staged work preserved, nothing lost.</div>` +
+            `<div class="death-meta">this is the hobby-tier 60s function cap, not a crash. upgrade the vercel plan or split work into smaller prompts to run longer.</div>`;
+          el.agentStepsFeed.appendChild(t);
+          showToast(`run wrapped at ~${Math.round((ev.elapsedMs || 0) / 1000)}s — work committed, not lost`);
+          scrollToBottom();
+          break;
+        }
+
         case 'agent_context': {
           if (Array.isArray(ev.messages)) {
             state.history = ev.messages;
