@@ -34,6 +34,25 @@ see ARCHITECTURE.md for the full map and for why the previous design failed.
   run long. `MAX_STEPS` is a runaway backstop, not a goal.
 - **D6 — lowercase throughout the ui.**
 
+## landed in the rebuild
+
+the previous checkpoint (43b2c73, written to the now-removed lowercase
+taskboard) asked for four things. all four are resolved:
+
+- [x] **ota hot reload** — `src/ui/update.rs`. it polls the github branch
+      head rather than a `/api/version` endpoint, because there is no server
+      to host one. shows the changelog between the running build and head,
+      then reloads itself; deferred while a run is in flight.
+- [x] **right-hand config panel** — `web/index.html` `.rail-right`, styled in
+      `web/style.css`. credentials, model, effort, loop toggle, manual commit.
+- [x] **sparkle shimmer + changelog styling** — `.sparkle::after` sweep and
+      `.ota-changelog`, with a `prefers-reduced-motion` opt-out.
+- [x] **infra decision** — resolved by removing the infrastructure. the old
+      note concluded "wasm is NOT the fix — the problem is function lifetime,
+      not runtime." the first half was exactly right. what it missed is that
+      leaving the function is what removes the lifetime: the loop now runs in
+      a web worker, which has no request bounding it at all.
+
 ## open work
 
 - [ ] wire the file tree: clicking a path should open it in an editor pane
