@@ -128,7 +128,7 @@ pub fn note(text: &str) {
     append(&n);
 }
 
-pub fn error(scope: &str, message: &str) {
+fn error_card(scope: &str, message: &str) -> Element {
     let card = create("div", "error-card");
     let title = create("div", "error-title");
     title.set_text_content(Some(&format!("⚠ {scope} error")));
@@ -136,8 +136,25 @@ pub fn error(scope: &str, message: &str) {
     body.set_text_content(Some(message));
     let _ = card.append_child(&title);
     let _ = card.append_child(&body);
+    card
+}
+
+pub fn error(scope: &str, message: &str) {
+    let card = error_card(scope, message);
     append(&card);
     set_status("error", false);
+}
+
+/// boot-time failures have no run to mark as errored, but they must still
+/// draw (D4). used by settings loading before any status exists.
+pub fn append_error(message: &str) {
+    let card = error_card("settings", message);
+    append(&card);
+}
+
+/// for callers that built their own card shape but need it placed in the feed.
+pub fn append_card(card: &Element) {
+    append(card);
 }
 
 /// lazily create the streaming target for the current step.

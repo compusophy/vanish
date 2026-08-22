@@ -39,7 +39,14 @@ impl Config {
     }
 }
 
+/// `serde(default)` on the container matters: a config saved by an older
+/// build that lacks a newer field must still load. without it, any deploy
+/// that touched this shape silently failed to parse the stored json, wiped
+/// the user's credentials, and made them press "save settings" on every
+/// page load even though the fields looked filled (by browser autofill,
+/// not by us).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub openrouter_key: String,
     pub github_token: String,

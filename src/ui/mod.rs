@@ -98,17 +98,86 @@ fn checkbox(id: &str) -> bool {
 
 const STORE: &str = "vanish.config";
 
-fn load_config() -> Config {
-    let stored: Option<Config> = web_sys::window()
-        .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item(STORE).ok().flatten())
-        .and_then(|raw| serde_json::from_str(&raw).ok());
+/// what load_config found in storage. `Corrupt` is a distinct outcome, not
+/// an empty config: silently mapping a parse failure onto "no credentials"
+/// is how a returning user ends up re-pasting keys on every page load while
+/// believing they were saved (D4 — surface every failure).
+enum Loaded {
+    /// nothing has ever been saved.
+    Fresh,
+    /// stored json parsed cleanly.
+    Stored(Config),
+    /// something was saved but could not be parsed. keep the raw text so
+    /// the user can recover their key from it instead of losing it.
+    Corrupt(String),
+}
 
+fn raw_config() -> Result<Loaded, String> {
+    let storage = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .ok_or("browser storage is unavailable (private mode or blocked cookies)")?;
+
+    let Some(raw) = storage.get_item(STORE).ok().flatten() else {
+        return Ok(Loaded::Fresh);
+    };
+
+    match serde_json::from_str::<Config>(&raw) {
+        Ok(cfg) => Ok(Loaded::Stored(cfg)),
+        // the parse error goes to the console; the raw text stays available
+        // to the user through export_corrupt_config.
+        Err(e) => {
+            web_sys::console::warn_1(&JsValue::from_str(&format!(
+                "saved settings could not be read ({e}); they were kept but are not loaded"
+            )));
+            Ok(Loaded::Corrupt(raw))
+        }
+    }
+}
+
+/// a corrupt store must not become a black hole. park the raw json somewhere
+/// recoverable and say so, instead of leaving the user to discover their key
+/// is gone by pasting over it.
+fn export_corrupt_config(raw: &str) {
+    let backup_key = format!("{STORE}.corrupt");
+    if let Some(storage) = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+    {
+        let _ = storage.set_item(&backup_key, raw);
+    }
+
+    let card = create("div", "error-card");
+    let title = create("div", "error-title");
+    title.set_text_content(Some("⚠ saved settings could not be read"));
+    let body = create("div", "error-body");
+    body.set_text_content(Some(
+        "the settings stored in this browser did not parse (usually a version \
+         mismatch). your previous values were kept under the localStorage key \
+         \"vanish.config.corrupt\" — inspect and copy them out before saving \
+         over them.",
+    ));
+    let _ = card.append_child(&title);
+    let _ = card.append_child(&body);
+    super::feed::append_card(&card);
+}
+
+fn load_config() -> Config {
     // defaults fill gaps rather than applying only to a blank slate. a
     // half-finished config — one credential saved, the rest untouched — used
     // to suppress every default, so the repo field came back empty and had
     // to be typed by hand for no reason.
-    let mut cfg = stored.unwrap_or_default();
+    let mut cfg = match raw_config() {
+        Err(e) => {
+            super::feed::append_error(&e);
+            Config::default()
+        }
+        Ok(Loaded::Fresh) => Config::default(),
+        Ok(Loaded::Stored(c)) => c,
+        Ok(Loaded::Corrupt(raw)) => {
+            export_corrupt_config(&raw);
+            Config::default()
+        }
+    };
+
     if cfg.repo.trim().is_empty() {
         // this harness edits its own repository, so defaulting to it is
         // correct rather than presumptuous.
@@ -123,6 +192,13 @@ fn load_config() -> Config {
     if cfg.reasoning_effort.trim().is_empty() {
         cfg.reasoning_effort = "high".to_string();
     }
+
+    // whatever reached this point — defaults, a stored config with gaps, or
+    // the healing of a corrupt store — is what the ui is now showing. write
+    // it back so the next reload reads exactly what is on screen, instead of
+    // silently re-deriving it every boot.
+    let _ = save_config(&cfg);
+
     cfg
 }
 
