@@ -167,6 +167,23 @@
       re-renders. next iterations noted on the taskboard (per-file commit
       button, dirty highlight of the open file).
 
+## landed this run (loop mode survives refresh)
+
+- [x] **the loop restarts itself after its own death** (a282862 + ba97c58).
+      loop mode's promise was "run until stopped", but a reload killed the
+      worker and the restored transcript sat idle. now: a LoopResume marker
+      (conversation, prompt, timestamp) lives in the transcript index while a
+      loop run is in flight and is cleared the moment it ends. boot finds it,
+      parks the prompt until Configure confirms working credentials (at boot
+      STATE.config is empty — resuming earlier would bounce off the check),
+      then start_run resumes. take_loop_resume clears on read so no failure
+      mode can turn every future boot into an involuntary run.
+- [x] protocol gained Event::Note for informational worker messages; feed
+      renders them as plain notes.
+- build miss caught by check_deployment: adding a field to Index broke the
+  literal initializer in migrate_legacy. struct literals should use
+  ..Default::default() when the struct has serde(default) + Default.
+
 ## still open
 
 - [ ] r.jina.ai anonymous rate limits: if `web_read` starts returning 429,

@@ -93,6 +93,14 @@ taskboard) asked for four things. all four are resolved:
       drain queue. a reload mid-run now costs at most the step in flight.
 - [x] prompt drafts survive reloads — localStorage write-through on input,
       restored at boot (`vanish.prompt.draft`), cleared when sent.
+- [x] loop mode survives page refreshes (a282862 + ba97c58). a LoopResume
+      marker in the transcript index is written when a loop run starts and
+      cleared when it ends; on boot a marker for the active conversation
+      parks the prompt in PENDING_RESUME until Configure confirms working
+      credentials, then start_run resumes. take_loop_resume clears on read,
+      so a failed resume cannot loop boots forever. next iteration: surface
+      the pending-resume state in the ui (a "resuming…" chip) so an
+      interrupted loop is visible even if Configure never arrives.
 - [ ] web/index.html has no inputs for the vercel token/team-id that the
       Config struct and hydrate/collect already support. adding two fields
       to the credentials section would make build-log reading configurable;
