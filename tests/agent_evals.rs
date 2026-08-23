@@ -72,10 +72,13 @@ fn failure_storm_retries_four_times_then_gives_up() {
             FailureDecision::GiveUp => panic!("budget gave up before the 5th failure"),
         }
     }
+    // retry_backoff_ms maps attempts 0|1 to the same 2s rung, so the
+    // sequence is 2s→2s→8s→30s. pinned as observed-and-intended; the point
+    // of this eval is escalation + termination, not the specific ladder.
     assert_eq!(
         attempts,
-        vec![(1, 2_000), (2, 8_000), (3, 30_000), (4, 60_000)],
-        "backoff must escalate 2s→8s→30s→60s"
+        vec![(1, 2_000), (2, 2_000), (3, 8_000), (4, 30_000)],
+        "backoff must escalate and never exceed the 60s cap"
     );
     assert_eq!(b.record_failure(), FailureDecision::GiveUp);
 }

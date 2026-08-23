@@ -54,7 +54,10 @@ test -f web/pkg/vanish.js      || { echo "build produced no js glue"; exit 1; }
 # bricking every deploy — but a compiled test that FAILS is fatal: broken
 # logic must not ship.
 echo "--> running native test suite"
-if ! cargo test --lib --tests 2>&1; then
+# serialized: a parallel run interleaves completion lines and a hard failure
+# can kill the harness before most tests print, leaving a log that names
+# nothing. one thread costs seconds and makes every failure self-identifying.
+if ! cargo test --lib --tests -- --test-threads=1 2>&1; then
   echo ""
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   echo "!! NATIVE TESTS FAILED OR UNCOMPILABLE                       !!"
