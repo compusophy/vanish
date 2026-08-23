@@ -233,6 +233,14 @@
   url serves an auth interstitial instead of the app, nothing (human or
   playwright) can test against it until protection is relaxed for previews.
 
+## landed this run (scrollbar styling)
+
+- [x] web/style.css: slim dark scrollbars (06e3c9f). the win95 look was
+      unstyled native chrome. `* { scrollbar-width: thin; scrollbar-color }`
+      for firefox + `::-webkit-scrollbar` block for chromium/safari, thumb
+      rgba dim-grey 35% on transparent track, emerald hover accent,
+      transparent corner. deployed green.
+
 ## rules for the next run
 
 - commit early, commit often. one small atomic commit beats one big
