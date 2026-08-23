@@ -67,65 +67,6 @@ fn emit(event: Event) {
     }
 }
 
-/// emit stamped with the conversation it belongs to. run-scoped events carry
-/// this so phase 2 (a worker per conversation) can route them without the ui
-/// having to guess; until more than one worker exists, every tag is simply
-/// the active conversation and changes nothing visible.
-fn emit_for(event: Event, thread: &str) -> Event {
-    let tagged = match event {
-        Event::StepStarted { step, .. } => Event::StepStarted {
-            thread: thread.to_string(),
-            step,
-        },
-        Event::Reasoning { delta, .. } => Event::Reasoning {
-            thread: thread.to_string(),
-            delta,
-        },
-        Event::Content { delta, .. } => Event::Content {
-            thread: thread.to_string(),
-            delta,
-        },
-        Event::ToolStarted { id, name, args, .. } => Event::ToolStarted {
-            thread: thread.to_string(),
-            id,
-            name,
-            args,
-        },
-        Event::ToolFinished {
-            id,
-            name,
-            ok,
-            result,
-            ..
-        } => Event::ToolFinished {
-            thread: thread.to_string(),
-            id,
-            name,
-            ok,
-            result,
-        },
-        Event::RunFinished { steps, reason, .. } => Event::RunFinished {
-            thread: thread.to_string(),
-            steps,
-            reason,
-        },
-        Event::Error { scope, message, .. } => Event::Error {
-            thread: thread.to_string(),
-            scope,
-            message,
-        },
-        Event::Note { text, .. } => Event::Note {
-            thread: thread.to_string(),
-            text,
-        },
-        other => other,
-    };
-    emit(tagged);
-    // return value is a convenience for callers that want the tagged shape;
-    // nobody needs it yet.
-    tagged
-}
-
 /// which conversation the worker currently has loaded. used to stamp
 /// run-scoped events; empty before boot completes, which the ui treats as
 /// "whatever thread is active".
@@ -146,6 +87,7 @@ pub fn boot_worker() {
             Ok(c) => c,
             Err(e) => {
                 emit(Event::Error {
+                    thread: String::new(),
                     scope: "worker".to_string(),
                     message: format!("unrecognised command from ui: {e}"),
                 });
@@ -481,6 +423,7 @@ fn spawn_run(config: Config, prompt: String) {
                 publish_conversations(&index);
             }
             Err(e) => emit(Event::Error {
+                thread: conversation_id.clone(),
                 scope: "transcript".to_string(),
                 message: format!("could not save the conversation: {e}"),
             }),

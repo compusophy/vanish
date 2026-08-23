@@ -219,7 +219,7 @@ pub fn render(ui: &Shared, event: Event) {
 
 /// collapse another conversation's traffic into a one-line badge on its
 /// sidebar row instead of interleaving it with the visible feed.
-fn background_activity(ui: &Shared, thread: &str, event: &Event) {
+fn background_activity(_ui: &Shared, thread: &str, event: &Event) {
     let summary = match event {
         Event::StepStarted { step, .. } => Some(format!("step {step}")),
         Event::ToolStarted { name, .. } => Some(format!("⚡ {name}")),
@@ -468,14 +468,14 @@ fn render_active(ui: &Shared, event: Event) {
             super::update::apply_pending_if_any();
         }
 
-        Event::Error { scope, message } => {
+        Event::Error { scope, message, .. } => {
             // any failure path also re-arms the save button; a lock that only
             // clears on success is one that eventually never clears.
             super::finish_settings_check();
             error(&scope, &message)
         }
 
-        Event::Note { text } => note(&text),
+        Event::Note { text, .. } => note(&text),
 
         Event::Tree { entries } => {
             let Some(tree) = by_id("tree") else { return };

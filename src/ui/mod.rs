@@ -7,6 +7,7 @@
 //! supposed to cancel.
 
 mod feed;
+mod notify;
 pub mod update;
 
 use std::cell::RefCell;

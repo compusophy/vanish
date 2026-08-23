@@ -96,6 +96,7 @@ where
     // the whole run and reads like a mysterious commit failure.
     if let Err(e) = github.verify().await {
         emit(Event::Error {
+            thread: String::new(),
             scope: "github".to_string(),
             message: e,
         });
@@ -143,7 +144,10 @@ where
         }
 
         step += 1;
-        emit(Event::StepStarted { step });
+        emit(Event::StepStarted {
+            thread: String::new(),
+            step,
+        });
 
         let turn = llm::run_turn(
             LlmRequest {
@@ -156,11 +160,13 @@ where
             |content, reasoning| {
                 if let Some(c) = content {
                     emit(Event::Content {
+                        thread: String::new(),
                         delta: c.to_string(),
                     });
                 }
                 if let Some(r) = reasoning {
                     emit(Event::Reasoning {
+                        thread: String::new(),
                         delta: r.to_string(),
                     });
                 }
@@ -179,6 +185,7 @@ where
             }
             Err(e) => {
                 emit(Event::Error {
+                    thread: String::new(),
                     scope: "llm".to_string(),
                     message: e,
                 });
@@ -223,6 +230,7 @@ where
 
         for call in &turn.tool_calls {
             emit(Event::ToolStarted {
+                thread: String::new(),
                 id: call.id.clone(),
                 name: call.function.name.clone(),
                 args: call.function.arguments.clone(),
@@ -243,6 +251,7 @@ where
             };
 
             emit(Event::ToolFinished {
+                thread: String::new(),
                 id: call.id.clone(),
                 name: call.function.name.clone(),
                 ok,
@@ -277,9 +286,11 @@ where
                 // ambiguity has repeatedly been mistaken for the app being
                 // broken.
                 emit(Event::Content {
+                    thread: String::new(),
                     delta: format!("\n\n{summary}"),
                 });
                 emit(Event::Note {
+                    thread: String::new(),
                     text: "✓ task complete — ∞ loop mode is on, so the run continues with the next improvement. press stop to end it."
                         .to_string(),
                 });
@@ -290,6 +301,7 @@ where
                 continue;
             }
             emit(Event::Content {
+                thread: String::new(),
                 delta: format!("\n\n{summary}"),
             });
             return RunOutcome {
