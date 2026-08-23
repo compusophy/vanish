@@ -307,7 +307,7 @@ fn spawn_run(config: Config, prompt: String) {
             }
         };
 
-        let emit = {
+        let emit_tagged = {
             let conversation = conversation_id.clone();
             move |event: Event| {
                 let tagged = match event {
@@ -366,7 +366,7 @@ fn spawn_run(config: Config, prompt: String) {
             &config,
             &prompt,
             &mut history,
-            emit,
+            emit_tagged,
             || STATE.with(|s| s.borrow().stop_requested),
             persist,
         )
