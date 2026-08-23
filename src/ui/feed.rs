@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::Element;
 
 use super::{by_id, create, doc, Shared};
@@ -579,6 +579,10 @@ fn render_active(ui: &Shared, event: Event) {
             note("conversation cleared — the agent will start fresh on the next run");
             set_status("ready", false);
         }
+
+        // handled above the match (before background routing); unreachable
+        // here, but the match must stay exhaustive.
+        Event::RunStateReport { .. } => {}
     }
 }
 
