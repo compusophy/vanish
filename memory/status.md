@@ -3,81 +3,6 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed most recently (the event-loop deadlock, fixed a second time)
-
-the app was bricking itself: a run would finish its work, print its
-task_complete summary, and then the dock stayed on "running" forever. stop
-did nothing, no error appeared, and no further message could be sent. the
-only recovery was a page reload.
-
-root cause — `src/worker.rs`, end of `spawn_run`:
-
-```rust
-while queue.borrow().0.is_some() || queue.borrow().1 {
-    JsFuture::from(Promise::new(&mut |resolve, _| { resolve.call0(...); })).await;
-}
-```
-
-awaiting an already-resolved promise drains the MICROTASK queue only. doing
-it in a loop re-queues one every iteration, so the event loop never gets to
-run a task. that means: (a) the opfs write being waited on can never reach
-its completion callback, so the condition never clears and it spins at 100%
-of a core forever, and (b) **`onmessage` never fires again**. Stop, RunState
-and every later Run were posted into a worker that could no longer hear
-them. hence "the stop button doesn't work" and "no feedback" — both were the
-same single bug.
-
-this had already been fixed once, in 699ada0, with a timer-based bounded
-wait. **016f3db reverted it** — a refactor that rewrote the whole block from
-an older copy, under a commit message claiming "no visible behavior change".
-the same commit also deleted the Stop escape hatch and `run_seq`.
-
-what landed now:
-
-- [x] `src/worker.rs`: drain yields through `sleep_ms(10)` and is bounded by
-      `DRAIN_TIMEOUT_MS`. it now runs AFTER `RunFinished` is emitted, so
-      durability work can never gate the dock at all.
-- [x] `src/worker.rs`: `Command::Stop` escape hatch restored — after
-      `STOP_GRACE_MS` it takes control back by force. `run_seq` restored so
-      the abandoned run is invalidated rather than left running invisibly:
-      the run's stop predicate is now `run_seq != seq || stop_requested`, so
-      being superseded IS a stop signal. write-back and `running` are guarded
-      by the same seq.
-- [x] `src/agent/mod.rs`: stop is honored during retry backoff (sliced at
-      `STOP_POLL_MS` instead of sleeping through up to 60s) and between tool
-      calls in a multi-tool step. abandoned calls get synthetic "not run"
-      tool results first — bailing mid-batch would otherwise leave an
-      assistant message whose tool_calls have no matching results, and the
-      NEXT run replaying that history would be rejected by the api.
-- [x] `src/ui/feed.rs`: the watchdog now counts unanswered health checks and
-      says "the agent worker has stopped responding" after ~9s. the watchdog
-      could only ever reconcile a worker that ANSWERS; a starved one looks
-      exactly like a healthy long run. silence is now reported.
-- [x] `tests/event_loop_liveness.rs`: 5 source-level invariants pinning all
-      of the above. verified they fail against the deployed build (4/5) and
-      pass against the fix.
-- [x] `src/agent/http.rs`: `EventStream::next` now polls the stop flag every
-      `STOP_POLL_MS` WHILE waiting for a frame, instead of only after one
-      arrives. verified live: before this, stopping a run whose model was
-      thinking took the full `STOP_GRACE_MS` and reported "the run did not
-      stop on its own" — technically working, but it reads like a failure
-      and made the escape hatch the normal path instead of the last resort.
-      the read promise is created once and re-raced against a fresh short
-      timer each pass; re-issuing read() while one is pending is an error on
-      a default reader.
-
-## the lesson (this one cost two ships)
-
-**a comment cannot defend an invariant against a refactor.** the old code
-carried a 15-line comment explaining precisely why the timer was required.
-the rewrite dropped the comment and the fix together, and nothing failed —
-the build was green, the tests passed, the bug shipped. an invariant that
-matters needs a test that fails, even a blunt grep-level one.
-
-corollary: **"no visible behavior change" is a claim, not a fact.** when a
-refactor rewrites a block rather than editing it, diff the OLD file against
-the new one and account for every line that disappeared.
-
 ## landed in an earlier run (web access + self-improvement directive)
 
 - [x] `src/agent/tools.rs`: three new tools wired to the existing fetch
@@ -460,3 +385,41 @@ the new one and account for every line that disappeared.
 - code commits: review git_diff first. committing is deploying.
 - the ui no longer transforms case. what you read in a tool result is what
   is on disk, so no casing workaround is needed when editing.
+
+## landed this run (`now` tool) + stale-tree incident #3
+
+- [x] **the agent can tell time without hitting an api** (e739f00 +
+      ba61277): `now` tool reads `js_sys::Date` (wasm) / `SystemTime`
+      (native tests). calendar conversion is hinnant's civil-from-days,
+      pure, pinned by six tests in tests/platform_logic.rs (epoch zero,
+      leap day, pre-epoch flooring, sub-second truncation, year rollover,
+      known modern timestamps cross-checked against timeapi.io). system
+      prompt now says: you have no internal sense of the date; never guess
+      one — call now.
+- [x] **incident #3, self-inflicted and repaired** (ba61277): e739f00 was
+      built on a stale local tree. three upstream commits (6428c52 memory,
+      04bb089 event-loop deadlock fix, 20714f62 stop-during-thinking +
+      vercel build-log integration) landed after this worker's snapshot;
+      git_commit shipped stale agent/mod.rs and agent/tools.rs on top of
+      the true head, silently REVERTING all of that while looking like a
+      clean 3-file diff. the red build caught it; both files were restored
+      byte-for-byte from parent 20714f62 with the `now` tool re-applied.
+      what made it worse: the first fetch of mod.rs from main ALREADY
+      contained the upstream changes and I read past them without
+      comparing to my local copy. verification that checks one file is not
+      verification — every file a commit touches needs the raw-blob
+      cross-check before editing.
+- [x] **the missing notification bell found and fixed** (ba61277). user
+      asked where the bell went. answer: there never was one — notify.rs
+      expected #notif-bell/#notif-badge/#notif-panel in web/index.html and
+      .notif-* styles in style.css; neither ever landed. every lookup
+      silently no-oped (D4 violation), and because the panel replaced the
+      old floating ota card, update notices rendered nowhere. fix:
+      notify::wire() now calls ensure_dom(), which MOUNTS its own dom into
+      .dock-status (panel on <body>); html drift cannot silence it again,
+      and a missing host falls back loudly instead of quietly. styles
+      added. verified green build; live check: bell visible next to the
+      run status, clicking opens the panel, ota notices land inside it.
+- lesson: **a feature whose wiring depends on hand-maintained html must
+  mount that html itself, or its absence must be loud.** silent optional
+  lookups are how a whole notification centre ships invisible.

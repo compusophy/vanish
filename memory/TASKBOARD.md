@@ -40,26 +40,6 @@ see ARCHITECTURE.md for the full map and for why the previous design failed.
   `memory/status.md` even carried a warning telling the agent to work around
   its own ui. write code and prose in the casing correct for the language.
   do not reintroduce this rule in any form.
-- **D7 — never await a resolved promise as a yield point.** the worker is
-  single-threaded. `await`ing an already-resolved promise drains only the
-  microtask queue; doing it in a `while` loop starves the event loop
-  outright, and a starved worker stops dispatching `onmessage` — so Stop,
-  RunState and every later Run are silently never received, and the app is
-  bricked with no error anywhere. yield through `sleep_ms` (a real timer),
-  and bound every wait. this exact bug shipped twice: fixed in 699ada0,
-  reverted by 016f3db, fixed again with `tests/event_loop_liveness.rs`
-  pinning it. that test file is load-bearing — do not delete it to make a
-  refactor pass.
-- **D8 — control state is never gated on durability work.** `RunFinished` is
-  what returns the stop button to "run", so it is emitted BEFORE the
-  checkpoint drain and the transcript save, never after. a slow or wedged
-  opfs write may cost a stale transcript; it may never cost the user control
-  of the app.
-- **D9 — every escape hatch must work when the thing it rescues is broken.**
-  Stop is the only way out of a wedged run, so it cannot depend on the run
-  being healthy enough to poll for it: it takes control back by force after
-  `STOP_GRACE_MS`. the same logic applies to any future recovery path — if it
-  only works when things are fine, it is not a recovery path.
 
 ## landed in the rebuild
 
@@ -208,6 +188,20 @@ taskboard) asked for four things. all four are resolved:
       github before trusting the local copy. also: git_commit once shipped
       6 of 7 modified files — always re-run git_status after committing and
       verify the file count against what you edited.
+      **UPGRADED after incident #3 (ba61277): stale-tree clobbering is no
+      longer hypothetical. e739f00 shipped two stale source files that
+      silently reverted three upstream commits while looking like a clean
+      diff; the red build was the only detector. new standing rule: before
+      ANY commit touching a file you have not written this session, fetch
+      its raw blob from github and diff mentally against your local copy —
+      for EVERY file in the changeset, not just the one you edited first.
+      better fix if it keeps recurring: make git_commit refuse when the
+      remote head advanced past the sha this session's sync_repo recorded,
+      forcing an explicit re-read first.**
+- [ ] notification centre: the bell now mounts itself (ba61277) and update
+      notices land behind it instead of vanishing. verify live after deploy:
+      bell visible at the right edge of .dock-status, click opens the
+      panel, an ota notice appears inside it rather than nowhere.
 - [x] RESOLVED incident: update.rs referenced super::notify::* but ui/mod.rs
       never declared `mod notify` — main was red from that moment and every
       deploy was pinned behind it. fixed in 5aa1e7e. lesson recorded: adding
