@@ -9,13 +9,20 @@
 //! notifications now live behind a bell. they are addressed by id, so the
 //! same notice updates in place instead of stacking or going stale, and
 //! nothing overlaps the controls.
+//!
+//! the bell MOUNTS ITSELF. an earlier version expected #notif-bell,
+//! #notif-badge and #notif-panel to exist in web/index.html — they were never
+//! added, every lookup silently no-oped, and the notification centre became
+//! a feature that worked perfectly and rendered nowhere: update notices fell
+//! on the floor while the code reported success. building its own dom means
+//! the html and the binary cannot drift apart here again (D4).
 
 use std::cell::RefCell;
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-use super::{by_id, create};
+use super::{by_id, create, doc};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -35,6 +42,58 @@ pub struct Item {
 thread_local! {
     static ITEMS: RefCell<Vec<Item>> = const { RefCell::new(Vec::new()) };
     static OPEN: RefCell<bool> = const { RefCell::new(false) };
+}
+
+/// create the bell, badge and panel if the page does not have them.
+///
+/// the bell docks into .dock-status (the same row as the run status text),
+/// pushed to the right edge; the panel floats above the dock. both are
+/// created on demand so their existence never depends on hand-maintained
+/// html staying in sync with this module.
+fn ensure_dom() {
+    if by_id("notif-bell").is_some() {
+        return;
+    }
+
+    let host = match doc()
+        .query_selector(".dock-status")
+        .ok()
+        .flatten()
+    {
+        Some(h) => h,
+        None => {
+            // no dock either means the page itself failed to render; say so
+            // loudly rather than mounting notifications into nothing.
+            web_sys::console::error_1(&JsValue::from_str(
+                "notify: no .dock-status found — mounting the bell on <body> as a fallback",
+            ));
+            doc()
+                .query_selector("body")
+                .ok()
+                .flatten()
+                .expect("notify: no <body> element to mount the bell on")
+        }
+    };
+
+    // the panel first: it must exist before the first render() call, and
+    // appending order does not matter for a fixed-position element.
+    let panel = create("div", "notif-panel");
+    panel.set_id("notif-panel");
+    let _ = panel.set_attribute("style", "display:none");
+    let _ = doc().body().expect("no body").append_child(&panel);
+
+    let bell = create("button", "notif-bell");
+    bell.set_id("notif-bell");
+    bell.set_attribute("title", "notifications")
+        .expect("bell title");
+
+    let badge = create("span", "notif-badge");
+    badge.set_id("notif-badge");
+    badge.set_text_content(Some("0"));
+    let _ = badge.set_attribute("style", "display:none");
+    let _ = bell.append_child(&badge);
+
+    let _ = host.append_child(&bell);
 }
 
 /// add or replace a notification.
@@ -173,6 +232,8 @@ pub fn render() {
 }
 
 pub fn wire() {
+    ensure_dom();
+
     if let Some(bell) = by_id("notif-bell") {
         let cb = Closure::<dyn FnMut()>::new(toggle);
         let _ = bell.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
