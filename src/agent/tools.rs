@@ -512,7 +512,7 @@ impl Workspace {
                     // record the new head: the NEXT git_commit attempt is
                     // allowed through, because this error has by then been
                     // surfaced and the model has had its chance to reconcile.
-                    self.synced_head = live_head;
+                    self.synced_head = live_head.clone();
                     let _ = opfs::save_index(&self.index).await;
                     return Err(format!(
                         "REFUSED: branch head moved since this session last synced \
