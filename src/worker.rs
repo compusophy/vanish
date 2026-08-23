@@ -19,6 +19,12 @@ struct WorkerState {
     config: Config,
     history: Vec<Message>,
     running: bool,
+    /// incremented on every run start and on every forced stop-recovery. a
+    /// run captures this at birth; once the two diverge that run is a zombie
+    /// and must neither keep working nor write its state back. this is what
+    /// makes the stop escape hatch below safe — without it, forcing `running`
+    /// false would leave the old future alive, invisible, and still billing.
+    run_seq: u64,
     stop_requested: bool,
     /// which thread `history` belongs to. every save is addressed to this id,
     /// so switching threads mid-session cannot write one conversation's
@@ -32,6 +38,7 @@ impl Default for WorkerState {
             config: Config::default(),
             history: Vec::new(),
             running: false,
+            run_seq: 0,
             stop_requested: false,
             conversation: String::new(),
         }
@@ -41,6 +48,18 @@ impl Default for WorkerState {
 thread_local! {
     static STATE: Rc<RefCell<WorkerState>> = Rc::new(RefCell::new(WorkerState::default()));
 }
+
+/// how long Stop waits for the run to unwind on its own before taking
+/// control back by force. long enough that a healthy run almost always
+/// beats it (the loop polls between stream chunks), short enough that a
+/// wedged one does not leave the user staring at a dead button.
+const STOP_GRACE_MS: i32 = 5_000;
+
+/// ceiling on waiting for in-flight checkpoint writes at the end of a run.
+/// this wait is pure durability housekeeping and happens after the ui has
+/// already been told the run ended, so a stalled write costs a slightly
+/// stale transcript — never the user's control of the app.
+const DRAIN_TIMEOUT_MS: i32 = 5_000;
 
 fn scope() -> Option<DedicatedWorkerGlobalScope> {
     js_sys::global().dyn_into::<DedicatedWorkerGlobalScope>().ok()
@@ -214,10 +233,12 @@ fn start_run(prompt: String) {
         return;
     }
 
-    STATE.with(|s| {
+    let seq = STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.running = true;
         st.stop_requested = false;
+        st.run_seq = st.run_seq.wrapping_add(1);
+        st.run_seq
     });
 
     emit(Event::RunStarted {
@@ -225,7 +246,7 @@ fn start_run(prompt: String) {
         model: config.model.clone(),
     });
 
-    spawn_run(config, prompt);
+    spawn_run(config, prompt, seq);
 }
 
 /// the async half of a run, factored out so both the user-initiated path and
@@ -238,7 +259,7 @@ fn start_run(prompt: String) {
 /// the loop marker is written before the run starts and cleared when it
 /// ends — completed, stopped, failed, or step limit — so it can only be
 /// observed while a loop run genuinely has no worker attached.
-fn spawn_run(config: Config, prompt: String) {
+fn spawn_run(config: Config, prompt: String, seq: u64) {
     let is_loop = config.loop_mode;
     let conversation_id = STATE.with(|s| s.borrow().conversation.clone());
 
@@ -367,7 +388,17 @@ fn spawn_run(config: Config, prompt: String) {
             &prompt,
             &mut history,
             emit_tagged,
-            || STATE.with(|s| s.borrow().stop_requested),
+            // two ways to be told to stop. the obvious one is the user
+            // pressing stop. the second is being superseded: the stop escape
+            // hatch bumps run_seq to hand control back to the user, and a run
+            // whose seq no longer matches is a zombie — it must unwind rather
+            // than keep streaming tokens nobody is watching.
+            move || {
+                STATE.with(|s| {
+                    let st = s.borrow();
+                    st.run_seq != seq || st.stop_requested
+                })
+            },
             persist,
         )
         .await;
@@ -377,17 +408,25 @@ fn spawn_run(config: Config, prompt: String) {
         // persists, addressed to the run's own conversation.
         let history_snapshot = history.clone();
 
+        // a run that was force-recovered (or replaced) no longer speaks for
+        // the worker: clearing `running` from here would cancel whatever run
+        // took its place, and writing its history back would clobber state
+        // that has moved on.
+        let superseded = STATE.with(|s| s.borrow().run_seq != seq);
+
         STATE.with(|s| {
             let mut st = s.borrow_mut();
-            // write-back is guarded: the run's history returns to worker
-            // memory only if the user is still on the run's conversation.
-            // switching threads mid-run loads a different conversation into
-            // st.history; blindly overwriting it here would pour thread A's
-            // finished messages into whatever thread B has on screen — and
-            // the next save would corrupt B's transcript file. this guard,
-            // together with persist() being addressed by conversation_id,
-            // is what makes mid-run switching safe rather than forbidden.
-            if st.conversation == conversation_id {
+            // write-back is guarded twice: by the seq above, and by the
+            // conversation. the run's history returns to worker memory only
+            // if it is still the current run AND the user is still on its
+            // conversation. switching threads mid-run loads a different
+            // conversation into st.history; blindly overwriting it here would
+            // pour thread A's finished messages into whatever thread B has on
+            // screen — and the next save would corrupt B's transcript file.
+            // this guard, together with persist() being addressed by
+            // conversation_id, is what makes mid-run switching safe rather
+            // than forbidden.
+            if !superseded && st.conversation == conversation_id {
                 st.history = history;
             } else {
                 // the user moved on; park the run's history back in its own
@@ -410,8 +449,12 @@ fn spawn_run(config: Config, prompt: String) {
                     }
                 });
             }
-            st.running = false;
-            st.stop_requested = false;
+            // only the current run may hand control back. a zombie clearing
+            // these would cancel a live run it has nothing to do with.
+            if !superseded {
+                st.running = false;
+                st.stop_requested = false;
+            }
         });
 
         // the loop marker must not outlive its run: whatever ended this run,
@@ -420,43 +463,49 @@ fn spawn_run(config: Config, prompt: String) {
             crate::platform::transcript::clear_loop_resume().await;
         }
 
-        // flush the updated conversation to opfs *before* reporting
-        // the run finished. if the page reloads the moment this card
-        // renders, nothing is lost.
+        // RunFinished goes out FIRST — before the checkpoint drain, before
+        // the final save. the buttons only flip back on this event, so
+        // anything placed in front of it can hold the dock hostage on
+        // "stop" with no run behind it. durability work belongs after the
+        // user-visible transition; a save failure is reported separately
+        // below and never holds the control state ransom.
         //
-        // first, let any in-flight checkpoint finish: the queue's
-        // writer task runs on the same microtask queue, so yielding
-        // on a resolved promise lets it drain. skipping this wait
-        // would allow a slower older snapshot to land after — and
-        // overwrite — this authoritative final save.
-        while queue.borrow().0.is_some() || queue.borrow().1 {
-            let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
-                &mut |resolve, _reject| {
-                    let _ = resolve.call0(&JsValue::NULL);
-                },
-            ))
-            .await;
+        // a superseded run stays silent: the stop hatch already reported the
+        // ending, and a second RunFinished would just print a duplicate card.
+        if !superseded {
+            emit(Event::RunFinished {
+                thread: conversation_id.clone(),
+                steps: outcome.steps,
+                reason: outcome.reason,
+            });
+        }
+
+        // let any in-flight checkpoint finish before the authoritative final
+        // save, so a slower older snapshot cannot land after it and win.
+        //
+        // this MUST yield through a timer. awaiting an already-resolved
+        // promise only drains the microtask queue, and re-queueing one every
+        // iteration is an endless microtask chain that starves the event loop
+        // outright: the opfs write being waited on can never reach its
+        // completion callback, so `q.1` never clears and the loop spins
+        // forever at 100% of a core. worse, a starved event loop stops
+        // dispatching `onmessage` — so Stop, RunState and every later Run are
+        // never even seen, and the whole app is bricked with no feedback.
+        // that is the bug this comment exists to prevent a third time; it was
+        // fixed in 699ada0 and silently reverted by 016f3db.
+        //
+        // the wait is also bounded: a checkpoint that never completes must
+        // not cost the user their transcript save.
+        let mut waited_ms = 0;
+        while (queue.borrow().0.is_some() || queue.borrow().1) && waited_ms < DRAIN_TIMEOUT_MS {
+            crate::agent::http::sleep_ms(10).await;
+            waited_ms += 10;
         }
 
         // final save is addressed to the RUN'S conversation, not to whatever
         // STATE currently holds — the user may have switched threads mid-run,
         // and saving to the wrong file would corrupt the visible thread.
         // (the in-memory write-back above is guarded the same way.)
-        //
-        // RunFinished goes out BEFORE the transcript save, not after. this
-        // ordering was the root cause of the stuck-stop-button bug: the
-        // buttons only flip back on this event, and it used to wait behind
-        // the opfs queue drain plus the final save — so a slow or wedged
-        // write held the dock hostage on "stop" with no run behind it. the
-        // save is durability work and belongs after the user-visible
-        // transition; a save failure is reported separately below and
-        // cannot hold the control state ransom.
-        emit(Event::RunFinished {
-            thread: conversation_id.clone(),
-            steps: outcome.steps,
-            reason: outcome.reason,
-        });
-
         let save_result =
             crate::platform::transcript::save(&conversation_id, &history_snapshot).await;
 
@@ -670,7 +719,53 @@ fn handle(command: Command) {
         }
 
         Command::Stop => {
-            STATE.with(|s| s.borrow_mut().stop_requested = true);
+            let seq = STATE.with(|s| {
+                let mut st = s.borrow_mut();
+                st.stop_requested = true;
+                st.run_seq
+            });
+
+            // cooperative stop is the normal path: the loop notices between
+            // chunks and unwinds cleanly, usually within a second.
+            //
+            // but stop is also the only escape from a wedged run, and a run
+            // that is not polling — stuck in a tool, awaiting a dead socket,
+            // or lost to a bug — will never notice. without a hatch, nothing
+            // ever clears `running`, every later Run is refused with "a run
+            // is already in progress", and the app is bricked until reload.
+            // the escape from that state IS this command, so it cannot
+            // itself depend on the run being healthy.
+            //
+            // so: give the run a moment to end itself, then take control
+            // back regardless. bumping run_seq is what makes that safe — the
+            // abandoned run sees it, stops polling, and cannot write back.
+            wasm_bindgen_futures::spawn_local(async move {
+                crate::agent::http::sleep_ms(STOP_GRACE_MS).await;
+                let stuck = STATE.with(|s| {
+                    let st = s.borrow();
+                    st.running && st.run_seq == seq
+                });
+                if !stuck {
+                    return;
+                }
+                STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    st.running = false;
+                    st.stop_requested = false;
+                    st.run_seq = st.run_seq.wrapping_add(1);
+                });
+                crate::platform::transcript::clear_loop_resume().await;
+                emit(Event::Note {
+                    thread: conv(),
+                    text: "the run did not stop on its own and was ended — control is back with you. anything already written to the working tree is safe."
+                        .to_string(),
+                });
+                emit(Event::RunFinished {
+                    thread: conv(),
+                    steps: 0,
+                    reason: FinishReason::Stopped,
+                });
+            });
         }
 
         // dock reconciliation. RunFinished crosses the same channel as

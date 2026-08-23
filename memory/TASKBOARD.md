@@ -40,6 +40,26 @@ see ARCHITECTURE.md for the full map and for why the previous design failed.
   `memory/status.md` even carried a warning telling the agent to work around
   its own ui. write code and prose in the casing correct for the language.
   do not reintroduce this rule in any form.
+- **D7 — never await a resolved promise as a yield point.** the worker is
+  single-threaded. `await`ing an already-resolved promise drains only the
+  microtask queue; doing it in a `while` loop starves the event loop
+  outright, and a starved worker stops dispatching `onmessage` — so Stop,
+  RunState and every later Run are silently never received, and the app is
+  bricked with no error anywhere. yield through `sleep_ms` (a real timer),
+  and bound every wait. this exact bug shipped twice: fixed in 699ada0,
+  reverted by 016f3db, fixed again with `tests/event_loop_liveness.rs`
+  pinning it. that test file is load-bearing — do not delete it to make a
+  refactor pass.
+- **D8 — control state is never gated on durability work.** `RunFinished` is
+  what returns the stop button to "run", so it is emitted BEFORE the
+  checkpoint drain and the transcript save, never after. a slow or wedged
+  opfs write may cost a stale transcript; it may never cost the user control
+  of the app.
+- **D9 — every escape hatch must work when the thing it rescues is broken.**
+  Stop is the only way out of a wedged run, so it cannot depend on the run
+  being healthy enough to poll for it: it takes control back by force after
+  `STOP_GRACE_MS`. the same logic applies to any future recovery path — if it
+  only works when things are fine, it is not a recovery path.
 
 ## landed in the rebuild
 

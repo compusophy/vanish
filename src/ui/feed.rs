@@ -611,8 +611,27 @@ fn start_run_watchdog(ui: &Shared) {
     // one is running means the old run ended without our having seen it.
     stop_run_watchdog();
 
+    UNANSWERED.with(|u| *u.borrow_mut() = 0);
+
     let ui = ui.clone();
     let tick = Closure::<dyn FnMut()>::new(move || {
+        // the watchdog can only reconcile a worker that ANSWERS. a worker
+        // whose event loop is starved never dispatches onmessage at all, so
+        // the pings vanish and the dock sits on "stop" looking identical to
+        // a healthy long run. count the silence and say so: an app that is
+        // wedged should never also be quiet about it.
+        let silent = UNANSWERED.with(|u| {
+            let mut n = u.borrow_mut();
+            *n += 1;
+            *n
+        });
+        if silent == UNANSWERED_LIMIT {
+            error(
+                "worker",
+                "the agent worker has stopped responding — it has not answered a health check in several seconds. anything already written to the working tree is safe; reload the page to recover.",
+            );
+        }
+
         let worker = ui.borrow().worker.clone();
         super::send(&worker, &crate::protocol::Command::RunState);
     });
@@ -638,7 +657,17 @@ thread_local! {
     /// interval handle of the live watchdog, if any. Option<i32> because
     /// set_interval returns i32 and 0 is a valid id — only None means off.
     static WATCHDOG: RefCell<Option<i32>> = const { RefCell::new(None) };
+
+    /// health checks sent since the last answer. reset by every
+    /// RunStateReport; a rising count means the worker is not dispatching
+    /// messages at all.
+    static UNANSWERED: RefCell<u32> = const { RefCell::new(0) };
 }
+
+/// how many consecutive unanswered health checks before the ui declares the
+/// worker unresponsive. three ticks is ~9s — comfortably longer than any
+/// real scheduling hiccup, short enough to beat the user's patience.
+const UNANSWERED_LIMIT: u32 = 3;
 
 /// how often the dock checks the worker's actual state while a run is
 /// believed in flight. short enough that a stuck button self-corrects
@@ -648,6 +677,9 @@ const WATCHDOG_INTERVAL_MS: i32 = 3_000;
 /// answer from Command::RunState. called for EVERY event; only the report
 /// acts, everything else falls through untouched.
 fn reconcile(ui: &Shared, running: bool) {
+    // an answer arrived: the worker is alive and dispatching.
+    UNANSWERED.with(|u| *u.borrow_mut() = 0);
+
     let believed_running = ui.borrow().running;
 
     // healthy path: agreement. nothing to do.
