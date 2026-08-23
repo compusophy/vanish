@@ -238,29 +238,6 @@ where
             }
         };
 
-        // the retry loop above returns or breaks with Ok; "stopped" is
-        // handled inside it, so nothing else can reach here.
-        let turn = match turn {
-            Ok(t) => t,
-            Err(e) if e == "stopped" => {
-                return RunOutcome {
-                    steps: step,
-                    reason: FinishReason::Stopped,
-                }
-            }
-            Err(e) => {
-                emit(Event::Error {
-                    thread: String::new(),
-                    scope: "llm".to_string(),
-                    message: e,
-                });
-                return RunOutcome {
-                    steps: step,
-                    reason: FinishReason::Failed,
-                };
-            }
-        };
-
         // record the assistant turn exactly as the api will expect it back
         history.push(Message {
             role: "assistant".to_string(),
