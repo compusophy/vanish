@@ -159,6 +159,7 @@ async fn migrate_legacy() -> Index {
     let index = Index {
         active: id.clone(),
         items: vec![meta],
+        loop_resume: None,
     };
 
     if opfs::write(&conv_path(&id), &raw).await.is_ok() {
