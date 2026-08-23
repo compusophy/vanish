@@ -330,18 +330,29 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
         // the run finished. if the page reloads the moment this card
         // renders, nothing is lost.
         //
-        // first, let any in-flight checkpoint finish: the queue's
-        // writer task runs on the same microtask queue, so yielding
-        // on a resolved promise lets it drain. skipping this wait
-        // would allow a slower older snapshot to land after — and
-        // overwrite — this authoritative final save.
-        while queue.borrow().0.is_some() || queue.borrow().1 {
-            let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
-                &mut |resolve, _reject| {
-                    let _ = resolve.call0(&JsValue::NULL);
-                },
-            ))
-            .await;
+        // first, let any in-flight checkpoint finish, so a slower older
+        // snapshot cannot land after — and overwrite — the authoritative
+        // final save.
+        //
+        // this MUST yield through a timer, not through an already-resolved
+        // promise. awaiting a resolved promise only drains the microtask
+        // queue, and re-queueing one every iteration is an endless microtask
+        // chain that starves the event loop entirely — so the opfs write
+        // being waited on can never reach its completion callback, `q.1`
+        // never clears, and the loop spins forever. that deadlock is what
+        // left runs hanging after task_complete: `running` had already been
+        // cleared, but RunFinished was never emitted, so the ui sat on
+        // "step N — waiting for the model" with a stop button and no run.
+        //
+        // it was intermittent because it only bites when a checkpoint write
+        // happens to still be in flight as the run ends.
+        //
+        // the wait is also bounded: a checkpoint that never completes must
+        // not cost the user their run-finished signal.
+        let mut waited_ms = 0;
+        while (queue.borrow().0.is_some() || queue.borrow().1) && waited_ms < 5_000 {
+            crate::agent::http::sleep_ms(10).await;
+            waited_ms += 10;
         }
 
         let (saved, conversation) =
