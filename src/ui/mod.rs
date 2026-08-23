@@ -7,6 +7,7 @@
 //! supposed to cancel.
 
 mod feed;
+pub mod notify;
 pub mod update;
 
 use std::cell::RefCell;
@@ -349,6 +350,7 @@ pub fn boot_ui(worker_url: &str) {
     wire_worker(&ui);
     wire_controls(&ui);
     wire_rails();
+    notify::wire();
     update::start_watching(&ui);
 
     // NOTHING is sent to the worker here, and that is deliberate.

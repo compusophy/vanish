@@ -139,6 +139,16 @@
     </div>
 
     <!--
+      notification centre. update notices used to float over the dock and
+      cover the stop button; they live behind this bell instead.
+    -->
+    <div id="notif-panel" class="notif-panel" style="display: none"></div>
+    <button id="notif-bell" class="notif-bell" title="notifications">
+      <span aria-hidden="true">🔔</span>
+      <span id="notif-badge" class="notif-badge" style="display: none">0</span>
+    </button>
+
+    <!--
       the only hand-written javascript in the project: load the wasm module
       and hand it the worker url. everything else — dom, state, networking,
       the agent loop — is rust.

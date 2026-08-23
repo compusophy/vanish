@@ -19,6 +19,10 @@ struct WorkerState {
     config: Config,
     history: Vec<Message>,
     running: bool,
+    /// incremented on every run start. a completing run only writes its
+    /// result back if this still matches the seq it captured, so a recovered
+    /// or superseded run cannot clobber current state.
+    run_seq: u64,
     stop_requested: bool,
     /// which thread `history` belongs to. every save is addressed to this id,
     /// so switching threads mid-session cannot write one conversation's
@@ -32,6 +36,7 @@ impl Default for WorkerState {
             config: Config::default(),
             history: Vec::new(),
             running: false,
+            run_seq: 0,
             stop_requested: false,
             conversation: String::new(),
         }
@@ -194,10 +199,12 @@ fn start_run(prompt: String) {
         return;
     }
 
-    STATE.with(|s| {
+    let seq = STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.running = true;
         st.stop_requested = false;
+        st.run_seq = st.run_seq.wrapping_add(1);
+        st.run_seq
     });
 
     emit(Event::RunStarted {
@@ -205,7 +212,7 @@ fn start_run(prompt: String) {
         model: config.model.clone(),
     });
 
-    spawn_run(config, prompt);
+    spawn_run(config, prompt, seq);
 }
 
 /// the async half of a run, factored out so both the user-initiated path and
@@ -218,7 +225,7 @@ fn start_run(prompt: String) {
 /// the loop marker is written before the run starts and cleared when it
 /// ends — completed, stopped, failed, or step limit — so it can only be
 /// observed while a loop run genuinely has no worker attached.
-fn spawn_run(config: Config, prompt: String) {
+fn spawn_run(config: Config, prompt: String, seq: u64) {
     let is_loop = config.loop_mode;
     let conversation_id = STATE.with(|s| s.borrow().conversation.clone());
 
@@ -296,6 +303,15 @@ fn spawn_run(config: Config, prompt: String) {
             persist,
         )
         .await;
+
+        // only the current run may write its result back. if Stop already
+        // force-recovered this run — or a newer run started — the seq has
+        // moved on, and letting a zombie clear `running` would cancel a live
+        // run that has nothing to do with it.
+        let superseded = STATE.with(|s| s.borrow().run_seq != seq);
+        if superseded {
+            return;
+        }
 
         STATE.with(|s| {
             let mut st = s.borrow_mut();
@@ -521,7 +537,50 @@ fn handle(command: Command) {
         }
 
         Command::Stop => {
-            STATE.with(|s| s.borrow_mut().stop_requested = true);
+            let seq = STATE.with(|s| {
+                let mut st = s.borrow_mut();
+                st.stop_requested = true;
+                st.run_seq
+            });
+
+            // cooperative stop is the normal path: the loop notices between
+            // chunks and unwinds cleanly. but if `running` is true with no
+            // run actually attached — a future that died without unwinding,
+            // a start that failed after setting the flag — nothing would
+            // ever clear it, and every later Run, NewConversation and
+            // SwitchConversation would be refused with "a run is already in
+            // progress" and no way out. the ui offers no escape from that
+            // because the escape IS this command.
+            //
+            // so: give the real run a moment to end itself, then force the
+            // state clean if it did not.
+            wasm_bindgen_futures::spawn_local(async move {
+                crate::agent::http::sleep_ms(2_500).await;
+                let stuck = STATE.with(|s| {
+                    let st = s.borrow();
+                    st.running && st.run_seq == seq
+                });
+                if !stuck {
+                    return;
+                }
+                STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    st.running = false;
+                    st.stop_requested = false;
+                    // invalidate the old run: if its future is somehow still
+                    // alive it must not write state back over this recovery.
+                    st.run_seq = st.run_seq.wrapping_add(1);
+                });
+                crate::platform::transcript::clear_loop_resume().await;
+                emit(Event::Note {
+                    text: "run state was stuck and has been reset — you can start a new run"
+                        .to_string(),
+                });
+                emit(Event::RunFinished {
+                    steps: 0,
+                    reason: FinishReason::Stopped,
+                });
+            });
         }
 
         Command::Run { prompt, thread_id } => {

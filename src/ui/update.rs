@@ -17,7 +17,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-use super::{by_id, create, doc, Shared};
+use super::Shared;
 use crate::agent::http::request;
 
 const POLL_MS: i32 = 60_000;
@@ -103,6 +103,9 @@ async fn check_once(ui: &Shared) {
         if let Some(s) = session() {
             let _ = s.remove_item(RELOAD_GUARD);
         }
+        // and retract any stale update notice: the reload worked.
+        PENDING.with(|p| *p.borrow_mut() = None);
+        super::notify::dismiss(OTA_ID);
         return;
     }
 
@@ -117,67 +120,62 @@ async fn check_once(ui: &Shared) {
     show_banner(&deployed_build, &message, run_in_progress, already_tried);
 }
 
-fn show_banner(sha: &str, message: &str, run_in_progress: bool, already_tried: bool) {
-    if let Some(existing) = by_id("ota") {
-        if existing.get_attribute("data-sha").as_deref() == Some(sha) {
-            return;
+/// the single id every update notice is written to. keeping one id means a
+/// notice can change what it says — "waiting for the run to finish" then
+/// "ready" — instead of leaving a stale card claiming a run is still going.
+const OTA_ID: &str = "ota-update";
+
+thread_local! {
+    /// the build a pending update would move us to, so the notification's
+    /// action button knows what it is reloading toward.
+    static PENDING: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// invoked by the notification's action button.
+pub fn reload_for_pending() {
+    let sha = PENDING.with(|p| p.borrow().clone());
+    if let Some(sha) = sha {
+        if let Some(s) = session() {
+            let _ = s.set_item(RELOAD_GUARD, &sha);
         }
-        existing.remove();
     }
+    reload_now();
+}
 
-    let banner = create("div", "ota sparkle");
-    let _ = banner.set_attribute("id", "ota");
-    let _ = banner.set_attribute("data-sha", sha);
+fn show_banner(sha: &str, message: &str, run_in_progress: bool, already_tried: bool) {
+    PENDING.with(|p| *p.borrow_mut() = Some(sha.to_string()));
 
-    let title = create("div", "ota-title");
-    title.set_text_content(Some(&format!("✨ new version {sha} deployed")));
-    let _ = banner.append_child(&title);
-
-    if !message.is_empty() {
-        let list = create("ul", "ota-changelog");
-        let li = create("li", "");
-        li.set_text_content(Some(message));
-        let _ = list.append_child(&li);
-        let _ = banner.append_child(&list);
-    }
-
-    let footer = create("div", "ota-footer");
-    let _ = banner.append_child(&footer);
-
-    let button = create("button", "ota-btn");
-
-    if already_tried {
-        // do not reload again on our own initiative — that is the loop.
-        footer.set_text_content(Some(
-            "already reloaded once for this build and still running the old one. \
-             the browser may be serving a cached shell; try a hard refresh.",
-        ));
-        button.set_text_content(Some("reload again"));
-        attach_reload(&button, sha);
+    let title = format!("✨ new version {sha} available");
+    let (body, label) = if already_tried {
+        (
+            format!(
+                "{message}\n\nalready reloaded once for this build and still running the old one. \
+                 the browser may be serving a cached shell — try a hard refresh."
+            ),
+            "reload again",
+        )
     } else if run_in_progress {
-        // a run in flight must not be cut off. the tree is durable, so
-        // nothing would be lost — but a half-finished run would be.
-        footer.set_text_content(Some(
-            "a run is in progress — updating as soon as it finishes",
-        ));
-        button.set_text_content(Some("update now anyway"));
-        attach_reload(&button, sha);
+        (
+            format!("{message}\n\na run is in progress; this will apply when it finishes."),
+            "update now anyway",
+        )
     } else {
-        footer.set_text_content(Some("updating automatically…"));
-        button.set_text_content(Some("update now"));
-        attach_reload(&button, sha);
+        (format!("{message}\n\nupdating automatically…"), "update now")
+    };
+
+    super::notify::upsert(
+        OTA_ID,
+        &title,
+        &body,
+        Some((label.to_string(), super::notify::Action::Reload)),
+    );
+
+    if !already_tried && !run_in_progress {
         arm_reload(sha, RELOAD_DELAY_MS);
-    }
-
-    let _ = banner.append_child(&button);
-
-    if let Some(body) = doc().body() {
-        let _ = body.append_child(&banner);
     }
 }
 
-/// record the build we are reloading toward, then reload. the record is what
-/// stops a second, third, hundredth attempt if the reload does not take.
 fn arm_reload(sha: &str, delay_ms: i32) {
     if let Some(s) = session() {
         let _ = s.set_item(RELOAD_GUARD, sha);
@@ -190,18 +188,6 @@ fn reload_now() {
         // from the network, not the bfcache, so the new wasm is what loads.
         let _ = w.location().reload_with_forceget(true);
     }
-}
-
-fn attach_reload(el: &web_sys::Element, sha: &str) {
-    let sha = sha.to_string();
-    let cb = Closure::<dyn FnMut()>::new(move || {
-        if let Some(s) = session() {
-            let _ = s.set_item(RELOAD_GUARD, &sha);
-        }
-        reload_now();
-    });
-    let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-    cb.forget();
 }
 
 fn schedule_reload(delay_ms: i32) {
@@ -217,17 +203,35 @@ fn schedule_reload(delay_ms: i32) {
 
 /// called when a run ends while an update is pending, so the deferred reload
 /// happens the moment it is safe.
+///
+/// this also has to correct what the notification SAYS. previously the notice
+/// was rendered once and kept claiming "a run is in progress" long after the
+/// run had ended, with no way to act on it.
 pub fn apply_pending_if_any() {
-    let Some(banner) = by_id("ota") else { return };
-    let Some(sha) = banner.get_attribute("data-sha") else {
+    let Some(sha) = PENDING.with(|p| p.borrow().clone()) else {
         return;
     };
+
     let already_tried = session()
         .and_then(|s| s.get_item(RELOAD_GUARD).ok().flatten())
         .map(|v| v == sha)
         .unwrap_or(false);
+
     if already_tried {
+        super::notify::upsert(
+            OTA_ID,
+            &format!("✨ new version {sha} available"),
+            "a reload already failed to pick this build up — try a hard refresh.",
+            Some(("reload again".to_string(), super::notify::Action::Reload)),
+        );
         return;
     }
+
+    super::notify::upsert(
+        OTA_ID,
+        &format!("✨ new version {sha} available"),
+        "the run has finished — updating now.",
+        Some(("update now".to_string(), super::notify::Action::Reload)),
+    );
     arm_reload(&sha, RELOAD_DELAY_MS);
 }

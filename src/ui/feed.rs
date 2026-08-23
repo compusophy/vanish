@@ -417,6 +417,18 @@ pub fn render(ui: &Shared, event: Event) {
             // any failure path also re-arms the save button; a lock that only
             // clears on success is one that eventually never clears.
             super::finish_settings_check();
+
+            // the worker believes a run is live while the ui does not, so the
+            // ui is hiding the stop button — the one control that can resolve
+            // the disagreement. surface it. this is how the app got wedged
+            // with "a run is already in progress" and no way to act on it.
+            if message.contains("run is already in progress")
+                || message.contains("while a run is in progress")
+            {
+                ui.borrow_mut().running = true;
+                set_status("run in progress — press stop to reset", true);
+            }
+
             error(&scope, &message)
         }
 
