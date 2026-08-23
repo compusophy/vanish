@@ -420,6 +420,8 @@ pub fn render(ui: &Shared, event: Event) {
             error(&scope, &message)
         }
 
+        Event::Note { text } => note(&text),
+
         Event::Tree { entries } => {
             let Some(tree) = by_id("tree") else { return };
             tree.set_inner_html("");

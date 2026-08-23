@@ -136,6 +136,10 @@ pub enum Event {
         scope: String,
         message: String,
     },
+    /// informational, not an error: boot notes, loop-resume notices.
+    Note {
+        text: String,
+    },
     Tree {
         entries: Vec<TreeEntry>,
     },

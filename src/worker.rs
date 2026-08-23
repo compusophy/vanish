@@ -141,6 +141,216 @@ pub fn boot_worker() {
         let trimmed = total.saturating_sub(turns.len());
         emit(Event::HistoryRestored { turns, trimmed });
         publish_conversations(&index);
+
+        // loop mode's promise survives its own death: if a loop run was in
+        // flight when the page died, continue it. take_loop_resume clears
+        // the marker, so a failed resume cannot loop on boot forever.
+        //
+        // the resume is deferred until Configure arrives: at boot the config
+        // in STATE is still empty (credentials travel with that command), so
+        // starting now would bounce off the credential check. PENDING_RESUME
+        // parks it; the Configure handler picks it up.
+        if let Some(marker) = crate::platform::transcript::take_loop_resume().await {
+            if marker.conversation == active && !STATE.with(|s| s.borrow().running) {
+                emit(Event::Note {
+                    text: format!(
+                        "↻ loop mode was interrupted by a reload ({}s ago) — resuming once settings load",
+                        ((js_sys::Date::now() - marker.interrupted_at) / 1000.0) as u64
+                    ),
+                });
+                PENDING_RESUME.with(|p| *p.borrow_mut() = Some(marker.prompt));
+                return;
+            }
+            // stale: wrong thread or already running. drop it rather than
+            // injecting a nudge into a conversation that was not expecting one.
+            crate::platform::transcript::clear_loop_resume().await;
+        }
+    });
+}
+
+thread_local! {
+    /// a loop run waiting for Configure before it can start. see the boot
+    /// handler above for why the resume cannot simply fire immediately.
+    static PENDING_RESUME: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// shared body of Command::Run and the boot-time loop resume. everything
+/// that checks state, emits RunStarted and drives the async run lives here
+/// so the two entry points cannot drift.
+fn start_run(prompt: String) {
+    let config = STATE.with(|s| s.borrow().config.clone());
+    if config.openrouter_key.is_empty() {
+        emit(Event::Error {
+            scope: "config".to_string(),
+            message: "no openrouter api key set — open settings and add one".to_string(),
+        });
+        return;
+    }
+    if config.github_token.is_empty() || config.repo.is_empty() {
+        emit(Event::Error {
+            scope: "config".to_string(),
+            message: "no github token or repo set — open settings and add them".to_string(),
+        });
+        return;
+    }
+
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        st.running = true;
+        st.stop_requested = false;
+    });
+
+    emit(Event::RunStarted {
+        thread_id: STATE.with(|s| s.borrow().conversation.clone()),
+        model: config.model.clone(),
+    });
+
+    spawn_run(config, prompt);
+}
+
+/// the async half of a run, factored out so both the user-initiated path and
+/// the boot-time loop-resume path share it.
+///
+/// the persist callback checkpoints after every durable unit; writes are
+/// serialized through a drain queue so overlapping opfs writes can never
+/// land out of order. the final save waits for the queue to drain first.
+///
+/// the loop marker is written before the run starts and cleared when it
+/// ends — completed, stopped, failed, or step limit — so it can only be
+/// observed while a loop run genuinely has no worker attached.
+fn spawn_run(config: Config, prompt: String) {
+    let is_loop = config.loop_mode;
+    let conversation_id = STATE.with(|s| s.borrow().conversation.clone());
+
+    if is_loop {
+        let marker = crate::platform::transcript::LoopResume {
+            conversation: conversation_id.clone(),
+            prompt: prompt.clone(),
+            interrupted_at: js_sys::Date::now(),
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = crate::platform::transcript::set_loop_resume(marker).await;
+        });
+    }
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut history = STATE.with(|s| s.borrow().history.clone());
+
+        // mid-run checkpoints. the loop persists after every durable
+        // unit (the prompt, each tool result), so a reload — ota or
+        // manual — or a crash costs at most the step in flight, not
+        // the whole run.
+        //
+        // the writes are serialized through a single drain queue: a
+        // checkpoint arriving while a write is in flight parks its
+        // snapshot in `pending`, and the one writer task drains the
+        // queue in order. without this, two overlapping opfs writes
+        // could complete out of order and an older history would
+        // land after a newer one.
+        let queue: Rc<RefCell<(Option<Vec<Message>>, bool)>> =
+            Rc::new(RefCell::new((None, false)));
+
+        let persist = {
+            let queue = queue.clone();
+            let conversation = conversation_id.clone();
+            move |messages: &[Message]| {
+                let snapshot: Vec<Message> = messages.to_vec();
+                let mut q = queue.borrow_mut();
+                if q.1 {
+                    // a write is in flight; the writer will pick
+                    // this snapshot up after the current one.
+                    q.0 = Some(snapshot);
+                    return;
+                }
+                q.1 = true;
+                q.0 = Some(snapshot);
+                drop(q);
+                let queue = queue.clone();
+                let conversation = conversation.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    loop {
+                        let snapshot = queue.borrow_mut().0.take();
+                        match snapshot {
+                            Some(s) => {
+                                let _ = crate::platform::transcript::save(
+                                    &conversation, &s,
+                                )
+                                .await;
+                            }
+                            None => {
+                                queue.borrow_mut().1 = false;
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        };
+
+        let outcome = crate::agent::run(
+            &config,
+            &prompt,
+            &mut history,
+            emit,
+            || STATE.with(|s| s.borrow().stop_requested),
+            persist,
+        )
+        .await;
+
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.history = history;
+            st.running = false;
+            st.stop_requested = false;
+        });
+
+        // the loop marker must not outlive its run: whatever ended this run,
+        // a stale marker would resurrect the loop on every future boot.
+        if is_loop {
+            crate::platform::transcript::clear_loop_resume().await;
+        }
+
+        // flush the updated conversation to opfs *before* reporting
+        // the run finished. if the page reloads the moment this card
+        // renders, nothing is lost.
+        //
+        // first, let any in-flight checkpoint finish: the queue's
+        // writer task runs on the same microtask queue, so yielding
+        // on a resolved promise lets it drain. skipping this wait
+        // would allow a slower older snapshot to land after — and
+        // overwrite — this authoritative final save.
+        while queue.borrow().0.is_some() || queue.borrow().1 {
+            let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
+                &mut |resolve, _reject| {
+                    let _ = resolve.call0(&JsValue::NULL);
+                },
+            ))
+            .await;
+        }
+
+        let (saved, conversation) =
+            STATE.with(|s| (s.borrow().history.clone(), s.borrow().conversation.clone()));
+        let save_result = crate::platform::transcript::save(&conversation, &saved).await;
+
+        emit(Event::RunFinished {
+            steps: outcome.steps,
+            reason: outcome.reason,
+        });
+
+        // surfaced after RunFinished so a failure never hides the
+        // run's own outcome, but never silently either (D4).
+        match save_result {
+            Ok(()) => {
+                // the title is derived from the first prompt, so the
+                // sidebar entry only becomes meaningful after a save.
+                let index = crate::platform::transcript::load_index().await;
+                publish_conversations(&index);
+            }
+            Err(e) => emit(Event::Error {
+                scope: "transcript".to_string(),
+                message: format!("could not save the conversation: {e}"),
+            }),
+        }
     });
 }
 
@@ -281,12 +491,32 @@ fn handle(command: Command) {
                     }
                 };
 
+                // the loop resume waits for this exact point; only a working
+                // core credential set may release it.
+                let core_credentials_usable =
+                    openrouter_ok && github_ok;
+
                 emit(Event::ConfigStatus {
                     openrouter_ok,
                     github_ok,
                     vercel_ok,
                     detail: notes.join(" · "),
                 });
+
+                // a loop run interrupted by the last reload resumes here:
+                // this is the first moment credentials are known good. if
+                // verification failed, the pending resume is dropped — an
+                // autonomous run on broken credentials would just fail.
+                if core_credentials_usable {
+                    let resume = PENDING_RESUME.with(|p| p.borrow_mut().take());
+                    if let Some(prompt) = resume {
+                        if !STATE.with(|s| s.borrow().running) {
+                            start_run(prompt);
+                        }
+                    }
+                } else {
+                    PENDING_RESUME.with(|p| *p.borrow_mut() = None);
+                }
             });
         }
 
@@ -304,151 +534,10 @@ fn handle(command: Command) {
                 return;
             }
 
-            let config = STATE.with(|s| s.borrow().config.clone());
-            if config.openrouter_key.is_empty() {
-                emit(Event::Error {
-                    scope: "config".to_string(),
-                    message: "no openrouter api key set — open settings and add one".to_string(),
-                });
-                return;
-            }
-            if config.github_token.is_empty() || config.repo.is_empty() {
-                emit(Event::Error {
-                    scope: "config".to_string(),
-                    message: "no github token or repo set — open settings and add them".to_string(),
-                });
-                return;
-            }
-
-            STATE.with(|s| {
-                let mut st = s.borrow_mut();
-                st.running = true;
-                st.stop_requested = false;
-            });
-
-            emit(Event::RunStarted {
-                thread_id,
-                model: config.model.clone(),
-            });
-
-            wasm_bindgen_futures::spawn_local(async move {
-                let mut history = STATE.with(|s| s.borrow().history.clone());
-
-                // mid-run checkpoints. the loop persists after every durable
-                // unit (the prompt, each tool result), so a reload — ota or
-                // manual — or a crash costs at most the step in flight, not
-                // the whole run.
-                //
-                // the writes are serialized through a single drain queue: a
-                // checkpoint arriving while a write is in flight parks its
-                // snapshot in `pending`, and the one writer task drains the
-                // queue in order. without this, two overlapping opfs writes
-                // could complete out of order and an older history would
-                // land after a newer one.
-                let queue: Rc<RefCell<(Option<Vec<Message>>, bool)>> =
-                    Rc::new(RefCell::new((None, false)));
-
-                let persist = {
-                    let queue = queue.clone();
-                    let conversation = STATE.with(|s| s.borrow().conversation.clone());
-                    move |messages: &[Message]| {
-                        let snapshot: Vec<Message> = messages.to_vec();
-                        let mut q = queue.borrow_mut();
-                        if q.1 {
-                            // a write is in flight; the writer will pick
-                            // this snapshot up after the current one.
-                            q.0 = Some(snapshot);
-                            return;
-                        }
-                        q.1 = true;
-                        q.0 = Some(snapshot);
-                        drop(q);
-                        let queue = queue.clone();
-                        let conversation = conversation.clone();
-                        wasm_bindgen_futures::spawn_local(async move {
-                            loop {
-                                let snapshot = queue.borrow_mut().0.take();
-                                match snapshot {
-                                    Some(s) => {
-                                        let _ = crate::platform::transcript::save(
-                                            &conversation, &s,
-                                        )
-                                        .await;
-                                    }
-                                    None => {
-                                        queue.borrow_mut().1 = false;
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                    }
-                };
-
-                let outcome = crate::agent::run(
-                    &config,
-                    &prompt,
-                    &mut history,
-                    emit,
-                    || STATE.with(|s| s.borrow().stop_requested),
-                    persist,
-                )
-                .await;
-
-                STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    st.history = history;
-                    st.running = false;
-                    st.stop_requested = false;
-                });
-
-                // flush the updated conversation to opfs *before* reporting
-                // the run finished. if the page reloads the moment this card
-                // renders, nothing is lost.
-                //
-                // first, let any in-flight checkpoint finish: the queue's
-                // writer task runs on the same microtask queue, so yielding
-                // on a resolved promise lets it drain. skipping this wait
-                // would allow a slower older snapshot to land after — and
-                // overwrite — this authoritative final save.
-                // first, let any in-flight checkpoint finish: the queue's
-                // writer task runs on the same microtask queue, so yielding
-                // on a resolved promise lets it drain. skipping this wait
-                // would allow a slower older snapshot to land after — and
-                // overwrite — this authoritative final save.
-                while queue.borrow().0.is_some() || queue.borrow().1 {
-                    let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
-                        &mut |resolve, _reject| {
-                            let _ = resolve.call0(&JsValue::NULL);
-                        },
-                    ))
-                    .await;
-                }
-
-                let (saved, conversation) =
-                    STATE.with(|s| (s.borrow().history.clone(), s.borrow().conversation.clone()));
-                let save_result = crate::platform::transcript::save(&conversation, &saved).await;
-
-                emit(Event::RunFinished {
-                    steps: outcome.steps,
-                    reason: outcome.reason,
-                });
-
-                // surfaced after RunFinished so a failure never hides the
-                // run's own outcome, but never silently either (D4).
-                match save_result {
-                    Ok(()) => {
-                        // the title is derived from the first prompt, so the
-                        // sidebar entry only becomes meaningful after a save.
-                        let index = crate::platform::transcript::load_index().await;
-                        publish_conversations(&index);
-                    }
-                    Err(e) => emit(Event::Error {
-                        scope: "transcript".to_string(),
-                        message: format!("could not save the conversation: {e}"),
-                    }),
-                }
-            });
+            // switching threads mid-run is refused elsewhere; a run always
+            // belongs to the conversation that is active when it starts.
+            let _ = thread_id;
+            start_run(prompt);
         }
 
         Command::Commit { message } => {

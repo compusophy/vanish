@@ -59,6 +59,32 @@ pub struct ConversationMeta {
 pub struct Index {
     pub active: String,
     pub items: Vec<ConversationMeta>,
+    /// present while a loop-mode run is (or was) in flight. see LoopResume.
+    pub loop_resume: Option<LoopResume>,
+}
+
+/// a loop-mode run that outlived its worker.
+///
+/// loop mode's promise is "run until stopped" — but a page refresh kills the
+/// worker, and the restored transcript alone just sits there. this marker,
+/// written when a loop run starts and cleared when one ends, is what lets
+/// boot resume the run instead of leaving it silently paused forever.
+///
+/// the prompt is re-sent as a nudge, not replayed verbatim: after a reload
+/// the model already has every prior step in context, so "the loop you were
+/// running was interrupted; continue" is the correct continuation signal —
+/// the original prompt would read as a second, duplicate instruction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoopResume {
+    /// the conversation the interrupted run belonged to. resuming into any
+    /// other thread would inject the nudge into the wrong context.
+    pub conversation: String,
+    /// the prompt that started the run, kept for display and for the case
+    /// where the transcript was trimmed past it.
+    pub prompt: String,
+    /// epoch millis of the interruption, for the ui to say how long ago it
+    /// was and for a stale-marker sanity check at boot.
+    pub interrupted_at: f64,
 }
 
 impl Index {
@@ -242,4 +268,40 @@ pub async fn clear_all() -> Result<(), String> {
         let _ = opfs::delete(&conv_path(&c.id)).await;
     }
     save_index(&Index::default()).await
+}
+
+// ---- loop-mode resume marker -------------------------------------------
+
+/// record that a loop run was in flight. called when a loop run starts;
+/// cleared by `clear_loop_resume` when the run ends for any reason —
+/// completed, stopped, failed, or step limit. a marker that survives its
+/// own run's end would resurrect the loop on every future boot.
+pub async fn set_loop_resume(marker: LoopResume) -> Result<(), String> {
+    let mut index = load_index().await;
+    index.loop_resume = Some(marker);
+    save_index(&index).await
+}
+
+/// the marker, if one is pending. an empty active-conversation field or a
+/// missing conversation means the marker is stale (the thread was deleted);
+/// callers should treat that as None and clear it.
+pub async fn take_loop_resume() -> Option<LoopResume> {
+    let mut index = load_index().await;
+    let marker = index.loop_resume.take();
+    // always clear on read: resume happens exactly once. if resuming fails,
+    // a fresh marker can be set by the next run; a persistent marker would
+    // turn every boot into an involuntary run.
+    if marker.is_some() {
+        let _ = save_index(&index).await;
+    }
+    marker.filter(|m| !m.conversation.is_empty())
+}
+
+/// drop the marker without resuming (thread deleted, user declined).
+pub async fn clear_loop_resume() {
+    let mut index = load_index().await;
+    if index.loop_resume.is_some() {
+        index.loop_resume = None;
+        let _ = save_index(&index).await;
+    }
 }
