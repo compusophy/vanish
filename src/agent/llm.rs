@@ -69,6 +69,11 @@ pub struct Turn {
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
+    /// set when the provider returned an error frame; the stream stops.
+    pub error: Option<String>,
+    /// (content, reasoning) deltas in arrival order, so tests — and any
+    /// future caller that wants the raw stream — can replay them.
+    pub deltas: Vec<(Option<String>, Option<String>)>,
 }
 
 // ---- streaming wire shapes -------------------------------------------
@@ -124,11 +129,11 @@ struct FunctionDelta {
     arguments: Option<String>,
 }
 
-#[derive(Default)]
-struct PartialCall {
-    id: String,
-    name: String,
-    arguments: String,
+#[derive(Debug, Default)]
+pub struct PartialCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 /// exercise the api key before a run depends on it.
@@ -167,6 +172,73 @@ pub async fn verify_key(api_key: &str) -> Result<String, String> {
         Some(l) => Ok(format!("openrouter ok ({usage:.2} of {l:.2} used)")),
         None => Ok("openrouter ok".to_string()),
     }
+}
+
+/// fold one streamed frame into the accumulating turn.
+///
+/// extracted from run_turn so the reassembly rules have their own tests:
+/// tool-call fragments arrive spread across many frames keyed only by an
+/// index, and getting this wrong silently corrupts every multi-tool turn.
+/// returns false when the caller should stop reading ("[DONE]" or an error
+/// frame, which lands in `turn.error`).
+pub fn absorb_chunk(
+    payload: &str,
+    turn: &mut Turn,
+    partials: &mut BTreeMap<usize, PartialCall>,
+) -> bool {
+    if payload == "[DONE]" {
+        return false;
+    }
+
+    let chunk: Chunk = match serde_json::from_str(payload) {
+        Ok(c) => c,
+        // a malformed frame mid-stream is not worth killing a long run
+        // over; keep reading and let the turn end on its own terms.
+        Err(_) => return true,
+    };
+
+    if let Some(e) = chunk.error {
+        turn.error = Some(format!("provider error: {}", e.message));
+        return false;
+    }
+
+    let Some(choice) = chunk.choices.into_iter().next() else {
+        return true;
+    };
+
+    if let Some(reason) = choice.finish_reason {
+        turn.finish_reason = Some(reason);
+    }
+
+    if let Some(r) = choice.delta.reasoning.as_deref() {
+        if !r.is_empty() {
+            turn.reasoning.push_str(r);
+            turn.deltas.push((None, Some(r.to_string())));
+        }
+    }
+    if let Some(c) = choice.delta.content.as_deref() {
+        if !c.is_empty() {
+            turn.content.push_str(c);
+            turn.deltas.push((Some(c.to_string()), None));
+        }
+    }
+
+    for d in choice.delta.tool_calls.into_iter().flatten() {
+        let slot = partials.entry(d.index).or_default();
+        if let Some(id) = d.id {
+            slot.id = id;
+        }
+        if let Some(f) = d.function {
+            if let Some(name) = f.name {
+                slot.name.push_str(&name);
+            }
+            if let Some(args) = f.arguments {
+                slot.arguments.push_str(&args);
+            }
+        }
+    }
+
+    true
 }
 
 pub struct LlmRequest<'a> {
@@ -213,63 +285,39 @@ where
     let mut turn = Turn::default();
     let mut partials: BTreeMap<usize, PartialCall> = BTreeMap::new();
 
+    // absorb_chunk records deltas into turn.deltas rather than taking the
+    // callback itself — that keeps it a pure function the test binary can
+    // drive without mocks. the cursor replays each new delta to the caller
+    // exactly once, in arrival order, so streaming behaves identically to
+    // the pre-refactor inline loop.
+    let mut seen_deltas = 0usize;
+
     while let Some(payload) = stream.next().await? {
         if should_stop() {
             stream.cancel();
             return Err("stopped".to_string());
         }
-        if payload == "[DONE]" {
+        if !absorb_chunk(&payload, &mut turn, &mut partials) {
             break;
         }
-
-        let chunk: Chunk = match serde_json::from_str(&payload) {
-            Ok(c) => c,
-            // a malformed frame mid-stream is not worth killing a long run
-            // over; keep reading and let the turn end on its own terms.
-            Err(_) => continue,
-        };
-
-        if let Some(e) = chunk.error {
-            return Err(format!("provider error: {}", e.message));
+        if let Some(e) = turn.error.take() {
+            return Err(e);
         }
-
-        let Some(choice) = chunk.choices.into_iter().next() else {
-            continue;
-        };
-
-        if let Some(reason) = choice.finish_reason {
-            turn.finish_reason = Some(reason);
-        }
-
-        if let Some(r) = choice.delta.reasoning.as_deref() {
-            if !r.is_empty() {
-                turn.reasoning.push_str(r);
-                on_delta(None, Some(r));
-            }
-        }
-        if let Some(c) = choice.delta.content.as_deref() {
-            if !c.is_empty() {
-                turn.content.push_str(c);
-                on_delta(Some(c), None);
-            }
-        }
-
-        for d in choice.delta.tool_calls.into_iter().flatten() {
-            let slot = partials.entry(d.index).or_default();
-            if let Some(id) = d.id {
-                slot.id = id;
-            }
-            if let Some(f) = d.function {
-                if let Some(name) = f.name {
-                    slot.name.push_str(&name);
-                }
-                if let Some(args) = f.arguments {
-                    slot.arguments.push_str(&args);
-                }
-            }
+        while seen_deltas < turn.deltas.len() {
+            let (c, r) = &turn.deltas[seen_deltas];
+            on_delta(c.as_deref(), r.as_deref());
+            seen_deltas += 1;
         }
     }
 
+    finalize_turn(&mut turn, partials);
+    Ok(turn)
+}
+
+/// materialize the reassembled partial calls into the turn's tool_calls,
+/// applying the api's shape requirements (arguments must be a json object
+/// string; a call with no name is noise and is dropped).
+pub fn finalize_turn(turn: &mut Turn, partials: BTreeMap<usize, PartialCall>) {
     turn.tool_calls = partials
         .into_values()
         .filter(|p| !p.name.is_empty())
@@ -282,7 +330,6 @@ where
             kind: "function".to_string(),
             function: FunctionCall {
                 name: p.name,
-                // an empty fragment stream still has to parse as an object
                 arguments: if p.arguments.trim().is_empty() {
                     "{}".to_string()
                 } else {
@@ -291,6 +338,4 @@ where
             },
         })
         .collect();
-
-    Ok(turn)
 }

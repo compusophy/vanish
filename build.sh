@@ -43,5 +43,28 @@ wasm-pack build --target web --out-dir web/pkg --no-typescript
 test -f web/pkg/vanish_bg.wasm || { echo "build produced no wasm"; exit 1; }
 test -f web/pkg/vanish.js      || { echo "build produced no js glue"; exit 1; }
 
+# the verification layer: a deploy must not only compile, it must pass the
+# contract tests. this runs natively (no wasm target needed) and covers the
+# wire protocol, path traversal guard, transcript index logic, and the SSE
+# tool-call reassembly — the pure logic where a regression is silent.
+#
+# placed AFTER the wasm build so a compile error still reports fast. if the
+# native test binary itself fails to COMPILE (e.g. a web-sys linking quirk
+# on the host target), that is surfaced loudly and skipped rather than
+# bricking every deploy — but a compiled test that FAILS is fatal: broken
+# logic must not ship.
+echo "--> running native test suite"
+if ! cargo test --lib --tests 2>&1; then
+  echo ""
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "!! NATIVE TESTS FAILED OR UNCOMPILABLE                       !!"
+  echo "!! A failing test means broken logic shipped to production.  !!"
+  echo "!! An uncompilable suite means the verification layer itself !!"
+  echo "!! is broken and must be fixed before the next commit.       !!"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  exit 1
+fi
+
+
 echo "--> output:"
 ls -la web/pkg/
