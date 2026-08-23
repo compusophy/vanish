@@ -62,6 +62,17 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [ ] **verification layer for autonomous loop mode** — the standing limit
+      on "set ∞ mode and let it self-improve": the loop's only evidence
+      standard is compile-green. most crate logic (protocol serde,
+      config defaults, transcript index shapes) is testable natively;
+      wiring cargo test into build.sh would upgrade check_deployment
+      from "compiles" to "compiles and passes tests". second piece: a
+      system-prompt rule requiring each loop iteration to state what
+      observable behavior changed and how it verified that before
+      committing. these two are the prerequisite for trusting unattended
+      self-improvement runs.
+
 - [x] web access — `http_fetch`, `web_read` (r.jina.ai reader proxy),
       `web_search` (duckduckgo instant answers) in `src/agent/tools.rs`,
       wired to the existing `src/agent/http.rs` fetch client. no new infra.
