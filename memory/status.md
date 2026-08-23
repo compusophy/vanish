@@ -114,6 +114,18 @@
   pub so the real code path is what's tested. a mirror test verifies the
   mirror, not the system.
 
+## landed this run (phase-2 groundwork — iteration 3)
+
+- [x] **Command::Attach** (8fc29ca): a worker can adopt one specific
+      conversation without touching index.active — the missing primitive
+      for spawning a per-conversation worker. SwitchConversation/
+      DeleteConversation/Attach now share `adopt_conversation()` so the
+      load-into-memory + feed-replay logic cannot drift between them.
+      contract test added for the new command.
+- design note: Attach deliberately does NOT publish_conversations or write
+  index.active. with several workers coexisting, "which thread is on
+  screen" belongs to the ui's worker pool, not to any single worker.
+
 ## verified live (earlier runs)
 
 - researched compusophy/localharness via GitHub API + its llms.txt; full
