@@ -36,6 +36,14 @@ pub enum Command {
     DeleteConversation { id: String },
     /// ask for the thread list (the ui renders it in the left rail).
     ListConversations,
+    /// make this worker own a specific existing conversation, replacing
+    /// whatever it loaded at boot. phase-2 groundwork: a per-conversation
+    /// worker spawns fresh and always boots on index.active — Attach is how
+    /// the pool points it at the thread it was created for. unlike
+    /// SwitchConversation it does NOT touch index.active: ownership of the
+    /// "which thread is on screen" question moves to the ui's worker pool,
+    /// and several workers coexisting means no single global active id.
+    Attach { id: String },
 }
 
 impl Config {

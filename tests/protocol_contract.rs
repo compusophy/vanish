@@ -46,6 +46,8 @@ fn commands_round_trip() {
         Command::SwitchConversation { id: "42".into() },
         Command::DeleteConversation { id: "42".into() },
         Command::ListConversations,
+        // phase-2 groundwork: a pool worker adopts one specific thread.
+        Command::Attach { id: "conv-77".into() },
     ];
 
     for cmd in cmds {

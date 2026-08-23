@@ -445,6 +445,28 @@ fn reject_while_running(action: &str) -> bool {
     running
 }
 
+/// load a conversation into worker memory and replay it to the feed.
+/// shared by SwitchConversation (which then also moves index.active) and
+/// Attach (which must not), so the two cannot drift on how adoption works.
+async fn adopt_conversation(id: &str) -> crate::platform::transcript::Index {
+    let messages = crate::platform::transcript::load(id).await;
+    let total = messages.len();
+    STATE.with(|s| {
+        let mut st = s.borrow_mut();
+        st.conversation = id.to_string();
+        st.history = messages.clone();
+    });
+
+    let turns = replay_turns(messages);
+    emit(Event::HistoryCleared);
+    emit(Event::HistoryRestored {
+        trimmed: total.saturating_sub(turns.len()),
+        turns,
+    });
+
+    crate::platform::transcript::load_index().await
+}
+
 fn publish_conversations(index: &crate::platform::transcript::Index) {
     emit(Event::Conversations {
         items: index
@@ -801,25 +823,33 @@ fn handle(command: Command) {
                 return;
             }
             wasm_bindgen_futures::spawn_local(async move {
-                let messages = crate::platform::transcript::load(&id).await;
-                let total = messages.len();
-                STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    st.conversation = id.clone();
-                    st.history = messages.clone();
-                });
-
-                let mut index = crate::platform::transcript::load_index().await;
+                let index = adopt_conversation(&id).await;
+                let mut index = index;
                 index.active = id;
                 let _ = crate::platform::transcript::save_index(&index).await;
-
-                let turns = replay_turns(messages);
-                emit(Event::HistoryCleared);
-                emit(Event::HistoryRestored {
-                    trimmed: total.saturating_sub(turns.len()),
-                    turns,
-                });
                 publish_conversations(&index);
+            });
+        }
+
+        Command::Attach { id } => {
+            // deliberately no reject_while_running: Attach targets a fresh,
+            // idle worker by construction. refusing here would break the
+            // phase-2 spawn flow this command exists to serve.
+            if STATE.with(|s| s.borrow().running) {
+                emit(Event::Error {
+                    thread: conv(),
+                    scope: "attach".to_string(),
+                    message: "cannot attach while a run is in progress".to_string(),
+                });
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(async move {
+                // same adoption as a switch — history loaded, feed replayed
+                // — minus the global active-id write, which is the point:
+                // attaching one worker to one conversation must not yank
+                // the ui's notion of "current" away from the user.
+                let _index = adopt_conversation(&id).await;
+                let _ = _index; // publish_conversations is NOT called: see doc above
             });
         }
 
@@ -837,19 +867,7 @@ fn handle(command: Command) {
                         } else {
                             next
                         };
-                        let messages = crate::platform::transcript::load(&active).await;
-                        let total = messages.len();
-                        STATE.with(|s| {
-                            let mut st = s.borrow_mut();
-                            st.conversation = active.clone();
-                            st.history = messages.clone();
-                        });
-                        let turns = replay_turns(messages);
-                        emit(Event::HistoryCleared);
-                        emit(Event::HistoryRestored {
-                            trimmed: total.saturating_sub(turns.len()),
-                            turns,
-                        });
+                        adopt_conversation(&active).await;
                         let index = crate::platform::transcript::load_index().await;
                         publish_conversations(&index);
                     }
