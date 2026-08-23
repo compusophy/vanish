@@ -89,7 +89,9 @@ impl DeployState {
     /// any failure wins; otherwise anything still running means pending.
     /// reporting "success" while a build is mid-flight is worse than
     /// reporting pending, because the agent would move on from broken code.
-    fn from(checks: Vec<CheckSummary>) -> Self {
+    /// pub + pure: tests/loop_nervous_system.rs pins this matrix, and it is
+    /// the exact logic check_deployment uses to say whether a commit is live.
+    pub fn from(checks: Vec<CheckSummary>) -> Self {
         let failed = |s: &str| matches!(s, "failure" | "error" | "timed_out" | "cancelled");
         let running = |s: &str| matches!(s, "pending" | "queued" | "in_progress" | "waiting");
 

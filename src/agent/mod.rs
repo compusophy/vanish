@@ -68,6 +68,21 @@ pub struct RunOutcome {
     pub reason: FinishReason,
 }
 
+/// delay before retrying a failed llm call: exponential with a cap.
+///
+/// 2s → 8s → 30s → 60s → 60s. short enough that a rate-limit window or a
+/// provider blip costs the loop seconds rather than its life; long enough
+/// that a dead key does not produce hundreds of doomed requests. pure so
+/// tests pin the schedule.
+pub fn retry_backoff_ms(attempt: u32) -> i32 {
+    match attempt {
+        0 | 1 => 2_000,
+        2 => 8_000,
+        3 => 30_000,
+        _ => 60_000,
+    }
+}
+
 /// drive one full agent run.
 ///
 /// `emit` publishes progress to the ui, `stopped` is polled cooperatively so
@@ -136,6 +151,13 @@ where
 
     let mut step = 0u32;
 
+    // transient-failure budget. an unattended loop must not die because one
+    // request hit a rate limit or a provider blip — but it also must not
+    // spin forever on a dead key. five consecutive failures with growing
+    // backoff, resetting on any success, separates blips from outages.
+    let mut consecutive_failures: u32 = 0;
+    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
     while step < MAX_STEPS {
         if stopped() {
             return RunOutcome {
@@ -150,32 +172,74 @@ where
             step,
         });
 
-        let turn = llm::run_turn(
-            LlmRequest {
-                api_key: &config.openrouter_key,
-                model: &config.model,
-                reasoning_effort: &config.reasoning_effort,
-                messages: history,
-                tools: &tool_defs,
-            },
-            |content, reasoning| {
-                if let Some(c) = content {
-                    emit(Event::Content {
-                        thread: String::new(),
-                        delta: c.to_string(),
-                    });
+        let turn = loop {
+            match llm::run_turn(
+                LlmRequest {
+                    api_key: &config.openrouter_key,
+                    model: &config.model,
+                    reasoning_effort: &config.reasoning_effort,
+                    messages: history,
+                    tools: &tool_defs,
+                },
+                |content, reasoning| {
+                    if let Some(c) = content {
+                        emit(Event::Content {
+                            thread: String::new(),
+                            delta: c.to_string(),
+                        });
+                    }
+                    if let Some(r) = reasoning {
+                        emit(Event::Reasoning {
+                            thread: String::new(),
+                            delta: r.to_string(),
+                        });
+                    }
+                },
+                stopped,
+            )
+            .await
+            {
+                Ok(t) => {
+                    consecutive_failures = 0;
+                    break t;
                 }
-                if let Some(r) = reasoning {
-                    emit(Event::Reasoning {
-                        thread: String::new(),
-                        delta: r.to_string(),
-                    });
+                Err(e) if e == "stopped" => {
+                    return RunOutcome {
+                        steps: step,
+                        reason: FinishReason::Stopped,
+                    };
                 }
-            },
-            stopped,
-        )
-        .await;
+                Err(e) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        emit(Event::Error {
+                            thread: String::new(),
+                            scope: "llm".to_string(),
+                            message: format!(
+                                "{e} — {MAX_CONSECUTIVE_FAILURES} consecutive failures, giving up"
+                            ),
+                        });
+                        return RunOutcome {
+                            steps: step,
+                            reason: FinishReason::Failed,
+                        };
+                    }
+                    let delay = retry_backoff_ms(consecutive_failures);
+                    emit(Event::Note {
+                        thread: String::new(),
+                        text: format!(
+                            "⟳ llm error ({e}) — retry {consecutive_failures}/{} in {}s",
+                            MAX_CONSECUTIVE_FAILURES - 1,
+                            delay / 1000
+                        ),
+                    });
+                    crate::agent::http::sleep_ms(delay).await;
+                }
+            }
+        };
 
+        // the retry loop above returns or breaks with Ok; "stopped" is
+        // handled inside it, so nothing else can reach here.
         let turn = match turn {
             Ok(t) => t,
             Err(e) if e == "stopped" => {
