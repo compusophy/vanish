@@ -96,22 +96,35 @@ pub enum Event {
         model: String,
     },
     StepStarted {
+        /// which conversation produced this step. serde(default) keeps older
+        /// payloads (and any worker/ui skew across an ota reload) parseable;
+        /// an absent tag routes to the active thread.
+        #[serde(default)]
+        thread: String,
         step: u32,
     },
     /// streamed reasoning delta
     Reasoning {
+        #[serde(default)]
+        thread: String,
         delta: String,
     },
     /// streamed assistant text delta
     Content {
+        #[serde(default)]
+        thread: String,
         delta: String,
     },
     ToolStarted {
+        #[serde(default)]
+        thread: String,
         id: String,
         name: String,
         args: String,
     },
     ToolFinished {
+        #[serde(default)]
+        thread: String,
         id: String,
         name: String,
         ok: bool,
@@ -127,17 +140,23 @@ pub enum Event {
         files: usize,
     },
     RunFinished {
+        #[serde(default)]
+        thread: String,
         steps: u32,
         reason: FinishReason,
     },
     /// every failure is surfaced. a silent catch here is what produced the
     /// "empty dropdown that does nothing" bug.
     Error {
+        #[serde(default)]
+        thread: String,
         scope: String,
         message: String,
     },
     /// informational, not an error: boot notes, loop-resume notices.
     Note {
+        #[serde(default)]
+        thread: String,
         text: String,
     },
     Tree {
@@ -205,6 +224,24 @@ pub struct TreeEntry {
 }
 
 impl Event {
+    /// which conversation a run-scoped event belongs to, for feed routing.
+    /// `""` means "untagged" — boot traffic and pre-phase-2 events — which
+    /// the ui treats as belonging to whatever thread is active.
+    pub fn thread(&self) -> &str {
+        match self {
+            Event::RunStarted { thread_id, .. } => thread_id,
+            Event::StepStarted { thread, .. }
+            | Event::Reasoning { thread, .. }
+            | Event::Content { thread, .. }
+            | Event::ToolStarted { thread, .. }
+            | Event::ToolFinished { thread, .. }
+            | Event::RunFinished { thread, .. }
+            | Event::Error { thread, .. }
+            | Event::Note { thread, .. } => thread,
+            _ => "",
+        }
+    }
+
     /// events cross the worker boundary as plain json; both halves use this
     /// so the encoding can never diverge between sender and receiver.
     pub fn to_js(&self) -> Result<wasm_bindgen::JsValue, serde_wasm_bindgen::Error> {

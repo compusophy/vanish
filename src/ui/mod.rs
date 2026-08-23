@@ -7,7 +7,6 @@
 //! supposed to cancel.
 
 mod feed;
-pub mod notify;
 pub mod update;
 
 use std::cell::RefCell;
@@ -304,6 +303,10 @@ pub struct Ui {
     pub running: bool,
     /// build id the worker reported; compared against github to spot deploys.
     pub build: String,
+    /// which conversation the feed is currently showing. run events tagged
+    /// with a different id are routed to a compact badge instead of the
+    /// visible stream — the phase-1 seam for multi-worker concurrency.
+    pub active_thread: String,
 }
 
 pub type Shared = Rc<RefCell<Ui>>;
@@ -345,12 +348,12 @@ pub fn boot_ui(worker_url: &str) {
         config,
         running: false,
         build: String::new(),
+        active_thread: String::new(),
     }));
 
     wire_worker(&ui);
     wire_controls(&ui);
     wire_rails();
-    notify::wire();
     update::start_watching(&ui);
 
     // NOTHING is sent to the worker here, and that is deliberate.

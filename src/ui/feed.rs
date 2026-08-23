@@ -200,6 +200,60 @@ fn append_delta(kind: &str, delta: &str) {
 }
 
 pub fn render(ui: &Shared, event: Event) {
+    // phase-1 routing seam: once more than one worker exists, events tagged
+    // for a background thread must not pour into the visible feed. today
+    // there is exactly one worker and every tag matches, so this is a no-op
+    // — but the check lives here so phase 2 cannot forget it.
+    let tagged = event.thread().to_string();
+    let is_background = !tagged.is_empty()
+        && {
+            let u = ui.borrow();
+            !u.active_thread.is_empty() && tagged != u.active_thread
+        };
+    if is_background {
+        background_activity(ui, &tagged, &event);
+        return;
+    }
+    render_active(ui, event);
+}
+
+/// collapse another conversation's traffic into a one-line badge on its
+/// sidebar row instead of interleaving it with the visible feed.
+fn background_activity(ui: &Shared, thread: &str, event: &Event) {
+    let summary = match event {
+        Event::StepStarted { step, .. } => Some(format!("step {step}")),
+        Event::ToolStarted { name, .. } => Some(format!("⚡ {name}")),
+        Event::RunFinished { steps, reason, .. } => Some(format!(
+            "run ended after {steps} step(s) ({})",
+            match reason {
+                FinishReason::Completed => "completed",
+                FinishReason::Stopped => "stopped",
+                FinishReason::StepLimit => "step limit",
+                FinishReason::Failed => "failed",
+            }
+        )),
+        _ => None,
+    };
+    if summary.is_none() {
+        return;
+    }
+    if let Some(row) = doc()
+        .query_selector(&format!("[data-conv-id=\"{thread}\"]"))
+        .ok()
+        .flatten()
+    {
+        if let Some(existing) = row.query_selector(".conv-activity").ok().flatten() {
+            existing.remove();
+        }
+        if let Some(text) = summary {
+            let badge = create("span", "conv-activity");
+            badge.set_text_content(Some(&text));
+            let _ = row.append_child(&badge);
+        }
+    }
+}
+
+fn render_active(ui: &Shared, event: Event) {
     match event {
         Event::Ready { build } => {
             ui.borrow_mut().build = build.clone();
@@ -219,6 +273,7 @@ pub fn render(ui: &Shared, event: Event) {
         }
 
         Event::Conversations { items, active } => {
+            ui.borrow_mut().active_thread = active.clone();
             let Some(list) = by_id("conversations") else {
                 return;
             };
@@ -308,20 +363,7 @@ pub fn render(ui: &Shared, event: Event) {
             set_status(&format!("running · {model}"), true);
         }
 
-        Event::StepStarted { step } => {
-            // the model can think for a long time before its first token, so
-            // a bare "running" reads the same as a stall. name the step, and
-            // say when loop mode is why the run has not ended.
-            let loop_mode = ui.borrow().config.loop_mode;
-            set_status(
-                &if loop_mode {
-                    format!("∞ loop · step {step} — waiting for the model")
-                } else {
-                    format!("step {step} — waiting for the model")
-                },
-                true,
-            );
-
+        Event::StepStarted { step, .. } => {
             // close out the previous step's streaming targets
             ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
             ACTIVE_CONTENT.with(|c| *c.borrow_mut() = None);
@@ -334,10 +376,10 @@ pub fn render(ui: &Shared, event: Event) {
             ACTIVE.with(|a| *a.borrow_mut() = Some(card));
         }
 
-        Event::Reasoning { delta } => append_delta("reasoning", &delta),
-        Event::Content { delta } => append_delta("content", &delta),
+        Event::Reasoning { delta, .. } => append_delta("reasoning", &delta),
+        Event::Content { delta, .. } => append_delta("content", &delta),
 
-        Event::ToolStarted { id, name, args } => {
+        Event::ToolStarted { id, name, args, .. } => {
             let Some(parent) = ACTIVE.with(|a| a.borrow().clone()) else {
                 return;
             };
@@ -404,7 +446,7 @@ pub fn render(ui: &Shared, event: Event) {
             append(&card);
         }
 
-        Event::RunFinished { steps, reason } => {
+        Event::RunFinished { steps, reason, .. } => {
             ui.borrow_mut().running = false;
             ACTIVE.with(|a| *a.borrow_mut() = None);
             ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
@@ -430,18 +472,6 @@ pub fn render(ui: &Shared, event: Event) {
             // any failure path also re-arms the save button; a lock that only
             // clears on success is one that eventually never clears.
             super::finish_settings_check();
-
-            // the worker believes a run is live while the ui does not, so the
-            // ui is hiding the stop button — the one control that can resolve
-            // the disagreement. surface it. this is how the app got wedged
-            // with "a run is already in progress" and no way to act on it.
-            if message.contains("run is already in progress")
-                || message.contains("while a run is in progress")
-            {
-                ui.borrow_mut().running = true;
-                set_status("run in progress — press stop to reset", true);
-            }
-
             error(&scope, &message)
         }
 

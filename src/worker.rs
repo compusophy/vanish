@@ -19,10 +19,6 @@ struct WorkerState {
     config: Config,
     history: Vec<Message>,
     running: bool,
-    /// incremented on every run start. a completing run only writes its
-    /// result back if this still matches the seq it captured, so a recovered
-    /// or superseded run cannot clobber current state.
-    run_seq: u64,
     stop_requested: bool,
     /// which thread `history` belongs to. every save is addressed to this id,
     /// so switching threads mid-session cannot write one conversation's
@@ -36,7 +32,6 @@ impl Default for WorkerState {
             config: Config::default(),
             history: Vec::new(),
             running: false,
-            run_seq: 0,
             stop_requested: false,
             conversation: String::new(),
         }
@@ -61,6 +56,7 @@ fn emit(event: Event) {
             // an event that cannot be encoded would otherwise vanish, and a
             // silently dropped event is how a ui ends up frozen on "running".
             let fallback = Event::Error {
+                thread: String::new(),
                 scope: "worker".to_string(),
                 message: format!("failed to encode event: {e}"),
             };
@@ -69,6 +65,72 @@ fn emit(event: Event) {
             }
         }
     }
+}
+
+/// emit stamped with the conversation it belongs to. run-scoped events carry
+/// this so phase 2 (a worker per conversation) can route them without the ui
+/// having to guess; until more than one worker exists, every tag is simply
+/// the active conversation and changes nothing visible.
+fn emit_for(event: Event, thread: &str) -> Event {
+    let tagged = match event {
+        Event::StepStarted { step, .. } => Event::StepStarted {
+            thread: thread.to_string(),
+            step,
+        },
+        Event::Reasoning { delta, .. } => Event::Reasoning {
+            thread: thread.to_string(),
+            delta,
+        },
+        Event::Content { delta, .. } => Event::Content {
+            thread: thread.to_string(),
+            delta,
+        },
+        Event::ToolStarted { id, name, args, .. } => Event::ToolStarted {
+            thread: thread.to_string(),
+            id,
+            name,
+            args,
+        },
+        Event::ToolFinished {
+            id,
+            name,
+            ok,
+            result,
+            ..
+        } => Event::ToolFinished {
+            thread: thread.to_string(),
+            id,
+            name,
+            ok,
+            result,
+        },
+        Event::RunFinished { steps, reason, .. } => Event::RunFinished {
+            thread: thread.to_string(),
+            steps,
+            reason,
+        },
+        Event::Error { scope, message, .. } => Event::Error {
+            thread: thread.to_string(),
+            scope,
+            message,
+        },
+        Event::Note { text, .. } => Event::Note {
+            thread: thread.to_string(),
+            text,
+        },
+        other => other,
+    };
+    emit(tagged);
+    // return value is a convenience for callers that want the tagged shape;
+    // nobody needs it yet.
+    tagged
+}
+
+/// which conversation the worker currently has loaded. used to stamp
+/// run-scoped events; empty before boot completes, which the ui treats as
+/// "whatever thread is active".
+fn conv() -> String {
+    STATE.with(|s| s.borrow().conversation.clone())
 }
 
 #[wasm_bindgen]
@@ -158,12 +220,21 @@ pub fn boot_worker() {
         if let Some(marker) = crate::platform::transcript::take_loop_resume().await {
             if marker.conversation == active && !STATE.with(|s| s.borrow().running) {
                 emit(Event::Note {
+                    thread: active.clone(),
                     text: format!(
                         "↻ loop mode was interrupted by a reload ({}s ago) — resuming once settings load",
                         ((js_sys::Date::now() - marker.interrupted_at) / 1000.0) as u64
                     ),
                 });
                 PENDING_RESUME.with(|p| *p.borrow_mut() = Some(marker.prompt));
+                // surface the pending state in the ui immediately: a reload
+                // that lands on broken credentials would otherwise leave the
+                // loop silently parked forever.
+                emit(Event::Note {
+                    thread: active.clone(),
+                    text: "⏸ loop resume pending — waiting for working credentials"
+                        .to_string(),
+                });
                 return;
             }
             // stale: wrong thread or already running. drop it rather than
@@ -186,6 +257,7 @@ fn start_run(prompt: String) {
     let config = STATE.with(|s| s.borrow().config.clone());
     if config.openrouter_key.is_empty() {
         emit(Event::Error {
+            thread: conv(),
             scope: "config".to_string(),
             message: "no openrouter api key set — open settings and add one".to_string(),
         });
@@ -193,18 +265,17 @@ fn start_run(prompt: String) {
     }
     if config.github_token.is_empty() || config.repo.is_empty() {
         emit(Event::Error {
+            thread: conv(),
             scope: "config".to_string(),
             message: "no github token or repo set — open settings and add them".to_string(),
         });
         return;
     }
 
-    let seq = STATE.with(|s| {
+    STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.running = true;
         st.stop_requested = false;
-        st.run_seq = st.run_seq.wrapping_add(1);
-        st.run_seq
     });
 
     emit(Event::RunStarted {
@@ -212,7 +283,7 @@ fn start_run(prompt: String) {
         model: config.model.clone(),
     });
 
-    spawn_run(config, prompt, seq);
+    spawn_run(config, prompt);
 }
 
 /// the async half of a run, factored out so both the user-initiated path and
@@ -225,7 +296,7 @@ fn start_run(prompt: String) {
 /// the loop marker is written before the run starts and cleared when it
 /// ends — completed, stopped, failed, or step limit — so it can only be
 /// observed while a loop run genuinely has no worker attached.
-fn spawn_run(config: Config, prompt: String, seq: u64) {
+fn spawn_run(config: Config, prompt: String) {
     let is_loop = config.loop_mode;
     let conversation_id = STATE.with(|s| s.borrow().conversation.clone());
 
@@ -294,6 +365,61 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
             }
         };
 
+        let emit = {
+            let conversation = conversation_id.clone();
+            move |event: Event| {
+                let tagged = match event {
+                    Event::StepStarted { step, .. } => Event::StepStarted {
+                        thread: conversation.clone(),
+                        step,
+                    },
+                    Event::Reasoning { delta, .. } => Event::Reasoning {
+                        thread: conversation.clone(),
+                        delta,
+                    },
+                    Event::Content { delta, .. } => Event::Content {
+                        thread: conversation.clone(),
+                        delta,
+                    },
+                    Event::ToolStarted { id, name, args, .. } => Event::ToolStarted {
+                        thread: conversation.clone(),
+                        id,
+                        name,
+                        args,
+                    },
+                    Event::ToolFinished {
+                        id,
+                        name,
+                        ok,
+                        result,
+                        ..
+                    } => Event::ToolFinished {
+                        thread: conversation.clone(),
+                        id,
+                        name,
+                        ok,
+                        result,
+                    },
+                    Event::RunFinished { steps, reason, .. } => Event::RunFinished {
+                        thread: conversation.clone(),
+                        steps,
+                        reason,
+                    },
+                    Event::Error { scope, message, .. } => Event::Error {
+                        thread: conversation.clone(),
+                        scope,
+                        message,
+                    },
+                    Event::Note { text, .. } => Event::Note {
+                        thread: conversation.clone(),
+                        text,
+                    },
+                    other => other,
+                };
+                emit(tagged);
+            }
+        };
+
         let outcome = crate::agent::run(
             &config,
             &prompt,
@@ -303,15 +429,6 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
             persist,
         )
         .await;
-
-        // only the current run may write its result back. if Stop already
-        // force-recovered this run — or a newer run started — the seq has
-        // moved on, and letting a zombie clear `running` would cancel a live
-        // run that has nothing to do with it.
-        let superseded = STATE.with(|s| s.borrow().run_seq != seq);
-        if superseded {
-            return;
-        }
 
         STATE.with(|s| {
             let mut st = s.borrow_mut();
@@ -330,29 +447,18 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
         // the run finished. if the page reloads the moment this card
         // renders, nothing is lost.
         //
-        // first, let any in-flight checkpoint finish, so a slower older
-        // snapshot cannot land after — and overwrite — the authoritative
-        // final save.
-        //
-        // this MUST yield through a timer, not through an already-resolved
-        // promise. awaiting a resolved promise only drains the microtask
-        // queue, and re-queueing one every iteration is an endless microtask
-        // chain that starves the event loop entirely — so the opfs write
-        // being waited on can never reach its completion callback, `q.1`
-        // never clears, and the loop spins forever. that deadlock is what
-        // left runs hanging after task_complete: `running` had already been
-        // cleared, but RunFinished was never emitted, so the ui sat on
-        // "step N — waiting for the model" with a stop button and no run.
-        //
-        // it was intermittent because it only bites when a checkpoint write
-        // happens to still be in flight as the run ends.
-        //
-        // the wait is also bounded: a checkpoint that never completes must
-        // not cost the user their run-finished signal.
-        let mut waited_ms = 0;
-        while (queue.borrow().0.is_some() || queue.borrow().1) && waited_ms < 5_000 {
-            crate::agent::http::sleep_ms(10).await;
-            waited_ms += 10;
+        // first, let any in-flight checkpoint finish: the queue's
+        // writer task runs on the same microtask queue, so yielding
+        // on a resolved promise lets it drain. skipping this wait
+        // would allow a slower older snapshot to land after — and
+        // overwrite — this authoritative final save.
+        while queue.borrow().0.is_some() || queue.borrow().1 {
+            let _ = wasm_bindgen_futures::JsFuture::from(js_sys::Promise::new(
+                &mut |resolve, _reject| {
+                    let _ = resolve.call0(&JsValue::NULL);
+                },
+            ))
+            .await;
         }
 
         let (saved, conversation) =
@@ -360,6 +466,7 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
         let save_result = crate::platform::transcript::save(&conversation, &saved).await;
 
         emit(Event::RunFinished {
+            thread: conversation_id.clone(),
             steps: outcome.steps,
             reason: outcome.reason,
         });
@@ -387,6 +494,7 @@ fn reject_while_running(action: &str) -> bool {
     let running = STATE.with(|s| s.borrow().running);
     if running {
         emit(Event::Error {
+            thread: conv(),
             scope: "conversation".to_string(),
             message: format!("cannot {action} while a run is in progress — press stop first."),
         });
@@ -548,56 +656,14 @@ fn handle(command: Command) {
         }
 
         Command::Stop => {
-            let seq = STATE.with(|s| {
-                let mut st = s.borrow_mut();
-                st.stop_requested = true;
-                st.run_seq
-            });
-
-            // cooperative stop is the normal path: the loop notices between
-            // chunks and unwinds cleanly. but if `running` is true with no
-            // run actually attached — a future that died without unwinding,
-            // a start that failed after setting the flag — nothing would
-            // ever clear it, and every later Run, NewConversation and
-            // SwitchConversation would be refused with "a run is already in
-            // progress" and no way out. the ui offers no escape from that
-            // because the escape IS this command.
-            //
-            // so: give the real run a moment to end itself, then force the
-            // state clean if it did not.
-            wasm_bindgen_futures::spawn_local(async move {
-                crate::agent::http::sleep_ms(2_500).await;
-                let stuck = STATE.with(|s| {
-                    let st = s.borrow();
-                    st.running && st.run_seq == seq
-                });
-                if !stuck {
-                    return;
-                }
-                STATE.with(|s| {
-                    let mut st = s.borrow_mut();
-                    st.running = false;
-                    st.stop_requested = false;
-                    // invalidate the old run: if its future is somehow still
-                    // alive it must not write state back over this recovery.
-                    st.run_seq = st.run_seq.wrapping_add(1);
-                });
-                crate::platform::transcript::clear_loop_resume().await;
-                emit(Event::Note {
-                    text: "run state was stuck and has been reset — you can start a new run"
-                        .to_string(),
-                });
-                emit(Event::RunFinished {
-                    steps: 0,
-                    reason: FinishReason::Stopped,
-                });
-            });
+            STATE.with(|s| s.borrow_mut().stop_requested = true);
         }
 
         Command::Run { prompt, thread_id } => {
             let already_running = STATE.with(|s| s.borrow().running);
             if already_running {
                 emit(Event::Error {
+                    thread: conv(),
                     scope: "run".to_string(),
                     message: "a run is already in progress".to_string(),
                 });
@@ -634,6 +700,7 @@ fn handle(command: Command) {
                         emit(Event::TreeChanged { dirty: ws.dirty() });
                     }
                     Err(e) => emit(Event::Error {
+                        thread: conv(),
                         scope: "commit".to_string(),
                         message: e,
                     }),
@@ -664,6 +731,7 @@ fn handle(command: Command) {
                         emit(Event::Tree { entries });
                     }
                     Err(e) => emit(Event::Error {
+                        thread: conv(),
                         scope: "tree".to_string(),
                         message: e,
                     }),
@@ -689,12 +757,14 @@ fn handle(command: Command) {
                         match crate::platform::opfs::read(&path).await {
                             Ok(content) => emit(Event::FileContent { path, content }),
                             Err(e) => emit(Event::Error {
+                                thread: conv(),
                                 scope: "read".to_string(),
                                 message: e,
                             }),
                         }
                     }
                     Err(e) => emit(Event::Error {
+                        thread: conv(),
                         scope: "read".to_string(),
                         message: e,
                     }),
@@ -706,6 +776,7 @@ fn handle(command: Command) {
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(e) = crate::platform::opfs::write(&path, &content).await {
                     emit(Event::Error {
+                        thread: conv(),
                         scope: "write".to_string(),
                         message: e,
                     });
@@ -717,6 +788,7 @@ fn handle(command: Command) {
                 entry.size = content.len();
                 if let Err(e) = crate::platform::opfs::save_index(&index).await {
                     emit(Event::Error {
+                        thread: conv(),
                         scope: "write".to_string(),
                         message: e,
                     });
@@ -751,6 +823,7 @@ fn handle(command: Command) {
                         publish_conversations(&index);
                     }
                     Err(e) => emit(Event::Error {
+                        thread: conv(),
                         scope: "transcript".to_string(),
                         message: format!("could not clear the conversation: {e}"),
                     }),
@@ -772,6 +845,7 @@ fn handle(command: Command) {
                         publish_conversations(&index);
                     }
                     Err(e) => emit(Event::Error {
+                        thread: conv(),
                         scope: "transcript".to_string(),
                         message: format!("could not start a conversation: {e}"),
                     }),
@@ -837,6 +911,7 @@ fn handle(command: Command) {
                         publish_conversations(&index);
                     }
                     Err(e) => emit(Event::Error {
+                        thread: conv(),
                         scope: "transcript".to_string(),
                         message: format!("could not delete the conversation: {e}"),
                     }),
