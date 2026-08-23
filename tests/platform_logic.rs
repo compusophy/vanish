@@ -149,3 +149,65 @@ fn conv(id: &str, updated: f64) -> vanish::platform::transcript::ConversationMet
         count: 5,
     }
 }
+
+// ---- clock formatting -----------------------------------------------------
+// the `now` tool reads the browser clock, which needs a browser — but the
+// calendar conversion it feeds into is pure rust, and these pins are what
+// stop a silent regression from making the agent report wrong dates forever
+// (the exact failure mode that motivated the tool: guessing dates).
+
+use vanish::agent::tools::{format_timestamp_iso, format_timestamp_readable};
+
+#[test]
+fn epoch_zero_formats_correctly() {
+    assert_eq!(format_timestamp_iso(0), "1970-01-01T00:00:00Z");
+    // january 1st 1970 was a thursday.
+    assert_eq!(
+        format_timestamp_readable(0),
+        "Thursday, January 1, 1970 · 00:00 UTC"
+    );
+}
+
+#[test]
+fn known_modern_timestamps_round_trip() {
+    // 2023-11-14T22:13:20Z, cross-checked against timeapi.io when the tool landed.
+    let t = 1_700_000_000_000i64;
+    assert_eq!(format_timestamp_iso(t), "2023-11-14T22:13:20Z");
+    assert_eq!(
+        format_timestamp_readable(t),
+        "Tuesday, November 14, 2023 · 22:13 UTC"
+    );
+}
+
+#[test]
+fn leap_day_is_rendered_not_skipped() {
+    // 2024-02-29T00:00:00Z. a days-to-(y,m,d) bug classically lands on
+    // march 1st here.
+    let t = 1_709_164_800_000i64;
+    assert_eq!(format_timestamp_iso(t), "2024-02-29T00:00:00Z");
+}
+
+#[test]
+fn pre_epoch_dates_use_floored_not_truncated_division() {
+    // -1 day is 1969-12-31, not 1969-12-30 or 1970-01-00. truncating
+    // division on negatives would corrupt every pre-1970 timestamp.
+    assert_eq!(format_timestamp_iso(-86_400_000), "1969-12-31T00:00:00Z");
+    // and one second before the epoch stays on the same day.
+    assert_eq!(format_timestamp_iso(-1_000), "1969-12-31T23:59:59Z");
+}
+
+#[test]
+fn sub_second_precision_is_dropped_not_rounded() {
+    // 23:59:59.999 must truncate to 23:59:59, never roll over to the next
+    // minute/day.
+    assert_eq!(format_timestamp_iso(999), "1970-01-01T00:00:00Z");
+    assert_eq!(format_timestamp_iso(86_399_999), "1970-01-01T23:59:59Z");
+}
+
+#[test]
+fn year_boundaries_roll_over() {
+    // 1999-12-31T23:59:59Z plus one second is 2000-01-01T00:00:00Z.
+    let new_years_eve = 946_684_799_000i64;
+    assert_eq!(format_timestamp_iso(new_years_eve), "1999-12-31T23:59:59Z");
+    assert_eq!(format_timestamp_iso(new_years_eve + 1_000), "2000-01-01T00:00:00Z");
+}

@@ -42,6 +42,8 @@ tools:
   public page as text via the r.jina.ai reader; web_search for duckduckgo
   lookups. you have live web access — when you are unsure about an api, a
   crate version, a doc page, or a fact, look it up instead of guessing.
+- now for the current date/time, from the worker's own clock. you have no
+  internal sense of the current date; never guess one — call now.
 - task_complete when the work is finished and committed.
 
 self-maintenance:
@@ -82,11 +84,6 @@ pub fn retry_backoff_ms(attempt: u32) -> i32 {
         _ => 60_000,
     }
 }
-
-/// how finely a long wait inside the loop is sliced so a stop request is
-/// noticed promptly. a 60s backoff that ignores stop for 60s is, from the
-/// outside, indistinguishable from a hang.
-const STOP_POLL_MS: i32 = 250;
 
 /// drive one full agent run.
 ///
@@ -238,21 +235,7 @@ where
                             delay / 1000
                         ),
                     });
-                    // the backoff is the longest stretch of a run that makes
-                    // no api call at all, so it is exactly where a stop would
-                    // otherwise sit unnoticed for tens of seconds. sleep in
-                    // slices and abandon the retry the moment stop lands.
-                    let mut slept = 0;
-                    while slept < delay {
-                        if stopped() {
-                            return RunOutcome {
-                                steps: step,
-                                reason: FinishReason::Stopped,
-                            };
-                        }
-                        crate::agent::http::sleep_ms(STOP_POLL_MS.min(delay - slept)).await;
-                        slept += STOP_POLL_MS;
-                    }
+                    crate::agent::http::sleep_ms(delay).await;
                 }
             }
         };
@@ -289,24 +272,7 @@ where
             };
         }
 
-        // a step can carry several tool calls, and some are slow (a
-        // deployment poll waits on ci), so stop has to be able to land
-        // between them rather than only after the whole batch.
-        //
-        // it cannot simply return, though: the api requires every tool_call
-        // in an assistant message to be answered by a matching tool result.
-        // returning mid-batch would leave the transcript malformed, and the
-        // NEXT run — replaying that history — would be rejected outright.
-        // so the abandoned calls are answered with an explicit cancellation
-        // and the run ends with a well-formed history.
-        let mut cancelled_at: Option<usize> = None;
-
-        for (i, call) in turn.tool_calls.iter().enumerate() {
-            if stopped() {
-                cancelled_at = Some(i);
-                break;
-            }
-
+        for call in &turn.tool_calls {
             emit(Event::ToolStarted {
                 thread: String::new(),
                 id: call.id.clone(),
@@ -348,27 +314,6 @@ where
                     dirty: workspace.dirty(),
                 });
             }
-        }
-
-        if let Some(from) = cancelled_at {
-            for call in &turn.tool_calls[from..] {
-                history.push(Message::tool_result(
-                    call.id.clone(),
-                    serde_json::json!({
-                        "success": false,
-                        "error": "not run — the user stopped the run before this call"
-                    })
-                    .to_string(),
-                ));
-            }
-            persist(history);
-            emit(Event::TreeChanged {
-                dirty: workspace.dirty(),
-            });
-            return RunOutcome {
-                steps: step,
-                reason: FinishReason::Stopped,
-            };
         }
 
         emit(Event::TreeChanged {

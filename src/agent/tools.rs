@@ -12,12 +12,95 @@ use crate::platform::opfs::{self, Index, IndexEntry};
 
 pub struct Workspace {
     pub github: Github,
-    /// optional build-log reader. absent means check_deployment can report a
-    /// verdict but not a cause.
-    pub vercel: Option<crate::agent::vercel::Vercel>,
     pub index: Index,
     /// set by `task_complete`; the loop reads it to know the model is done.
     pub completed: Option<String>,
+}
+
+/// the current wall-clock time in milliseconds since the unix epoch.
+/// wasm asks the browser (`js_sys::Date`); the native test build falls back
+/// to `std::time`. no network request is involved either way.
+pub fn now_epoch_ms() -> i64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now() as i64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+}
+
+/// howard hinnant's civil-from-days algorithm: days since 1970-01-01 to a
+/// proleptic-gregorian (year, month, day). pure so tests can pin it against
+/// known timestamps instead of trusting whatever the runtime says.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as i64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
+/// epoch milliseconds → `"2026-08-23T22:09:05Z"`.
+pub fn format_timestamp_iso(epoch_ms: i64) -> String {
+    let secs = epoch_ms.div_euclid(1_000);
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (y, mo, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{mo:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        sod / 3_600,
+        (sod % 3_600) / 60,
+        sod % 60
+    )
+}
+
+/// epoch milliseconds → `"Sunday, August 23, 2026 · 22:09 UTC"` for prose
+/// replies. epoch day 0 was a thursday; the table starts there.
+pub fn format_timestamp_readable(epoch_ms: i64) -> String {
+    const WEEKDAYS: [&str; 7] = [
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+    ];
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let secs = epoch_ms.div_euclid(1_000);
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (y, mo, d) = civil_from_days(days);
+    let weekday = WEEKDAYS[days.rem_euclid(7) as usize];
+    format!(
+        "{weekday}, {} {d}, {y} · {:02}:{:02} UTC",
+        MONTHS[(mo - 1) as usize],
+        sod / 3_600,
+        (sod % 3_600) / 60
+    )
 }
 
 /// the json tool schema handed to the model each turn.
@@ -112,6 +195,14 @@ pub fn definitions() -> serde_json::Value {
       {
         "type": "function",
         "function": {
+          "name": "now",
+          "description": "the current date and time from the worker's own clock. no network call. returns iso-8601 (utc), a human-readable line, and the raw epoch milliseconds. use this whenever a task needs to know today's date or the current time.",
+          "parameters": { "type": "object", "properties": {} }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "http_fetch",
           "description": "make an arbitrary http request and return the status and body as text (truncated). works against any cors-enabled endpoint (github api, wikipedia, open-meteo, most public apis). endpoints that omit cors headers cannot be called from a browser — use web_read for those.",
           "parameters": {
@@ -198,17 +289,9 @@ fn number_lines(content: &str, start: usize, end: usize) -> String {
 
 impl Workspace {
     pub async fn new(github: Github) -> Self {
-        Self::with_vercel(github, None).await
-    }
-
-    pub async fn with_vercel(
-        github: Github,
-        vercel: Option<crate::agent::vercel::Vercel>,
-    ) -> Self {
         let index = opfs::load_index().await;
         Self {
             github,
-            vercel,
             index,
             completed: None,
         }
@@ -411,6 +494,17 @@ impl Workspace {
                 .to_string())
             }
 
+            "now" => {
+                let ms = now_epoch_ms();
+                Ok(serde_json::json!({
+                    "iso": format_timestamp_iso(ms),
+                    "readable": format_timestamp_readable(ms),
+                    "epoch_ms": ms,
+                    "source": "browser clock (js_sys::Date), no network",
+                })
+                .to_string())
+            }
+
             "http_fetch" => {
                 let url = arg(&args, "url").ok_or("http_fetch requires 'url'")?;
                 let method = arg(&args, "method").unwrap_or("GET").to_uppercase();
@@ -535,32 +629,6 @@ impl Workspace {
                 }
 
                 let short: String = sha.chars().take(7).collect();
-
-                // a verdict without a cause is not actionable. when a vercel
-                // token is configured, pull the real build output so a failed
-                // commit can be repaired in the same run that broke it.
-                let mut build_log = serde_json::Value::Null;
-                if state.verdict == "failure" {
-                    build_log = match &self.vercel {
-                        None => serde_json::json!(
-                            "no vercel token configured, so the compiler output is unavailable — \
-                             only the pass/fail verdict. add one in settings to see why builds fail."
-                        ),
-                        Some(v) => match v.deployment_for_commit(&sha).await {
-                            Err(e) => serde_json::json!(format!("could not reach vercel: {e}")),
-                            Ok(None) => serde_json::json!(
-                                "vercel has no deployment recorded for this commit yet."
-                            ),
-                            Ok(Some(dep)) => match v.build_logs(&dep.id).await {
-                                Err(e) => serde_json::json!(format!("could not read build logs: {e}")),
-                                Ok(lines) => {
-                                    serde_json::json!(crate::agent::vercel::extract_errors(&lines))
-                                }
-                            },
-                        },
-                    };
-                }
-
                 let guidance = match state.verdict.as_str() {
                     "failure" => "the build FAILED. the live app is now serving the last good build, not your commit. open the check url for the compiler output, fix the cause, and commit the fix.",
                     "success" => "the build succeeded and this commit is live.",
@@ -572,7 +640,6 @@ impl Workspace {
                     "sha": short,
                     "verdict": state.verdict,
                     "checks": state.checks,
-                    "build_log": build_log,
                     "guidance": guidance,
                 })
                 .to_string())
