@@ -54,19 +54,26 @@ test -f web/pkg/vanish.js      || { echo "build produced no js glue"; exit 1; }
 # bricking every deploy — but a compiled test that FAILS is fatal: broken
 # logic must not ship.
 echo "--> running native test suite"
-# serialized: a parallel run interleaves completion lines and a hard failure
-# can kill the harness before most tests print, leaving a log that names
-# nothing. one thread costs seconds and makes every failure self-identifying.
-if ! cargo test --lib --tests -- --test-threads=1 2>&1; then
-  echo ""
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  echo "!! NATIVE TESTS FAILED OR UNCOMPILABLE                       !!"
-  echo "!! A failing test means broken logic shipped to production.  !!"
-  echo "!! An uncompilable suite means the verification layer itself !!"
-  echo "!! is broken and must be fixed before the next commit.       !!"
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+# serialized + nocapture + per-suite markers: a parallel or captured run can
+# kill the harness before any failing test prints, leaving a log that names
+# nothing. one thread costs seconds; markers and nocapture make every
+# failure self-identifying even in a truncated build log.
+if ! cargo test --lib -- --test-threads=1 --nocapture 2>&1; then
+  echo "!! SUITE FAILED: src/lib.rs unit tests"
   exit 1
 fi
+for suite in protocol_contract platform_logic loop_nervous_system event_loop_liveness streaming agent_evals; do
+  if ! RUST_BACKTRACE=1 cargo test --test "$suite" -- --test-threads=1 --nocapture 2>&1; then
+    echo ""
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "!! NATIVE TESTS FAILED: suite '$suite'                       !!"
+    echo "!! A failing test means broken logic shipped to production.  !!"
+    echo "!! An uncompilable suite means the verification layer itself !!"
+    echo "!! is broken and must be fixed before the next commit.       !!"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    exit 1
+  fi
+done
 
 
 echo "--> output:"
