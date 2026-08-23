@@ -57,6 +57,25 @@
       module-level fn emit and was consumed by agent::run — renamed
       emit_tagged. never name a closure after an existing fn it calls.
 
+## landed this run (stuck-stop-button fix)
+
+- [x] **root cause of the recurring "button stuck on stop" bug found and
+      closed** (695abf0 + ee89601): RunFinished — the ONLY event that
+      flips the dock back to run — was emitted AFTER draining the opfs
+      write queue and saving the transcript, so a slow/wedged save held
+      the control transition hostage indefinitely. fixed three ways:
+      (1) RunFinished now emits BEFORE the final save; (2) a heartbeat —
+      Command::RunState pinged every 3s while the ui thinks a run is
+      active, worker answers RunStateReport from its own running flag,
+      disagreement snaps the buttons back with an explanatory note;
+      (3) Event::touches_run_state() makes start/finish bypass
+      background-thread routing so one thread's finish can never strand
+      the shared dock. tests pin all three.
+- lesson: **control transitions must not queue behind durability work.**
+  emit user-visible state first, then persist; persistence failures get
+  their own report path. also: any event whose loss strands ui state
+  needs a reconciliation channel, not just careful ordering.
+
 ## what was learned this run
 
 - **stale-tree incident #2, worse**: this time read_file served a version of

@@ -97,6 +97,22 @@ taskboard) asked for four things. all four are resolved:
       Command::WriteFile; TreeChanged confirms. next iteration: a "commit"
       button in the editor footer driving Command::Commit for the current
       path set, and dirty-state highlighting of the open file.
+## open work
+
+- [x] **stuck stop button** — ROOT-CAUSED AND CLOSED (695abf0/ee89601).
+      RunFinished — the only event that flips the dock back to run — was
+      queued BEHIND the transcript save, so a slow/wedged opfs write held
+      the control transition indefinitely. fixed three ways: emitted before
+      the save now; a 3s RunState heartbeat reconciles the dock against the
+      worker's own running flag while a run is believed active;
+      touches_run_state() guarantees start/finish bypass background-thread
+      routing. if it EVER recurs, the feed note "state reconciled after a
+      lost finish event" is the diagnostic fingerprint.
+- [ ] verify after next deploy: run a short task, confirm the button flips
+      back to run on completion within ~3s, with no reconciliation note
+      (the note appearing means the ordering fix alone wasn't enough and
+      the heartbeat caught it — still fixed, but report it).
+
 - [ ] settings persistence was hardened in 4480fc9 (serde defaults,
       corrupt-store recovery, boot write-back). verify after the next
       deploy that a plain reload no longer asks for save settings; if the
