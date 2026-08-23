@@ -270,6 +270,19 @@ where
         if let Some(summary) = workspace.completed.take() {
             if config.loop_mode {
                 // loop mode means run until a human stops it.
+                //
+                // say so. a completed task that does not end the run looks
+                // exactly like a hang from the outside — the status just
+                // reads "running" while nothing visibly happens — and that
+                // ambiguity has repeatedly been mistaken for the app being
+                // broken.
+                emit(Event::Content {
+                    delta: format!("\n\n{summary}"),
+                });
+                emit(Event::Note {
+                    text: "✓ task complete — ∞ loop mode is on, so the run continues with the next improvement. press stop to end it."
+                        .to_string(),
+                });
                 history.push(Message::user(
                     "task_complete acknowledged. loop mode is on: find the next most valuable improvement and continue.",
                 ));

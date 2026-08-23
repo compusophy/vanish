@@ -6,11 +6,53 @@
 //! can be the only client, with no relay standing in the middle.
 
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{ReadableStreamDefaultReader, Response};
 
 use crate::platform::opfs::describe;
+
+/// how long a stream may go silent before it is treated as dead.
+///
+/// generous: a high-effort model can think for a long time before emitting
+/// its first token. but not infinite — without this, a dropped connection
+/// leaves the run awaiting a chunk that will never arrive, `running` stuck
+/// true, no steps, no error, and nothing to look at but a "running" label.
+const STREAM_IDLE_TIMEOUT_MS: i32 = 180_000;
+
+/// marker resolved by the timeout arm of a race, so the caller can tell
+/// "the timer won" from "the read returned".
+const TIMEOUT_MARKER: &str = "__vanish_timeout";
+
+/// a promise that resolves to the timeout marker after `ms`.
+fn timeout_promise(ms: i32) -> Promise {
+    Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let marker = Object::new();
+        let _ = Reflect::set(
+            &marker,
+            &JsValue::from_str(TIMEOUT_MARKER),
+            &JsValue::TRUE,
+        );
+        let Ok(set_timeout) = Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .and_then(|f| f.dyn_into::<Function>().map_err(|e| e))
+        else {
+            return;
+        };
+        let cb = Closure::once_into_js(move || {
+            let _ = resolve.call1(&JsValue::NULL, &marker);
+        });
+        let _ = set_timeout.call2(&global, &cb, &JsValue::from_f64(ms as f64));
+    })
+}
+
+fn is_timeout(v: &JsValue) -> bool {
+    Reflect::get(v, &JsValue::from_str(TIMEOUT_MARKER))
+        .ok()
+        .and_then(|m| m.as_bool())
+        .unwrap_or(false)
+}
 
 /// await a timer. the loop has no deadline, so it can afford to wait for a
 /// ci build to settle rather than guessing whether its commit was good.
@@ -205,9 +247,24 @@ impl EventStream {
                 return Ok(None);
             }
 
-            let result = JsFuture::from(self.reader.read())
+            // race the read against a stall timer. an unraced read waits
+            // forever on a connection that has quietly died, which presents
+            // as a run that is "running" but producing nothing.
+            let raced = js_sys::Array::new();
+            raced.push(&self.reader.read());
+            raced.push(&timeout_promise(STREAM_IDLE_TIMEOUT_MS));
+
+            let result = JsFuture::from(js_sys::Promise::race(&raced))
                 .await
                 .map_err(|e| format!("stream read failed: {}", describe(&e)))?;
+
+            if is_timeout(&result) {
+                self.cancel();
+                return Err(format!(
+                    "the model stream went silent for {}s and was abandoned. the run can be started again; nothing written to the working tree is lost.",
+                    STREAM_IDLE_TIMEOUT_MS / 1000
+                ));
+            }
 
             let finished = Reflect::get(&result, &JsValue::from_str("done"))
                 .ok()

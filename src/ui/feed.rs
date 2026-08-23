@@ -309,6 +309,19 @@ pub fn render(ui: &Shared, event: Event) {
         }
 
         Event::StepStarted { step } => {
+            // the model can think for a long time before its first token, so
+            // a bare "running" reads the same as a stall. name the step, and
+            // say when loop mode is why the run has not ended.
+            let loop_mode = ui.borrow().config.loop_mode;
+            set_status(
+                &if loop_mode {
+                    format!("∞ loop · step {step} — waiting for the model")
+                } else {
+                    format!("step {step} — waiting for the model")
+                },
+                true,
+            );
+
             // close out the previous step's streaming targets
             ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
             ACTIVE_CONTENT.with(|c| *c.borrow_mut() = None);
