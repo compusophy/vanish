@@ -85,14 +85,18 @@ taskboard) asked for four things. all four are resolved:
       worker (`reject_while_running` refuses new-chat/switch/delete mid-run).
       full fix is multi-worker concurrency — see docs/MULTIAGENT_PLAN.md
       phases 1–2 (thread-tagged events + a worker pool keyed by conversation).
-- [ ] multi-agent parallelism — design decided this run, written up in
-      docs/MULTIAGENT_PLAN.md: NO wasm shared-memory threads (i/o-bound loop,
-      would force rewriting all thread_local/Rc state for zero speedup), NO
-      wgpu (no numeric kernels exist here). YES to more web workers: phase 1
-      thread-tagged events + feed routing → phase 2 worker pool per
-      conversation → phase 3 git strategy for concurrent commits (branching
-      vs commit lock) → phase 4 spawn_agent tool for orchestrator patterns.
-      phase 1 is the next concrete coding task.
+- [ ] multi-agent parallelism — phase 1 GROUNDWORK LANDED (e56fc72): all
+      run-scoped events carry a `thread` tag (serde-default, old payloads
+      still parse); the worker stamps the active conversation onto every
+      emission; feed::render routes mismatched tags to a compact
+      `.conv-activity` badge on that conversation's sidebar row;
+      `Ui::active_thread` tracks the visible thread from Conversations
+      events. REMAINING for phase 1→2: nothing user-visible changes until a
+      second worker exists — next concrete task is the worker pool in
+      ui/mod.rs (HashMap<conversation, WorkerHandle>, lazy spawn, cap 3–4),
+      then git strategy BEFORE enabling concurrent runs on one tree
+      (docs/MULTIAGENT_PLAN.md phases 2–3).
+- [x] stacked prs design doc exists (docs/STACKED_PRS_PLAN.md)
 - [ ] stacked prs / parallel diffs / preview-gated deploys — full design in
       docs/STACKED_PRS_PLAN.md, extends multiagent phase 3. adopted: the
       stacked-pr MODEL over plain REST (our commits already name parents
@@ -122,14 +126,26 @@ taskboard) asked for four things. all four are resolved:
       so a failed resume cannot loop boots forever. next iteration: surface
       the pending-resume state in the ui (a "resuming…" chip) so an
       interrupted loop is visible even if Configure never arrives.
-- [ ] web/index.html has no inputs for the vercel token/team-id that the
-      Config struct and hydrate/collect already support. adding two fields
-      to the credentials section would make build-log reading configurable;
-      today it relies on set_input no-oping and a hardcoded team default.
+- [x] web/index.html vercel token/team-id inputs — landed (e56fc72) under a
+      collapsed `<details class="adv-creds">` in the credentials section;
+      hydrate/collect already read cfg-vercel-token / cfg-vercel-team, so
+      build-log reading is now fully user-configurable.
 - [ ] `sync_repo` only refreshes the tree listing; it does not yet reconcile
-      upstream changes against dirty local files. related incident: local
-      read_file served stale content for tools.rs even after sync_repo; when
-      versions disagree, fetch the raw blob from github.
+      upstream changes against dirty local files. related incidents (twice
+      now): local read_file served stale content — for tools.rs in an earlier
+      run, and this run for agent/mod.rs where whole emissions were missing
+      from the local view while the deployed blob had them. when a file you
+      did not touch this session surprises you, fetch the raw blob from
+      github before trusting the local copy. also: git_commit once shipped
+      6 of 7 modified files — always re-run git_status after committing and
+      verify the file count against what you edited.
+- [x] RESOLVED incident: update.rs referenced super::notify::* but ui/mod.rs
+      never declared `mod notify` — main was red from that moment and every
+      deploy was pinned behind it. fixed in 5aa1e7e. lesson recorded: adding
+      a module file without its declaration is invisible locally if nothing
+      else references it, but breaks main the moment another file does.
+      after landing a new .rs file, confirm it is declared in its parent
+      mod.rs in the same commit.
 - [ ] wasm64 is a one-line target change once `wasm64-unknown-unknown` leaves
       tier 3 and wasm-bindgen supports it. wasm32 gives a 4gb address space,
       which is far past what this needs.

@@ -28,6 +28,48 @@
   the right shape for self-editing agents: fixes that live only in a reply
   evaporate; fixes that live in the prompt + memory files recur every run.
 
+## landed this run (multiagent phase 1 groundwork + red-build recovery)
+
+- [x] **thread-tagged events** (e56fc72): every run-scoped Event variant
+      (StepStarted, Reasoning, Content, ToolStarted, ToolFinished,
+      RunFinished, Error, Note) now carries a serde-default `thread` tag;
+      `Event::thread()` exposes it. the worker stamps the active conversation
+      id onto everything `agent::run` emits (tagging closure `emit_tagged`
+      wraps the emit passed to run) and on direct emissions via `conv()`.
+      the ui routes events whose tag differs from `Ui::active_thread` to a
+      compact badge on that conversation's sidebar row instead of the feed.
+      all dormant until phase 2 — one worker means tags always match.
+- [x] **vercel inputs** in web/index.html under a collapsed <details>
+      (.adv-creds styled) — closes the "Config supports fields the panel
+      never rendered" item.
+- [x] **pending loop-resume note**: boot emits an explicit
+      "⏸ loop resume pending" Note so an interrupted loop parked on missing
+      credentials is visible instead of silent.
+- [x] **main un-broken again** (5aa1e7e + e56fc72). two causes:
+      1. my own commit: adding `thread` to protocol variants missed literals
+         in agent/mod.rs and worker.rs, plus patterns in feed.rs. the build
+         log named every site; mechanical fix.
+      2. pre-existing upstream breakage inherited from main:
+         update.rs referenced `super::notify::*` but ui/mod.rs never declared
+         `mod notify`. notify.rs existed; only the declaration was missing.
+         main had been red since that file was added, pinning deploys.
+- [x] moved-value lesson: a local closure named `emit` shadowed the
+      module-level fn emit and was consumed by agent::run — renamed
+      emit_tagged. never name a closure after an existing fn it calls.
+
+## what was learned this run
+
+- **stale-tree incident #2, worse**: this time read_file served a version of
+  src/agent/mod.rs MISSING code the deployed version had (a whole loop-mode
+  Note emission), and git_commit shipped only 6 of 7 modified files. the raw
+  github fetch showed the true blob. rule upgraded from "when versions
+  disagree" to: before editing a file you have not touched this session,
+  cross-check against the raw blob if anything about it surprises you.
+- the build log is the fastest possible diagnosis for enum-shape changes:
+  it lists every literal/pattern site at once. when changing a protocol
+  variant, grep the whole repo first anyway (`Event::<Variant> {`) — the
+  compiler should never be the tool that finds your call sites.
+
 ## verified live
 
 - researched compusophy/localharness via GitHub API + its llms.txt; full
