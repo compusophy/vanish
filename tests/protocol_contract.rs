@@ -48,6 +48,10 @@ fn commands_round_trip() {
         Command::ListConversations,
         // phase-2 groundwork: a pool worker adopts one specific thread.
         Command::Attach { id: "conv-77".into() },
+        // dock reconciliation: the ui's heartbeat ping and the worker's
+        // answer. these exist because RunFinished can be delayed or lost
+        // behind the transcript save, leaving the buttons stuck on stop.
+        Command::RunState,
     ];
 
     for cmd in cmds {
@@ -244,6 +248,79 @@ fn finish_reasons_are_stable_strings() {
     ] {
         assert_eq!(serde_json::to_string(&reason).unwrap(), expected);
     }
+}
+
+// ---- dock reconciliation -------------------------------------------------
+
+/// the stuck-stop-button bug: RunFinished crossing the worker boundary can
+/// be delayed or lost, and the buttons only flip back on it. the heartbeat
+/// (Command::RunState -> Event::RunStateReport) is the correction channel,
+/// so its wire shape is pinned here.
+#[test]
+fn run_state_report_round_trips() {
+    for running in [true, false] {
+        let ev = Event::RunStateReport { running };
+        let json = serde_json::to_string(&ev).expect("serialize");
+        let back: Event = serde_json::from_str(&json).expect("deserialize");
+        match back {
+            Event::RunStateReport { running: r } => assert_eq!(r, running),
+            other => panic!("wrong variant decoded: {other:?}"),
+        }
+    }
+}
+
+/// run start/finish are DOCK-level facts. even when a run belongs to a
+/// background conversation whose events get routed away from the visible
+/// feed, the start/finish pair must reach the dock handler — otherwise one
+/// thread's finish leaves the shared stop button stuck.
+#[test]
+fn run_state_events_always_reach_the_dock() {
+    let starts = vec![
+        Event::RunStarted {
+            thread_id: "some-other-thread".into(),
+            model: "stealth/ox-alpha".into(),
+        },
+        Event::RunFinished {
+            thread: "some-other-thread".into(),
+            steps: 3,
+            reason: FinishReason::Completed,
+        },
+    ];
+    for ev in starts {
+        assert!(
+            ev.touches_run_state(),
+            "{ev:?} must bypass background routing"
+        );
+    }
+
+    // everything else keeps the router's protection: ordinary traffic from
+    // another thread stays out of the visible feed.
+    let routed = vec![
+        Event::Content {
+            thread: "other".into(),
+            delta: "text".into(),
+        },
+        Event::Note {
+            thread: "other".into(),
+            text: "n".into(),
+        },
+        Event::Error {
+            thread: "other".into(),
+            scope: "s".into(),
+            message: "m".into(),
+        },
+    ];
+    for ev in routed {
+        assert!(
+            !ev.touches_run_state(),
+            "{ev:?} should remain routable as background traffic"
+        );
+    }
+
+    // the heartbeat itself must not drive set_status — it is a background
+    // signal that would clobber the visible status line mid-run.
+    let report = Event::RunStateReport { running: true };
+    assert!(!report.touches_run_state());
 }
 
 // ---- message shapes ------------------------------------------------------

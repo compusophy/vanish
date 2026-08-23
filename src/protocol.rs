@@ -36,6 +36,10 @@ pub enum Command {
     DeleteConversation { id: String },
     /// ask for the thread list (the ui renders it in the left rail).
     ListConversations,
+    /// ui -> worker health check: "do you believe a run is in flight?".
+    /// the answer drives dock reconciliation — if RunFinished is ever lost,
+    /// delayed, or unparseable, this is what unsticks the run/stop buttons.
+    RunState,
     /// make this worker own a specific existing conversation, replacing
     /// whatever it loaded at boot. phase-2 groundwork: a per-conversation
     /// worker spawns fresh and always boots on index.active — Attach is how
@@ -183,6 +187,10 @@ pub enum Event {
     },
     /// the saved conversation was discarded at the ui's request.
     HistoryCleared,
+    /// answer to Command::RunState. `running` is the worker's own belief,
+    /// not a ui-side flag — the two can disagree exactly when the dock is
+    /// stuck, and the worker wins because the run lives there.
+    RunStateReport { running: bool },
     /// the full thread list plus which one is active.
     Conversations {
         items: Vec<ConversationSummary>,
@@ -248,6 +256,18 @@ impl Event {
             | Event::Note { thread, .. } => thread,
             _ => "",
         }
+    }
+
+    /// whether handling this event should touch the dock's run/stop state.
+    /// RunStateReport is deliberately EXCLUDED: it is a background health
+    /// signal, and letting it drive set_status would make the heartbeat able
+    /// to clobber the visible status line mid-run. the ui reads its payload
+    /// directly instead.
+    pub fn touches_run_state(&self) -> bool {
+        matches!(
+            self,
+            Event::RunStarted { .. } | Event::RunFinished { .. }
+        )
     }
 
     /// events cross the worker boundary as plain json; both halves use this

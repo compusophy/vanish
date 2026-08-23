@@ -405,13 +405,22 @@ fn spawn_run(config: Config, prompt: String) {
 
         let (saved, conversation) =
             STATE.with(|s| (s.borrow().history.clone(), s.borrow().conversation.clone()));
-        let save_result = crate::platform::transcript::save(&conversation, &saved).await;
 
+        // RunFinished goes out BEFORE the transcript save, not after. this
+        // ordering was the root cause of the stuck-stop-button bug: the
+        // buttons only flip back on this event, and it used to wait behind
+        // the opfs queue drain plus the final save — so a slow or wedged
+        // write held the dock hostage on "stop" with no run behind it. the
+        // save is durability work and belongs after the user-visible
+        // transition; a save failure is reported separately below and
+        // cannot hold the control state ransom.
         emit(Event::RunFinished {
             thread: conversation_id.clone(),
             steps: outcome.steps,
             reason: outcome.reason,
         });
+
+        let save_result = crate::platform::transcript::save(&conversation, &saved).await;
 
         // surfaced after RunFinished so a failure never hides the
         // run's own outcome, but never silently either (D4).
@@ -622,6 +631,17 @@ fn handle(command: Command) {
 
         Command::Stop => {
             STATE.with(|s| s.borrow_mut().stop_requested = true);
+        }
+
+        // dock reconciliation. RunFinished crosses the same channel as
+        // everything else and can be delayed (it used to wait behind the
+        // final transcript save) or lost entirely; when that happens the
+        // buttons stay on "stop" with no run behind them. the worker's own
+        // `running` flag is ground truth, so a periodic ping corrects any
+        // drift within seconds.
+        Command::RunState => {
+            let running = STATE.with(|s| s.borrow().running);
+            emit(Event::RunStateReport { running });
         }
 
         Command::Run { prompt, thread_id } => {

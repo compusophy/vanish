@@ -42,6 +42,12 @@ fn set_status(text: &str, running: bool) {
         s.set_text_content(Some(text));
         s.set_class_name(if running { "status running" } else { "status" });
     }
+    set_dock_buttons(running);
+}
+
+/// flip run/stop visibility. split out of set_status because reconciliation
+/// needs to fix ONLY the buttons without inventing a status line.
+pub fn set_dock_buttons(running: bool) {
     if let (Some(run), Some(stop)) = (by_id("run"), by_id("stop")) {
         let _ = run.set_attribute("style", if running { "display:none" } else { "" });
         let _ = stop.set_attribute("style", if running { "" } else { "display:none" });
@@ -200,19 +206,23 @@ fn append_delta(kind: &str, delta: &str) {
 }
 
 pub fn render(ui: &Shared, event: Event) {
-    // phase-1 routing seam: once more than one worker exists, events tagged
-    // for a background thread must not pour into the visible feed. today
-    // there is exactly one worker and every tag matches, so this is a no-op
-    // — but the check lives here so phase 2 cannot forget it.
-    let tagged = event.thread().to_string();
-    let is_background = !tagged.is_empty()
-        && {
-            let u = ui.borrow();
-            !u.active_thread.is_empty() && tagged != u.active_thread
-        };
-    if is_background {
-        background_activity(ui, &tagged, &event);
-        return;
+    // belt and braces: RunStarted/RunFinished must ALWAYS reach the dock
+    // handler, even when the router would classify them as another thread's
+    // traffic. a run's start and end are dock-level facts — the stop button
+    // belongs to whatever run is in flight, not to whichever conversation is
+    // on screen. without this, a background thread finishing its run leaves
+    // the visible dock stuck on "stop".
+    if !event.touches_run_state() {
+        let tagged = event.thread().to_string();
+        let is_background = !tagged.is_empty()
+            && {
+                let u = ui.borrow();
+                !u.active_thread.is_empty() && tagged != u.active_thread
+            };
+        if is_background {
+            background_activity(ui, &tagged, &event);
+            return;
+        }
     }
     render_active(ui, event);
 }
@@ -254,6 +264,12 @@ fn background_activity(_ui: &Shared, thread: &str, event: &Event) {
 }
 
 fn render_active(ui: &Shared, event: Event) {
+    // the reconciliation answer is handled before the match because it must
+    // not draw anything and must not be routable as background traffic.
+    if let Event::RunStateReport { running } = event {
+        reconcile(ui, running);
+        return;
+    }
     match event {
         Event::Ready { build } => {
             ui.borrow_mut().build = build.clone();
@@ -361,6 +377,7 @@ fn render_active(ui: &Shared, event: Event) {
         Event::RunStarted { model, .. } => {
             ui.borrow_mut().running = true;
             set_status(&format!("running · {model}"), true);
+            start_run_watchdog(ui);
         }
 
         Event::StepStarted { step, .. } => {
@@ -448,6 +465,7 @@ fn render_active(ui: &Shared, event: Event) {
 
         Event::RunFinished { steps, reason, .. } => {
             ui.borrow_mut().running = false;
+            stop_run_watchdog();
             ACTIVE.with(|a| *a.borrow_mut() = None);
             ACTIVE_REASONING.with(|c| *c.borrow_mut() = None);
             ACTIVE_CONTENT.with(|c| *c.borrow_mut() = None);
@@ -570,6 +588,82 @@ fn restored_divider() -> Element {
     let d = create("div", "note restored-divider");
     d.set_text_content(Some("↩ restored from the previous session"));
     d
+}
+
+/// the dock's reconciliation loop.
+///
+/// RunFinished is an ordinary postMessage crossing a worker boundary, and
+/// this bug class has bitten repeatedly: when it is delayed or lost, the
+/// buttons stay on "stop" forever with no run behind them — the exact
+/// "stuck on stop" failure reported by the user. so while the ui BELIEVES a
+/// run is active, it pings the worker every few seconds and asks for ground
+/// truth. if the worker says no run is in flight, the buttons snap back to
+/// "run" within one interval, whatever went wrong with the event stream.
+///
+/// one self-canceling interval per run; started by RunStarted, stopped by
+/// RunFinished (and by its own correction).
+fn start_run_watchdog(ui: &Shared) {
+    // any previous interval is stale by definition — a new RunStarted while
+    // one is running means the old run ended without our having seen it.
+    stop_run_watchdog();
+
+    let ui = ui.clone();
+    let tick = Closure::<dyn FnMut()>::new(move || {
+        let worker = ui.borrow().worker.clone();
+        super::send(&worker, &crate::protocol::Command::RunState);
+    });
+
+    if let Some(window) = web_sys::window() {
+        let id = window.set_interval_with_callback_and_timeout_and_arguments_0(
+            tick.as_ref().unchecked_ref(),
+            WATCHDOG_INTERVAL_MS,
+        );
+        WATCHDOG.with(|w| *w.borrow_mut() = id.ok());
+    }
+    tick.forget();
+}
+
+fn stop_run_watchdog() {
+    let had = WATCHDOG.with(|w| w.borrow_mut().take());
+    if let (Some(id), Some(window)) = (had, web_sys::window()) {
+        window.clear_interval_with_handle(id);
+    }
+}
+
+thread_local! {
+    /// interval handle of the live watchdog, if any. Option<i32> because
+    /// set_interval returns i32 and 0 is a valid id — only None means off.
+    static WATCHDOG: RefCell<Option<i32>> = const { RefCell::new(None) };
+}
+
+/// how often the dock checks the worker's actual state while a run is
+/// believed in flight. short enough that a stuck button self-corrects
+/// before anyone reaches for a reload; cheap enough to be invisible.
+const WATCHDOG_INTERVAL_MS: i32 = 3_000;
+
+/// answer from Command::RunState. called for EVERY event; only the report
+/// acts, everything else falls through untouched.
+fn reconcile(ui: &Shared, running: bool) {
+    let believed_running = ui.borrow().running;
+
+    // healthy path: agreement. nothing to do.
+    if believed_running == running {
+        return;
+    }
+
+    // the worker says idle but we show "running" → the finish event was
+    // lost or delayed behind the transcript save. fix the buttons now;
+    // the real RunFinished may still arrive later and is harmless then.
+    if believed_running && !running {
+        ui.borrow_mut().running = false;
+        stop_run_watchdog();
+        set_dock_buttons(false);
+        note("run ended — control returned to you (state reconciled after a lost finish event)");
+    }
+    // the inverse (worker busy, ui shows ready) cannot happen through this
+    // channel: every start emits RunStarted first, which re-arms both the
+    // flag and the watchdog. leaving it alone avoids clobbering the status
+    // line during that window.
 }
 
 /// keep one runaway tool result from making the page unusable.
