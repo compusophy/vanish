@@ -16,8 +16,44 @@ pub struct Workspace {
     /// verdict but not a cause.
     pub vercel: Option<crate::agent::vercel::Vercel>,
     pub index: Index,
+    /// branch head as this session last saw it (sync_repo / git_commit).
+    ///
+    /// D10: git_commit refuses when the live head differs from this, because
+    /// a commit built on unreconciled local files silently reverts whatever
+    /// upstream landed — which has now happened three times, once reverting
+    /// three commits while looking like a clean three-file diff.
+    pub synced_head: String,
     /// set by `task_complete`; the loop reads it to know the model is done.
     pub completed: Option<String>,
+}
+
+/// what sync_repo should do with one locally-cached file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reconcile {
+    /// the local copy is trustworthy; nothing to do.
+    Keep,
+    /// the cache may be stale relative to the branch: drop it so the next
+    /// read goes back to github. never applied to dirty files.
+    Refresh,
+}
+
+/// pure decision function behind sync_repo reconciliation (D10).
+///
+/// dirty files are ALWAYS kept: they are uncommitted local work, and
+/// dropping one is data loss — the single worst thing sync could do. clean
+/// files whose recorded base blob sha matches what the branch reports stay;
+/// anything else — including a base sha we never learned (a read-through
+/// cache filled before any listing) — is treated as possibly stale rather
+/// than trusted. distrust over convenience: a stale cache is how incidents
+/// #1–#3 happened.
+pub fn reconcile_entry(dirty: bool, base_sha: &str, remote_sha: Option<&str>) -> Reconcile {
+    if dirty {
+        return Reconcile::Keep;
+    }
+    match remote_sha {
+        Some(remote) if remote == base_sha && !base_sha.is_empty() => Reconcile::Keep,
+        _ => Reconcile::Refresh,
+    }
 }
 
 /// the current wall-clock time in milliseconds since the unix epoch.
@@ -304,6 +340,7 @@ impl Workspace {
             github,
             vercel,
             index,
+            synced_head: String::new(),
             completed: None,
         }
     }
@@ -462,6 +499,32 @@ impl Workspace {
                     );
                 }
 
+                // D10: a commit built on unreconciled local files silently
+                // reverts whatever upstream landed. three incidents and
+                // counting — one reverted three commits while looking like a
+                // clean diff. if the branch moved since this session last
+                // looked, refuse and say exactly what to do about it. the
+                // commit object itself would still land (github's ref update
+                // is what fails), so refusing EARLY is also cheaper.
+                let live_head = self.github.head_sha().await?;
+                let expected = self.synced_head.clone();
+                if !expected.is_empty() && live_head != expected {
+                    // record the new head: the NEXT git_commit attempt is
+                    // allowed through, because this error has by then been
+                    // surfaced and the model has had its chance to reconcile.
+                    self.synced_head = live_head;
+                    let _ = opfs::save_index(&self.index).await;
+                    return Err(format!(
+                        "REFUSED: branch head moved since this session last synced \
+                         ({live_head} != {expected}), so these local files may be stale and \
+                         committing them would revert upstream work. re-read every \
+                         file in the changeset against github (read_file serves the \
+                         local copy; cross-check raw.githubusercontent for anything \
+                         surprising), re-apply your edit on top of the CURRENT \
+                         upstream text, then call git_commit again."
+                    ));
+                }
+
                 let mut changes = Vec::with_capacity(dirty.len());
                 for path in &dirty {
                     let content = opfs::read(path).await?;
@@ -479,6 +542,9 @@ impl Workspace {
                         e.dirty = false;
                     }
                 }
+                // and record where the tree now stands: this session's next
+                // commit is legitimate precisely because it builds on THIS head.
+                self.synced_head = sha.clone();
                 opfs::save_index(&self.index).await?;
 
                 Ok(serde_json::json!({
@@ -492,15 +558,48 @@ impl Workspace {
             }
 
             "sync_repo" => {
+                // D10: a listing refresh is not reconciliation. the old
+                // version left opfs caches in place, so read_through kept
+                // serving pre-sync bytes — the mechanism behind incidents
+                // #1–#3. clean files whose recorded blob sha no longer
+                // matches the branch are dropped from the cache (their next
+                // read re-fetches current content); dirty files are NEVER
+                // touched, because they are uncommitted local work and
+                // dropping one is data loss.
                 let items = self.github.list_tree().await?;
-                let blobs: Vec<_> = items.iter().filter(|i| i.kind == "blob").collect();
+                let head = self.github.head_sha().await?;
+
+                let mut refreshed: Vec<String> = Vec::new();
+                for item in items.iter().filter(|i| i.kind == "blob") {
+                    let decision = reconcile_entry(
+                        self.index.get(&item.path).map(|e| e.dirty).unwrap_or(false),
+                        self.index
+                            .get(&item.path)
+                            .map(|e| e.base_sha.as_str())
+                            .unwrap_or(""),
+                        item.sha.as_deref(),
+                    );
+                    if decision == Reconcile::Refresh && opfs::read(&item.path).await.is_ok() {
+                        opfs::delete(&item.path).await?;
+                        refreshed.push(item.path.clone());
+                    }
+                }
+
+                self.synced_head = head;
+
                 let dirty = self.dirty();
                 Ok(serde_json::json!({
                     "success": true,
-                    "files_on_branch": blobs.len(),
+                    "files_on_branch": items.iter().filter(|i| i.kind == "blob").count(),
                     "branch": self.github.branch,
+                    "synced_head": self.synced_head,
+                    "cache_refreshed": refreshed,
                     "uncommitted_local_files": dirty,
-                    "note": "tree listing refreshed. files are fetched lazily on first read.",
+                    "note": if refreshed.is_empty() {
+                        "tree reconciled: every cached file matches the branch."
+                    } else {
+                        "tree reconciled: stale cached files were dropped and will re-fetch from github on next read. dirty files were never touched."
+                    },
                 })
                 .to_string())
             }

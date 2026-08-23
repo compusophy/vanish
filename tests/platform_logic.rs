@@ -211,3 +211,64 @@ fn year_boundaries_roll_over() {
     assert_eq!(format_timestamp_iso(new_years_eve), "1999-12-31T23:59:59Z");
     assert_eq!(format_timestamp_iso(new_years_eve + 1_000), "2000-01-01T00:00:00Z");
 }
+
+// ---- sync reconciliation (D10) --------------------------------------------
+// incidents #1–#3 were all one mechanism: a local cache that lagged the
+// branch and was trusted anyway. reconcile_entry decides, per file, whether
+// sync_repo may drop a cached copy so it re-fetches from github. the pins
+// here are not stylistic — the first one is the difference between a stale
+// read and destroyed uncommitted work.
+
+use vanish::agent::tools::{reconcile_entry, Reconcile};
+
+#[test]
+fn dirty_files_are_never_refreshed_even_when_upstream_moved() {
+    // THE invariant: a dirty file is uncommitted work. dropping its cache
+    // would lose the only copy of that work. upstream movement, unknown
+    // shas, even an empty base sha must all lose to this.
+    for base in ["", "stale-sha", "abc123"] {
+        assert_eq!(
+            reconcile_entry(true, base, Some("brand-new-sha")),
+            Reconcile::Keep,
+            "dirty file with base '{base}' must be kept"
+        );
+        assert_eq!(reconcile_entry(true, base, None), Reconcile::Keep);
+    }
+}
+
+#[test]
+fn clean_files_matching_the_branch_are_kept() {
+    assert_eq!(
+        reconcile_entry(false, "abc123", Some("abc123")),
+        Reconcile::Keep
+    );
+}
+
+#[test]
+fn clean_files_that_diverged_are_refreshed() {
+    // the branch reports a different blob sha than the cache recorded:
+    // upstream moved, the cache did not. this is exactly incident #3.
+    assert_eq!(
+        reconcile_entry(false, "old-sha", Some("new-sha")),
+        Reconcile::Refresh
+    );
+}
+
+#[test]
+fn files_missing_from_the_branch_listing_are_refreshed() {
+    // remote_sha None = the path no longer exists on the branch. a clean
+    // cached copy of a deleted file serves ghost content.
+    assert_eq!(reconcile_entry(false, "whatever", None), Reconcile::Refresh);
+}
+
+#[test]
+fn an_unrecorded_base_sha_is_distrusted_not_trusted() {
+    // read-through caches are written with an empty base sha because the
+    // contents api does not hand back the blob sha. "unknown" must mean
+    // refresh — trusting an unverifiable cache is how three incidents
+    // happened.
+    assert_eq!(
+        reconcile_entry(false, "", Some("some-sha")),
+        Reconcile::Refresh
+    );
+}

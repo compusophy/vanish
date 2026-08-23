@@ -40,6 +40,34 @@ see ARCHITECTURE.md for the full map and for why the previous design failed.
   `memory/status.md` even carried a warning telling the agent to work around
   its own ui. write code and prose in the casing correct for the language.
   do not reintroduce this rule in any form.
+- **D7 — never await a resolved promise as a yield point.** the worker is
+  single-threaded. `await`ing an already-resolved promise drains only the
+  microtask queue; doing it in a `while` loop starves the event loop
+  outright, and a starved worker stops dispatching `onmessage` — so Stop,
+  RunState and every later Run are silently never received, and the app is
+  bricked with no error anywhere. yield through `sleep_ms` (a real timer),
+  and bound every wait. this exact bug shipped twice: fixed in 699ada0,
+  reverted by 016f3db, fixed again with `tests/event_loop_liveness.rs`
+  pinning it. that test file is load-bearing — do not delete it to make a
+  refactor pass.
+- **D8 — control state is never gated on durability work.** `RunFinished` is
+  what returns the stop button to "run", so it is emitted BEFORE the
+  checkpoint drain and the transcript save, never after. a slow or wedged
+  opfs write may cost a stale transcript; it may never cost the user control
+  of the app.
+- **D9 — every escape hatch must work when the thing it rescues is broken.**
+  Stop is the only way out of a wedged run, so it cannot depend on the run
+  being healthy enough to poll for it: it takes control back by force after
+  `STOP_GRACE_MS`. the same logic applies to any future recovery path — if it
+  only works when things are fine, it is not a recovery path.
+- **D10 — never commit from a tree you have not reconciled.** the local
+  working tree can lag the branch head (three incidents and counting:
+  761eaaa inherited red main, e739f00 reverted three upstream commits,
+  d846fcd deleted D7–D9 and two postmortems from these very files).
+  `git_commit` now refuses when the branch head differs from the sha this
+  session last synced/committed; re-read every file the changeset touches
+  against the raw github blob, re-apply, and commit again. verifying one
+  file is not verification — the changeset is the unit.
 
 ## landed in the rebuild
 
@@ -191,13 +219,14 @@ taskboard) asked for four things. all four are resolved:
       **UPGRADED after incident #3 (ba61277): stale-tree clobbering is no
       longer hypothetical. e739f00 shipped two stale source files that
       silently reverted three upstream commits while looking like a clean
-      diff; the red build was the only detector. new standing rule: before
-      ANY commit touching a file you have not written this session, fetch
-      its raw blob from github and diff mentally against your local copy —
-      for EVERY file in the changeset, not just the one you edited first.
-      better fix if it keeps recurring: make git_commit refuse when the
-      remote head advanced past the sha this session's sync_repo recorded,
-      forcing an explicit re-read first.**
+      diff; the red build was the only detector. STRUCTURAL FIX LANDED
+      (this run, D10): git_commit refuses when the branch head moved since
+      this session's last sync/commit, and sync_repo now drops clean cache
+      entries that diverged upstream (never dirty ones) so reads re-fetch.
+      the remaining manual step — re-reading each changeset file against
+      github before re-applying an edit — is enforced by the refusal
+      message. mark resolved once one live run passes through the refusal
+      and recovers correctly.**
 - [ ] notification centre: the bell now mounts itself (ba61277) and update
       notices land behind it instead of vanishing. verify live after deploy:
       bell visible at the right edge of .dock-status, click opens the
