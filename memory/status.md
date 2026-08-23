@@ -56,6 +56,15 @@ what landed now:
 - [x] `tests/event_loop_liveness.rs`: 5 source-level invariants pinning all
       of the above. verified they fail against the deployed build (4/5) and
       pass against the fix.
+- [x] `src/agent/http.rs`: `EventStream::next` now polls the stop flag every
+      `STOP_POLL_MS` WHILE waiting for a frame, instead of only after one
+      arrives. verified live: before this, stopping a run whose model was
+      thinking took the full `STOP_GRACE_MS` and reported "the run did not
+      stop on its own" — technically working, but it reads like a failure
+      and made the escape hatch the normal path instead of the last resort.
+      the read promise is created once and re-raced against a fresh short
+      timer each pass; re-issuing read() while one is pending is an error on
+      a default reader.
 
 ## the lesson (this one cost two ships)
 

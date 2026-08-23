@@ -21,6 +21,10 @@ use crate::platform::opfs::describe;
 /// true, no steps, no error, and nothing to look at but a "running" label.
 const STREAM_IDLE_TIMEOUT_MS: i32 = 180_000;
 
+/// how often a waiting stream read pauses to ask whether the user pressed
+/// stop. small enough to feel instant, large enough to be free.
+const STOP_POLL_MS: i32 = 250;
+
 /// marker resolved by the timeout arm of a race, so the caller can tell
 /// "the timer won" from "the read returned".
 const TIMEOUT_MARKER: &str = "__vanish_timeout";
@@ -238,7 +242,16 @@ impl EventStream {
     }
 
     /// next complete sse payload line, or None once the stream ends.
-    pub async fn next(&mut self) -> Result<Option<String>, String> {
+    ///
+    /// `should_stop` is polled while waiting, not only when a chunk lands.
+    /// that distinction is the whole difference between a stop button that
+    /// responds and one that appears dead: a model thinking at high effort
+    /// can go tens of seconds between frames, and a stop checked only after
+    /// the next frame sits unnoticed for exactly that long.
+    pub async fn next<S>(&mut self, should_stop: &S) -> Result<Option<String>, String>
+    where
+        S: Fn() -> bool,
+    {
         loop {
             if let Some(payload) = self.take_buffered() {
                 return Ok(Some(payload));
@@ -247,24 +260,45 @@ impl EventStream {
                 return Ok(None);
             }
 
-            // race the read against a stall timer. an unraced read waits
-            // forever on a connection that has quietly died, which presents
-            // as a run that is "running" but producing nothing.
-            let raced = js_sys::Array::new();
-            raced.push(&self.reader.read());
-            raced.push(&timeout_promise(STREAM_IDLE_TIMEOUT_MS));
+            // the read promise is created ONCE and then re-raced against a
+            // fresh short timer each pass. calling read() again while one is
+            // already pending is an error on a default reader, so the poll
+            // loop must reuse this handle rather than re-issuing the read.
+            let read = self.reader.read();
+            let mut waited_ms = 0;
 
-            let result = JsFuture::from(js_sys::Promise::race(&raced))
-                .await
-                .map_err(|e| format!("stream read failed: {}", describe(&e)))?;
+            let result = loop {
+                let raced = js_sys::Array::new();
+                raced.push(&read);
+                raced.push(&timeout_promise(STOP_POLL_MS));
 
-            if is_timeout(&result) {
-                self.cancel();
-                return Err(format!(
-                    "the model stream went silent for {}s and was abandoned. the run can be started again; nothing written to the working tree is lost.",
-                    STREAM_IDLE_TIMEOUT_MS / 1000
-                ));
-            }
+                let outcome = JsFuture::from(js_sys::Promise::race(&raced))
+                    .await
+                    .map_err(|e| format!("stream read failed: {}", describe(&e)))?;
+
+                if !is_timeout(&outcome) {
+                    break outcome;
+                }
+
+                // the tick won: nothing arrived in this slice.
+                if should_stop() {
+                    self.cancel();
+                    return Err("stopped".to_string());
+                }
+
+                waited_ms += STOP_POLL_MS;
+
+                // an unraced read waits forever on a connection that has
+                // quietly died, which presents as a run that is "running"
+                // and producing nothing.
+                if waited_ms >= STREAM_IDLE_TIMEOUT_MS {
+                    self.cancel();
+                    return Err(format!(
+                        "the model stream went silent for {}s and was abandoned. the run can be started again; nothing written to the working tree is lost.",
+                        STREAM_IDLE_TIMEOUT_MS / 1000
+                    ));
+                }
+            };
 
             let finished = Reflect::get(&result, &JsValue::from_str("done"))
                 .ok()

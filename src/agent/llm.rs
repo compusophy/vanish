@@ -292,7 +292,10 @@ where
     // the pre-refactor inline loop.
     let mut seen_deltas = 0usize;
 
-    while let Some(payload) = stream.next().await? {
+    // next() polls should_stop while it waits, so a stop lands mid-think
+    // rather than only after the next frame arrives; this check catches the
+    // case where one arrives first.
+    while let Some(payload) = stream.next(&should_stop).await? {
         if should_stop() {
             stream.cancel();
             return Err("stopped".to_string());
