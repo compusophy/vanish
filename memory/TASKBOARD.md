@@ -62,6 +62,17 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **loop resilience** (7a6bfb2): transient llm failures retry with
+      exponential backoff (4 retries, reset on success, give up after 5
+      consecutive); DeployState::from verdict matrix pinned by tests.
+      unattended loop mode no longer dies on a rate-limit blip.
+
+- [ ] multi-agent phase 2: the worker pool — HashMap<conversation,
+      WorkerHandle> in ui/mod.rs replacing the single worker; lazy spawn
+      capped at 3–4; SwitchConversation swaps the active handle; commands
+      already carry thread ids and feed routing already exists (phase 1).
+      git strategy (below) must land BEFORE two agents can run on one tree.
+
 - [x] **verification layer for autonomous loop mode** — LANDED (267647f).
       cargo test runs in build.sh; a failing test fails the deploy. three
       suites cover protocol round-trips, the traversal guard, transcript

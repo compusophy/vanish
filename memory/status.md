@@ -94,6 +94,26 @@
       any commit; pure-logic changes need a test. anti-hollow-iteration
       guard for unattended loop mode.
 
+## landed this run (loop resilience — iteration 2)
+
+- [x] **transient llm failures no longer kill the run** (7a6bfb2): retry
+      loop in agent::run — 4 retries per step, exponential backoff via
+      pure `retry_backoff_ms` (2s→8s→30s→60s cap), resets on success, gives
+      up after 5 consecutive failures. every retry emits a visible
+      "⟳ llm error (...) — retry N/4 in Xs" Note. before: one rate-limit
+      blip ended an unattended loop forever; now it costs seconds.
+- [x] **DeployState::from made pub + pinned** by tests/loop_nervous_system:
+      the full verdict matrix check_deployment relies on (failure wins;
+      running beats success so the loop never moves on mid-build) plus
+      settled() semantics. the loop's own build-result reading is no longer
+      trusted to review alone.
+- [x] compile miss caught by pipeline: leftover Result match after the
+      retry-loop refactor returned Turn directly. fixed in one commit.
+- note on rule 8 in practice: first draft of the verdict tests mirrored the
+  logic instead of exercising it — caught myself and made DeployState::from
+  pub so the real code path is what's tested. a mirror test verifies the
+  mirror, not the system.
+
 ## verified live (earlier runs)
 
 - researched compusophy/localharness via GitHub API + its llms.txt; full
