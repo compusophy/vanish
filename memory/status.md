@@ -191,6 +191,23 @@
 - [ ] duckduckgo instant answers only cover abstract-style queries; for
       full results pages, chain `web_search` → `web_read` on a result url.
 
+## what was learned this run (parallelism question)
+
+- the user asked why not webworkers/wgpu-threads/multi-agent for parallelism.
+  full verdict in docs/MULTIAGENT_PLAN.md. the load-bearing fact: the agent
+  loop is **i/o-bound** (model streams + api calls), so shared-memory wasm
+  threads and wgpu are category mismatches — they accelerate compute this
+  codebase does not do, at the cost of cross-origin isolation headers and a
+  Send-ification rewrite of all thread_local/Rc state. the correct tool is
+  *more web workers*, one per conversation, which the per-thread transcript
+  design already half-supports.
+- "can't start a new chat while one is running" is not an arbitrary limit:
+  with ONE shared worker, switching threads mid-run would mutate history out
+  from under the loop and the run-end write-back would clobber the switch.
+  it dissolves naturally when conversations own their workers (phase 2).
+- concurrent agents committing to one branch will race on non-fast-forward
+  updates — git strategy must be decided BEFORE shipping concurrency.
+
 ## rules for the next run
 
 - commit early, commit often. one small atomic commit beats one big

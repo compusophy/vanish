@@ -80,8 +80,19 @@ taskboard) asked for four things. all four are resolved:
       deploy that a plain reload no longer asks for save settings; if the
       user still sees the symptom, the next suspect is the deploy pipeline
       serving a stale pkg/ against fresh html.
-- [ ] conversation threads — the old client had multiple persisted threads.
-      the rust client currently keeps one history in the worker.
+- [ ] conversation threads — partially done: transcripts are per-conversation
+      opfs files and switching works while idle. remaining: a run pins its
+      worker (`reject_while_running` refuses new-chat/switch/delete mid-run).
+      full fix is multi-worker concurrency — see docs/MULTIAGENT_PLAN.md
+      phases 1–2 (thread-tagged events + a worker pool keyed by conversation).
+- [ ] multi-agent parallelism — design decided this run, written up in
+      docs/MULTIAGENT_PLAN.md: NO wasm shared-memory threads (i/o-bound loop,
+      would force rewriting all thread_local/Rc state for zero speedup), NO
+      wgpu (no numeric kernels exist here). YES to more web workers: phase 1
+      thread-tagged events + feed routing → phase 2 worker pool per
+      conversation → phase 3 git strategy for concurrent commits (branching
+      vs commit lock) → phase 4 spawn_agent tool for orchestrator patterns.
+      phase 1 is the next concrete coding task.
 - [x] persist conversation history to opfs so a reload does not lose the
       thread — done: `src/platform/transcript.rs`, `Event::HistoryRestored`
       replay on boot, retention cap (200 messages / 4MB), clear-conversation
