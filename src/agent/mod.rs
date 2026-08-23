@@ -8,6 +8,7 @@
 //! model says it is done, when the step ceiling is reached, or when the user
 //! presses stop — and never because the platform ran out of patience.
 
+pub mod control;
 pub mod github;
 pub mod http;
 pub mod llm;
@@ -115,6 +116,26 @@ where
 {
     let github = Github::new(&config.github_token, &config.repo, &config.branch);
 
+    // every exit from the loop goes through this macro, so the transcript
+    // well-formedness check cannot be skipped by a future refactor adding
+    // a new return path. see control::history_is_well_formed for why the
+    // invariant matters: a violation is silent until a later run tries to
+    // replay the history and is rejected by the api.
+    macro_rules! exit {
+        ($steps:expr, $reason:expr) => {{
+            if let Err(e) = control::history_is_well_formed(history) {
+                web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "TRANSCRIPT INVARIANT VIOLATED on exit ({:?}): {}",
+                    $reason, e
+                )));
+            }
+            return RunOutcome {
+                steps: $steps,
+                reason: $reason,
+            };
+        }};
+    }
+
     // fail fast and legibly: a bad token discovered twenty steps in wastes
     // the whole run and reads like a mysterious commit failure.
     if let Err(e) = github.verify().await {
@@ -123,10 +144,7 @@ where
             scope: "github".to_string(),
             message: e,
         });
-        return RunOutcome {
-            steps: 0,
-            reason: FinishReason::Failed,
-        };
+        exit!(0, FinishReason::Failed);
     }
 
     let vercel = if config.vercel_token.trim().is_empty() {
@@ -162,15 +180,13 @@ where
     // request hit a rate limit or a provider blip — but it also must not
     // spin forever on a dead key. five consecutive failures with growing
     // backoff, resetting on any success, separates blips from outages.
-    let mut consecutive_failures: u32 = 0;
-    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+    // extracted to control::FailureBudget so the eval suite can rehearse
+    // failure storms without live keys.
+    let mut budget = control::FailureBudget::new(5);
 
     while step < MAX_STEPS {
         if stopped() {
-            return RunOutcome {
-                steps: step,
-                reason: FinishReason::Stopped,
-            };
+            exit!(step, FinishReason::Stopped);
         }
 
         step += 1;
@@ -207,55 +223,48 @@ where
             .await
             {
                 Ok(t) => {
-                    consecutive_failures = 0;
+                    budget.record_success();
                     break t;
                 }
                 Err(e) if e == "stopped" => {
-                    return RunOutcome {
-                        steps: step,
-                        reason: FinishReason::Stopped,
-                    };
+                    exit!(step, FinishReason::Stopped);
                 }
-                Err(e) => {
-                    consecutive_failures += 1;
-                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                Err(e) => match budget.record_failure() {
+                    control::FailureDecision::GiveUp => {
                         emit(Event::Error {
                             thread: String::new(),
                             scope: "llm".to_string(),
                             message: format!(
-                                "{e} — {MAX_CONSECUTIVE_FAILURES} consecutive failures, giving up"
+                                "{e} — {max} consecutive failures, giving up",
+                                max = budget.max_consecutive
                             ),
                         });
-                        return RunOutcome {
-                            steps: step,
-                            reason: FinishReason::Failed,
-                        };
+                        exit!(step, FinishReason::Failed);
                     }
-                    let delay = retry_backoff_ms(consecutive_failures);
-                    emit(Event::Note {
-                        thread: String::new(),
-                        text: format!(
-                            "⟳ llm error ({e}) — retry {consecutive_failures}/{} in {}s",
-                            MAX_CONSECUTIVE_FAILURES - 1,
-                            delay / 1000
-                        ),
-                    });
-                    // the backoff is the longest stretch of a run that makes
-                    // no api call at all, so it is exactly where a stop would
-                    // otherwise sit unnoticed for tens of seconds. sleep in
-                    // slices and abandon the retry the moment stop lands.
-                    let mut slept = 0;
-                    while slept < delay {
-                        if stopped() {
-                            return RunOutcome {
-                                steps: step,
-                                reason: FinishReason::Stopped,
-                            };
+                    control::FailureDecision::Retry { attempt, delay_ms } => {
+                        emit(Event::Note {
+                            thread: String::new(),
+                            text: format!(
+                                "⟳ llm error ({e}) — retry {attempt}/{} in {}s",
+                                budget.max_consecutive - 1,
+                                delay_ms / 1000
+                            ),
+                        });
+                        // the backoff is the longest stretch of a run that makes
+                        // no api call at all, so it is exactly where a stop would
+                        // otherwise sit unnoticed for tens of seconds. sleep in
+                        // slices and abandon the retry the moment stop lands.
+                        let mut slept = 0;
+                        while slept < delay_ms {
+                            if stopped() {
+                                exit!(step, FinishReason::Stopped);
+                            }
+                            crate::agent::http::sleep_ms(STOP_POLL_MS.min(delay_ms - slept))
+                                .await;
+                            slept += STOP_POLL_MS;
                         }
-                        crate::agent::http::sleep_ms(STOP_POLL_MS.min(delay - slept)).await;
-                        slept += STOP_POLL_MS;
                     }
-                }
+                },
             }
         };
 
@@ -275,20 +284,20 @@ where
             tool_call_id: None,
         });
 
-        if turn.tool_calls.is_empty() {
-            // no tools and no completion call. in loop mode that is a pause,
-            // not an ending: nudge and keep going.
-            if config.loop_mode {
+        // no tool calls means the turn was pure prose: either the run is
+        // over (loop mode off) or loop mode treats it as a pause and nudges.
+        match control::decide_after_turn(!turn.tool_calls.is_empty(), config.loop_mode) {
+            control::Action::RunTools => {}
+            control::Action::Nudge => {
                 history.push(Message::user(
                     "continue. if the task is genuinely finished, call task_complete.",
                 ));
                 persist(history);
                 continue;
             }
-            return RunOutcome {
-                steps: step,
-                reason: FinishReason::Completed,
-            };
+            control::Action::Complete => {
+                exit!(step, FinishReason::Completed);
+            }
         }
 
         // a step can carry several tool calls, and some are slow (a
@@ -353,24 +362,16 @@ where
         }
 
         if let Some(from) = cancelled_at {
-            for call in &turn.tool_calls[from..] {
-                history.push(Message::tool_result(
-                    call.id.clone(),
-                    serde_json::json!({
-                        "success": false,
-                        "error": "not run — the user stopped the run before this call"
-                    })
-                    .to_string(),
-                ));
-            }
+            // the api rejects an assistant message whose tool_calls lack
+            // matching results, so the abandoned calls get synthetic ones:
+            // skipping them to end faster would poison the saved transcript
+            // for every future run that replays it.
+            history.extend(control::cancellation_results(&turn.tool_calls[from..]));
             persist(history);
             emit(Event::TreeChanged {
                 dirty: workspace.dirty(),
             });
-            return RunOutcome {
-                steps: step,
-                reason: FinishReason::Stopped,
-            };
+            exit!(step, FinishReason::Stopped);
         }
 
         emit(Event::TreeChanged {
@@ -405,15 +406,9 @@ where
                 thread: String::new(),
                 delta: format!("\n\n{summary}"),
             });
-            return RunOutcome {
-                steps: step,
-                reason: FinishReason::Completed,
-            };
+            exit!(step, FinishReason::Completed);
         }
     }
 
-    RunOutcome {
-        steps: step,
-        reason: FinishReason::StepLimit,
-    }
+    exit!(step, FinishReason::StepLimit);
 }
