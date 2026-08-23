@@ -93,6 +93,16 @@ taskboard) asked for four things. all four are resolved:
       conversation → phase 3 git strategy for concurrent commits (branching
       vs commit lock) → phase 4 spawn_agent tool for orchestrator patterns.
       phase 1 is the next concrete coding task.
+- [ ] stacked prs / parallel diffs / preview-gated deploys — full design in
+      docs/STACKED_PRS_PLAN.md, extends multiagent phase 3. adopted: the
+      stacked-pr MODEL over plain REST (our commits already name parents
+      explicitly; no cli tools — they need local git). plan: opfs path-claim
+      registry (early warning on overlapping edits), agent/* branches + PRs
+      via new github.rs primitives (create_ref, compare, create_pr,
+      merge_pr), preview deploys gated by a playwright e2e workflow whose
+      check runs deployment_state() already reads. main becomes
+      promote-on-green, never pushed blind. force-push only ever to agent/*
+      refs. concrete build order in §4 of that doc.
 - [x] persist conversation history to opfs so a reload does not lose the
       thread — done: `src/platform/transcript.rs`, `Event::HistoryRestored`
       replay on boot, retention cap (200 messages / 4MB), clear-conversation

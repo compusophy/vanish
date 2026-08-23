@@ -208,6 +208,31 @@
 - concurrent agents committing to one branch will race on non-fast-forward
   updates — git strategy must be decided BEFORE shipping concurrency.
 
+## landed this run (stacked prs + preview-gated deploys research)
+
+- [x] docs/STACKED_PRS_PLAN.md — the full design answering "how do we manage
+      parallel diffs, and can we preview + e2e before production?". grounded
+      in a read of github.rs (commits already name parents explicitly, so a
+      stacked chain is just choosing a different base) and vercel.rs
+      (deployment_for_commit is branch-agnostic; previews are fetchable
+      today). build order: github.rs primitives → tools exposure → claim
+      registry → e2e workflow → prompt update.
+- key insight: cli stacked-pr tools (graphite, git-spice, stgit) require a
+  local clone and cannot exist in the browser. but they automate restacking,
+  which over the git data api reduces to rebuilding parents and force-moving
+  agent-owned refs — four REST calls we can write ourselves.
+
+## what was learned this run (stacked prs)
+
+- web_search (duckduckgo instant answers) returned empty for both tooling
+  queries; web_read on specific urls worked. ddg instant answers cover
+  abstract-style lookups, not niche dev-tooling queries — go straight to
+  known doc urls when researching engineering topics.
+- vercel docs urls move often; the /docs nav itself lists current sections.
+- preview deployments may be gated by vercel deployment protection — if the
+  url serves an auth interstitial instead of the app, nothing (human or
+  playwright) can test against it until protection is relaxed for previews.
+
 ## rules for the next run
 
 - commit early, commit often. one small atomic commit beats one big
