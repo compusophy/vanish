@@ -62,6 +62,16 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **mid-run unlock** (51815df): switching conversations and creating
+      new ones works while a run continues in the background (guarded
+      write-back + final save addressed to the run's conversation_id).
+      deleting the RUNNING thread still refuses, correctly. this was the
+      biggest "bricked" complaint for loop mode: an infinite run made
+      everything else untouchable.
+- [ ] verify after a live run: switch to another thread mid-run, confirm
+      the background run's traffic shows as sidebar badges and switching
+      back replays its full history.
+
 - [x] **loop resilience** (7a6bfb2): transient llm failures retry with
       exponential backoff (4 retries, reset on success, give up after 5
       consecutive); DeployState::from verdict matrix pinned by tests.
@@ -70,10 +80,11 @@ taskboard) asked for four things. all four are resolved:
 - [ ] multi-agent phase 2: the worker pool — Attach command landed (8fc29ca,
       a worker adopts a specific conversation without touching
       index.active; adoption logic shared via adopt_conversation).
-      REMAINING: HashMap<conversation, WorkerHandle> in ui/mod.rs replacing
-      the single worker; lazy spawn capped at 3–4; SwitchConversation swaps
-      the active handle. git strategy (below) must land BEFORE two agents
-      can run on one tree.
+      RE-EVALUATE FIRST: mid-run switching on the single worker now works
+      (51815df), which may satisfy most of what the pool was for. decide
+      whether true PARALLEL runs (two agents at once) are still wanted
+      before building HashMap<conversation, WorkerHandle>; if yes, git
+      strategy must land before concurrent agents share one tree.
 
 - [x] **verification layer for autonomous loop mode** — LANDED (267647f).
       cargo test runs in build.sh; a failing test fails the deploy. three

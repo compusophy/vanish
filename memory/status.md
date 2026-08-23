@@ -57,6 +57,24 @@
       module-level fn emit and was consumed by agent::run — renamed
       emit_tagged. never name a closure after an existing fn it calls.
 
+## landed this run (mid-run unlock)
+
+- [x] **the app no longer locks during a run** (51815df): switching
+      conversations and creating new ones now works WHILE a run continues
+      in the background; the sidebar badge (phase-1 routing) shows its
+      progress. the lock existed to hide a real corruption bug:
+      spawn_run wrote its finished history back into STATE unconditionally
+      (and saved STATE.history to STATE.conversation), so a mid-run switch
+      would pour thread A's messages into thread B's transcript. fixed at
+      the root: guarded write-back (only restore when still on the run's
+      conversation), final save addressed to conversation_id with a
+      pre-write-back snapshot, park-switched-away history straight to its
+      own file. DeleteConversation still refuses only when the target IS
+      the running thread.
+- lesson: **a lock that forbids safe operations is usually hiding a bug
+  worth fixing instead.** find what the lock protects against; fix that;
+  delete most of the lock.
+
 ## landed this run (stuck-stop-button fix)
 
 - [x] **root cause of the recurring "button stuck on stop" bug found and
