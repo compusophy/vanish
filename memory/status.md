@@ -70,7 +70,31 @@
   variant, grep the whole repo first anyway (`Event::<Variant> {`) — the
   compiler should never be the tool that finds your call sites.
 
-## verified live
+## landed this run (verification layer — loop mode active)
+
+- [x] **native test suite wired into the deploy** (267647f): `cargo test
+      --lib --tests` now runs in build.sh after the wasm build; failure
+      fails the vercel build and pins production to the last good build.
+      verified live: the suite compiles natively on the host target AND
+      passes — wasm-bindgen/web-sys compile fine off-target, the pure-logic
+      restriction holds.
+- [x] three suites: protocol contract (round-trips, old-config loading,
+      unknown-field tolerance, thread-tag routing + legacy parse,
+      finish-reason strings, message shapes), platform logic (traversal
+      guard, char-boundary truncation, index sort purity, LoopResume serde),
+      streaming (SSE reassembly: fragmented calls, interleaved indexes,
+      torn frames, provider errors, {} arguments, nameless-slot drop).
+- [x] llm.rs refactor: absorb_chunk/finalize_turn extracted from run_turn
+      and made pub for tests. Turn gained error + deltas fields; run_turn
+      replays deltas through the callback exactly once so streaming is
+      unchanged. LESSON: nearly shipped without replaying deltas — the
+      callback would have been silently dead. when extracting a callback-
+      taking function into a pure one, trace where the side effect went.
+- [x] system prompt rule 8: state observable behavior + how verified before
+      any commit; pure-logic changes need a test. anti-hollow-iteration
+      guard for unattended loop mode.
+
+## verified live (earlier runs)
 
 - researched compusophy/localharness via GitHub API + its llms.txt; full
   notes in memory/notes/localharness.md (closest cousin project: one

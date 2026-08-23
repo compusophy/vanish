@@ -62,16 +62,14 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
-- [ ] **verification layer for autonomous loop mode** — the standing limit
-      on "set ∞ mode and let it self-improve": the loop's only evidence
-      standard is compile-green. most crate logic (protocol serde,
-      config defaults, transcript index shapes) is testable natively;
-      wiring cargo test into build.sh would upgrade check_deployment
-      from "compiles" to "compiles and passes tests". second piece: a
-      system-prompt rule requiring each loop iteration to state what
-      observable behavior changed and how it verified that before
-      committing. these two are the prerequisite for trusting unattended
-      self-improvement runs.
+- [x] **verification layer for autonomous loop mode** — LANDED (267647f).
+      cargo test runs in build.sh; a failing test fails the deploy. three
+      suites cover protocol round-trips, the traversal guard, transcript
+      index logic, and SSE tool-call reassembly. system prompt rule 8
+      requires each iteration to state observable behavior + verification.
+      the evidence standard for unattended loop mode is now "compiles AND
+      passes tests", not just "compiles". next hardening step if needed:
+      extend coverage as new pure logic lands (rule 8 enforces this).
 
 - [x] web access — `http_fetch`, `web_read` (r.jina.ai reader proxy),
       `web_search` (duckduckgo instant answers) in `src/agent/tools.rs`,
