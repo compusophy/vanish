@@ -372,9 +372,44 @@ fn spawn_run(config: Config, prompt: String) {
         )
         .await;
 
+        // snapshot the finished history ONCE, before ownership moves into
+        // the write-back below — this is what the final transcript save
+        // persists, addressed to the run's own conversation.
+        let history_snapshot = history.clone();
+
         STATE.with(|s| {
             let mut st = s.borrow_mut();
-            st.history = history;
+            // write-back is guarded: the run's history returns to worker
+            // memory only if the user is still on the run's conversation.
+            // switching threads mid-run loads a different conversation into
+            // st.history; blindly overwriting it here would pour thread A's
+            // finished messages into whatever thread B has on screen — and
+            // the next save would corrupt B's transcript file. this guard,
+            // together with persist() being addressed by conversation_id,
+            // is what makes mid-run switching safe rather than forbidden.
+            if st.conversation == conversation_id {
+                st.history = history;
+            } else {
+                // the user moved on; park the run's history back in its own
+                // transcript file so nothing is lost, and leave B untouched.
+                let parked = history;
+                wasm_bindgen_futures::spawn_local({
+                    let conversation_id = conversation_id.clone();
+                    async move {
+                        if let Err(e) =
+                            crate::platform::transcript::save(&conversation_id, &parked).await
+                        {
+                            emit(Event::Error {
+                                thread: conversation_id,
+                                scope: "transcript".to_string(),
+                                message: format!(
+                                    "could not save the switched-away conversation: {e}"
+                                ),
+                            });
+                        }
+                    }
+                });
+            }
             st.running = false;
             st.stop_requested = false;
         });
@@ -403,9 +438,11 @@ fn spawn_run(config: Config, prompt: String) {
             .await;
         }
 
-        let (saved, conversation) =
-            STATE.with(|s| (s.borrow().history.clone(), s.borrow().conversation.clone()));
-
+        // final save is addressed to the RUN'S conversation, not to whatever
+        // STATE currently holds — the user may have switched threads mid-run,
+        // and saving to the wrong file would corrupt the visible thread.
+        // (the in-memory write-back above is guarded the same way.)
+        //
         // RunFinished goes out BEFORE the transcript save, not after. this
         // ordering was the root cause of the stuck-stop-button bug: the
         // buttons only flip back on this event, and it used to wait behind
@@ -420,7 +457,8 @@ fn spawn_run(config: Config, prompt: String) {
             reason: outcome.reason,
         });
 
-        let save_result = crate::platform::transcript::save(&conversation, &saved).await;
+        let save_result =
+            crate::platform::transcript::save(&conversation_id, &history_snapshot).await;
 
         // surfaced after RunFinished so a failure never hides the
         // run's own outcome, but never silently either (D4).
@@ -440,8 +478,10 @@ fn spawn_run(config: Config, prompt: String) {
     });
 }
 
-/// switching or deleting a thread mid-run would pull the context out from
-/// under the loop. refuse, and say why, rather than corrupting the run.
+/// refuse an operation that would corrupt a live run. kept for the one
+/// remaining dangerous case (deleting the running conversation); switching
+/// and new-conversation are now SAFE mid-run — see spawn_run's guarded
+/// write-back and the addressed persist() queue.
 fn reject_while_running(action: &str) -> bool {
     let running = STATE.with(|s| s.borrow().running);
     if running {
@@ -817,9 +857,10 @@ fn handle(command: Command) {
         }
 
         Command::NewConversation => {
-            if reject_while_running("start a new conversation") {
-                return;
-            }
+            // safe mid-run for the same reason switching is: the run owns
+            // its history copy and its writes are addressed to its own
+            // conversation id. the new thread starts empty and untouched by
+            // whatever is running.
             STATE.with(|s| s.borrow_mut().history.clear());
             wasm_bindgen_futures::spawn_local(async move {
                 match crate::platform::transcript::create().await {
@@ -839,8 +880,23 @@ fn handle(command: Command) {
         }
 
         Command::SwitchConversation { id } => {
-            if reject_while_running("switch conversations") {
-                return;
+            // deliberately NO reject_while_running: switching is now safe
+            // mid-run. the running loop owns its own history copy; persist()
+            // writes are addressed to the run's conversation_id, not to
+            // whatever STATE holds; and the write-back at run end is guarded
+            // by comparing STATE.conversation against conversation_id, so a
+            // finished run can never pour its messages into another thread.
+            // locking the whole app for the duration of an infinite-loop run
+            // was the real usability bug — an unattended loop must not make
+            // the rest of the harness untouchable.
+            if STATE.with(|s| s.borrow().running) {
+                emit(Event::Note {
+                    thread: conv(),
+                    text: format!(
+                        "↳ run continues in the background on \"{}\" — you can watch from its row in the sidebar",
+                        id
+                    ),
+                });
             }
             wasm_bindgen_futures::spawn_local(async move {
                 let index = adopt_conversation(&id).await;
@@ -874,7 +930,17 @@ fn handle(command: Command) {
         }
 
         Command::DeleteConversation { id } => {
-            if reject_while_running("delete a conversation") {
+            // deleting the RUNNING thread mid-run would pull its transcript
+            // out from under persist() — that refusal stays. deleting any
+            // OTHER thread is safe and no longer locks the app.
+            let running_here = STATE.with(|s| s.borrow().running)
+                && STATE.with(|s| s.borrow().conversation == id);
+            if running_here {
+                emit(Event::Error {
+                    thread: conv(),
+                    scope: "conversation".to_string(),
+                    message: "cannot delete a conversation while it has a run in progress — press stop first.".to_string(),
+                });
                 return;
             }
             wasm_bindgen_futures::spawn_local(async move {
