@@ -90,6 +90,21 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [ ] **verify universal resume live** (landed 5d9ee87 + b4de758, needs a
+      real discard to prove it): start a run, switch tabs long enough for
+      the browser to freeze/discard the page (memory saver ~2h desktop,
+      minutes on mobile), return. expect a "↻ run was interrupted …
+      resuming once settings load" note and the run continuing from its
+      last checkpoint in the SAME conversation even if another thread was
+      active at boot. also verify: a run that ENDS normally leaves no
+      marker (no involuntary resume on next reload), and deleting the
+      interrupted thread before returning produces NO surprise run.
+      research note for whoever picks this up: worker timers are NOT
+      visibility-throttled (WHATWG HTML §8.7: only Window timers wait on
+      document visibility; WorkerGlobalScope does not) — the killer is
+      tab DISCARD (memory saver / mobile os), which fires no event. any
+      future "runs die when hidden" report starts there, not at throttling.
+
 - [ ] **auto-reconcile at boot** (top priority, structural): the worker
       should run the reconcile pass on Event::Ready (list_tree + head_sha,
       drop diverged clean caches, record synced_head) so D10's guard is

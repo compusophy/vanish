@@ -3,7 +3,55 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed most recently (the event-loop deadlock, fixed a second time)
+## landed most recently (background-tab deaths: universal resume, 5d9ee87 + b4de758)
+
+user report: "tasks die when i switch tabs or open other programs — isn't
+the point of workers that they persist without being throttled?"
+
+**the premise was half right, and the research matters:**
+- web worker timers are NOT throttled by tab visibility. verified against
+  WHATWG HTML §8.7 "run steps after a timeout": a Window's timer waits for
+  the document to be "fully active" (the visibility gate); a
+  WorkerGlobalScope's timer only waits "milliseconds with the worker not
+  suspended". chrome's IntensiveWakeUpThrottling docs are page-scoped too.
+  our loop's sleep_ms / stop-poll / deploy-poll all keep full speed hidden.
+- what actually kills runs: the browser discarding/freezing a HIDDEN TAB —
+  memory saver on desktop after ~2h (opt-out in settings), mobile OSes in
+  minutes. this kills the ENTIRE renderer including the worker, fires no
+  event, and nothing in-page can observe or prevent it. the fix is not
+  scheduling; it is surviving the discard.
+
+what landed:
+- [x] EVERY run now writes the LoopResume marker at start (was loop-mode-
+      only) with a new `loop_mode` field (serde default true so pre-existing
+      markers parse as loop runs), and EVERY run clears it on any ending.
+      leaving the old `is_loop` gate would have stranded markers behind
+      finished plain runs → involuntary resurrection on next boot. caught
+      by re-review before commit.
+- [x] boot adopts the marked conversation even when it is NOT index.active
+      (previously dropped as "stale" — losing runs discarded while the user
+      was on another thread). deleted threads are refused via the new pure
+      `control::resume_target`, pinned by 4 tests. a resume arriving behind
+      an already-running run is dropped rather than parked forever.
+- [x] ui pings RunState on `visibilitychange` (feed::wire_visibility_reconcile)
+      so returning to a frozen tab corrects stale dock buttons immediately
+      instead of within the 3s watchdog tick.
+- [x] tests/platform_logic.rs pins the serde default itself.
+
+two red builds paid for it, both self-inflicted, both named by build logs:
+1. missed the LoopResume literal in tests/platform_logic.rs when adding a
+   field — grep struct literals across TESTS TOO, not just src/.
+2. wrote camelCase keys (`loopResume`, `interruptedAt`) in a json fixture;
+   these types have NO rename_all so the wire shape is snake_case, and
+   #[serde(default)] silently parsed my typo as None instead of erroring.
+   #[serde(default)] turns key typos into logic failures — fixtures must be
+   checked against the real wire casing.
+
+live verification still owed: start a run, background the tab long enough
+for a discard, return — expect "↻ run was interrupted … resuming" and the
+run continuing from its last checkpoint.
+
+## landed earlier (the event-loop deadlock, fixed a second time)
 
 the app was bricking itself: a run would finish its work, print its
 task_complete summary, and then the dock stayed on "running" forever. stop
