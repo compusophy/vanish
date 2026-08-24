@@ -3,7 +3,47 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## benchmark readiness assessment (this run, no code changes)
+## landed this run (auto-reconcile + clippy gate — build order item 1 DONE)
+
+- [x] **auto-reconcile at session start** (7b9c43a + fixes): the worker runs
+      the D10 reconcile pass on the FIRST Configure whose github token
+      VERIFIES (boot time has no credentials — they travel with Configure,
+      so that is the earliest correct moment; the taskboard's old "on
+      Event::Ready" wording was wrong and is corrected). observable: a
+      visible "⇅ tree reconciled against <sha> at boot" note (or loud Error,
+      latch stays unset so next Configure retries); sync_repo and the boot
+      path share Workspace::reconcile_against_branch so they cannot drift;
+      and agent::run seeds its workspace from worker::reconciled_head(),
+      which CLOSES THE D10 BLIND SPOT where a session's first commit passed
+      the refusal because synced_head was empty — exactly when a stale-tree
+      commit was most dangerous.
+- [x] **fatal clippy gate in build.sh** (after test suites, so logic
+      failures still report first). its first pass caught 6 pre-existing
+      lints + 1 dead function (reject_while_running, dead since 51815df).
+- [x] 71 native tests green, incl. 3 new pins for should_auto_reconcile
+      (fires once per session for verified tokens only; never re-runs; never
+      arms on an unverified token).
+
+### what four red builds taught THIS time (all self-inflicted, all named by logs)
+
+1. **E0308**: closure param &str into String field → .to_string(). trivial,
+   but it shipped because I did not recompile mentally after writing the
+   accessor's signature.
+2. **clippy's suggestion can be wrong for context**: map_err(|e| e) → .ok()
+   type-errors when the outer combinator is Result::and_then. read the
+   error, not just the fix-it hint. final form:
+   `.and_then(JsCast::dyn_into::<Function>)` — Result→Result, no closure,
+   no deprecated try_from. two more builds burned learning this.
+3. **the deploy pipeline is the slowest feedback loop in this repo** (~4min
+   wasm build). there is NO local cargo check here — but the cost of a red
+   commit is ~8 minutes of main pinned to the previous build. mental
+   type-checking before committing source is worth real minutes.
+4. **a warning gate that only warns is a gate nobody reads** — proven same-
+   day: -D warnings surfaced six lints that had sat invisible for weeks.
+
+---
+
+## benchmark readiness assessment (earlier run, still current)
 
 asked: "are we ready for a third party benchmark, or is there still a lot to
 build until v1?" verdict: **not ready — but the reliability core is closer

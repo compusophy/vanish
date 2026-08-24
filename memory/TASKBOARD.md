@@ -90,16 +90,19 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
-- [ ] **v1 / benchmark readiness** (assessment recorded this run — see
-      status.md "benchmark readiness assessment"). verdict: NOT ready.
-      build order: (1) auto-reconcile at boot [below], (2) batch/task-queue
-      mode + machine-readable result export — nothing can currently drive
-      the agent except typed prompts, (3) internal eval harness: ~20 pinned
-      self-edit tasks scored by green deploy + cargo test (reuses
-      DeployState + build-log parsing; the honest benchmark shape given no
-      shell), (4) branch isolation via agent/* refs (STACKED_PRS_PLAN §4)
-      BEFORE any concurrency or external benchmark — external runs must not
-      be able to take down production main. multiworker pool only after 4.
+- [ ] **v1 / benchmark readiness** — build order: ~~(1) auto-reconcile~~
+      **DONE (7b9c43a, this run)** → (2) batch/task-queue mode +
+      machine-readable result export (nothing can drive the agent except
+      typed prompts) → (3) internal eval harness: ~20 pinned self-edit tasks
+      scored by green deploy + cargo test → (4) branch isolation via agent/*
+      refs (STACKED_PRS_PLAN §4) BEFORE any concurrency or external
+      benchmark. multiworker pool only after 4.
+
+- [ ] **verify auto-reconcile live** (landed 7b9c43a): reload the app with
+      credentials saved. expect the "⇅ tree reconciled against <sha> at
+      boot" note in the feed within a few seconds of Configure; a second
+      Configure (re-save settings) must NOT re-run it. if upstream moved
+      since the last session, expect "N stale cache(s) dropped".
 
 - [ ] **verify universal resume live** (landed 5d9ee87 + b4de758, needs a
       real discard to prove it): start a run, switch tabs long enough for
@@ -116,11 +119,12 @@ taskboard) asked for four things. all four are resolved:
       tab DISCARD (memory saver / mobile os), which fires no event. any
       future "runs die when hidden" report starts there, not at throttling.
 
-- [ ] **auto-reconcile at boot** (top priority, structural): the worker
-      should run the reconcile pass on Event::Ready (list_tree + head_sha,
-      drop diverged clean caches, record synced_head) so D10's guard is
-      armed from second zero instead of depending on the agent remembering
-      to sync. until it lands: first action of EVERY run is sync_repo.
+- [ ] **auto-reconcile at boot — RESOLVED (7b9c43a, this run)**: runs on the
+      first Configure with a verified github token (not Event::Ready — no
+      credentials exist at literal boot; the board's original wording was
+      wrong). shared pass with sync_repo; head seeded into every run's
+      workspace so the first-commit D10 blind spot is closed. live
+      verification still owed (item above).
       discovered via the 37-file cache staleness found this run — see
       status.md "the 37-file discovery".
 - [x] **mid-run unlock** (51815df): switching conversations and creating
