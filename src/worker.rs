@@ -30,6 +30,12 @@ struct WorkerState {
     /// so switching threads mid-session cannot write one conversation's
     /// messages into another's file.
     conversation: String,
+    /// set once the session-level D10 reconcile has run against a verified
+    /// github token (the Configure handler). until then every cached file is
+    /// guilty until reconciled — the exact mechanism behind the 37-file
+    /// staleness discovery, where a fresh session trusted a snapshot that
+    /// predated upstream fixes.
+    auto_reconciled: bool,
 }
 
 impl Default for WorkerState {
@@ -41,6 +47,7 @@ impl Default for WorkerState {
             run_seq: 0,
             stop_requested: false,
             conversation: String::new(),
+            auto_reconciled: false,
         }
     }
 }
@@ -250,6 +257,11 @@ thread_local! {
     /// a loop run waiting for Configure before it can start. see the boot
     /// handler above for why the resume cannot simply fire immediately.
     static PENDING_RESUME: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// the branch head the boot-time reconcile discovered. every run's
+    /// workspace is seeded with it, so the FIRST commit of a session is
+    /// D10-guarded instead of sailing through with an empty synced_head —
+    /// which was exactly when a stale-tree commit could slip past the guard.
+    static RECONCILED_HEAD: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// shared body of Command::Run and the boot-time loop resume. everything
@@ -660,6 +672,18 @@ fn truncate_args(args: &str) -> String {
     format!("{head}…")
 }
 
+/// the branch head recorded by this session's boot-time reconcile, if it ran.
+/// `agent::run` seeds every workspace with it so a session's first commit is
+/// D10-guarded rather than waved through. a function, not a pub thread_local,
+/// so the accessor cannot drift from the state.
+pub fn reconciled_head(with: impl FnOnce(&str)) {
+    RECONCILED_HEAD.with(|h| {
+        if let Some(sha) = h.borrow().as_ref() {
+            with(sha);
+        }
+    });
+}
+
 fn handle(command: Command) {
     match command {
         Command::Configure(config) => {
@@ -712,6 +736,64 @@ fn handle(command: Command) {
                         }
                     }
                 };
+
+                // D10, armed from second zero instead of depending on the
+                // agent remembering to sync first: the FIRST Configure with a
+                // VERIFIED github token reconciles the working tree against
+                // the branch (drops stale clean caches, never dirty files)
+                // and records the head so the session's very first commit is
+                // already guarded. boot time itself is too early — credentials
+                // only arrive here — but this is still before any read or edit
+                // a run could make. a failure surfaces as an Error event, not
+                // a silent skip (D4); the next Configure retries.
+                let auto_reconciled_now = crate::agent::tools::should_auto_reconcile(
+                    github_ok,
+                    STATE.with(|s| s.borrow().auto_reconciled),
+                );
+                if auto_reconciled_now {
+                    let gh = crate::agent::github::Github::new(
+                        &config.github_token,
+                        &config.repo,
+                        &config.branch,
+                    );
+                    let mut ws = crate::agent::tools::Workspace::new(gh).await;
+                    match ws.reconcile_against_branch().await {
+                        Ok(report) => {
+                            STATE.with(|s| s.borrow_mut().auto_reconciled = true);
+                            RECONCILED_HEAD.with(|h| *h.borrow_mut() = Some(report.head.clone()));
+                            emit(Event::Note {
+                                thread: conv(),
+                                text: format!(
+                                    "⇅ tree reconciled against {} at boot: {} file(s) on branch{}, {} uncommitted locally",
+                                    report.head.chars().take(7).collect::<String>(),
+                                    report.files_on_branch,
+                                    if report.refreshed.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(
+                                            ", {} stale cache(s) dropped",
+                                            report.refreshed.len()
+                                        )
+                                    },
+                                    report.uncommitted.len(),
+                                ),
+                            });
+                            if !report.refreshed.is_empty() {
+                                emit(Event::TreeChanged { dirty: ws.dirty() });
+                            }
+                        }
+                        Err(e) => {
+                            emit(Event::Error {
+                                thread: conv(),
+                                scope: "reconcile".to_string(),
+                                message: format!(
+                                    "boot-time tree reconciliation failed ({e}); \
+                                     call sync_repo before committing"
+                                ),
+                            });
+                        }
+                    }
+                }
 
                 // optional: absent is fine and not an error, but a token that
                 // is present and broken must be reported now rather than

@@ -75,6 +75,19 @@ for suite in protocol_contract platform_logic loop_nervous_system event_loop_liv
   fi
 done
 
+echo "--> running clippy (warnings are fatal on changed code)"
+# lints run AFTER tests so a logic failure still reports first. a lint gate
+# that only warns is a lint nobody reads; failing the deploy on warnings is
+# how the gate stays real. -D warnings turns every warning into an error.
+if ! cargo clippy --lib --tests -- --deny warnings 2>&1; then
+  echo ""
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  echo "!! CLIPPY FAILED: fix the warnings above and re-commit   !!"
+  echo "!! A warning gate that only warns is a gate nobody reads. !!"
+  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  exit 1
+fi
+
 
 echo "--> output:"
 ls -la web/pkg/

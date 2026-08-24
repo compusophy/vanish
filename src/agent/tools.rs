@@ -56,6 +56,26 @@ pub fn reconcile_entry(dirty: bool, base_sha: &str, remote_sha: Option<&str>) ->
     }
 }
 
+/// what one reconciliation pass found. returned by
+/// `Workspace::reconcile_against_branch` and rendered by both consumers
+/// (the sync_repo tool and the worker's boot-time auto-reconcile).
+#[derive(Debug, Clone)]
+pub struct ReconcileReport {
+    pub head: String,
+    pub files_on_branch: usize,
+    /// clean cached copies that were dropped because the branch moved.
+    pub refreshed: Vec<String>,
+    /// files whose local bytes differ from github — never dropped.
+    pub uncommitted: Vec<String>,
+}
+
+/// whether the session-level auto-reconcile should run. pure so the test
+/// suite pins both directions: it fires exactly once, and only for a token
+/// that was actually exercised and worked.
+pub fn should_auto_reconcile(github_usable: bool, already_reconciled: bool) -> bool {
+    github_usable && !already_reconciled
+}
+
 /// the current wall-clock time in milliseconds since the unix epoch.
 /// wasm asks the browser (`js_sys::Date`); the native test build falls back
 /// to `std::time`. no network request is involved either way.
@@ -354,6 +374,44 @@ impl Workspace {
             .collect()
     }
 
+    /// D10 reconciliation, shared by the sync_repo tool and by the worker's
+    /// boot-time auto-reconcile. lists the branch, drops clean cached copies
+    /// whose blob sha no longer matches (their next read re-fetches current
+    /// content), never touches dirty files — they are uncommitted local work
+    /// and dropping one is data loss — and records the head so this session's
+    /// first commit is guarded rather than waved through. both callers go
+    /// through THIS function so their behavior cannot drift.
+    pub async fn reconcile_against_branch(&mut self) -> Result<ReconcileReport, String> {
+        let items = self.github.list_tree().await?;
+        let head = self.github.head_sha().await?;
+
+        let mut refreshed: Vec<String> = Vec::new();
+        for item in items.iter().filter(|i| i.kind == "blob") {
+            let decision = reconcile_entry(
+                self.index.get(&item.path).map(|e| e.dirty).unwrap_or(false),
+                self.index
+                    .get(&item.path)
+                    .map(|e| e.base_sha.as_str())
+                    .unwrap_or(""),
+                item.sha.as_deref(),
+            );
+            if decision == Reconcile::Refresh && opfs::read(&item.path).await.is_ok() {
+                opfs::delete(&item.path).await?;
+                refreshed.push(item.path.clone());
+            }
+        }
+
+        self.synced_head = head.clone();
+        let uncommitted = self.dirty();
+
+        Ok(ReconcileReport {
+            head,
+            files_on_branch: items.iter().filter(|i| i.kind == "blob").count(),
+            refreshed,
+            uncommitted,
+        })
+    }
+
     async fn mark_dirty(&mut self, path: &str, size: usize) -> Result<(), String> {
         let entry = self.index.entry(path.to_string()).or_insert(IndexEntry {
             base_sha: String::new(),
@@ -561,40 +619,19 @@ impl Workspace {
                 // D10: a listing refresh is not reconciliation. the old
                 // version left opfs caches in place, so read_through kept
                 // serving pre-sync bytes — the mechanism behind incidents
-                // #1–#3. clean files whose recorded blob sha no longer
-                // matches the branch are dropped from the cache (their next
-                // read re-fetches current content); dirty files are NEVER
-                // touched, because they are uncommitted local work and
-                // dropping one is data loss.
-                let items = self.github.list_tree().await?;
-                let head = self.github.head_sha().await?;
+                // #1–#3. the real work lives in reconcile_against_branch,
+                // which the worker's boot-time auto-reconcile also calls, so
+                // the two paths cannot drift.
+                let report = self.reconcile_against_branch().await?;
+                let refreshed = &report.refreshed;
 
-                let mut refreshed: Vec<String> = Vec::new();
-                for item in items.iter().filter(|i| i.kind == "blob") {
-                    let decision = reconcile_entry(
-                        self.index.get(&item.path).map(|e| e.dirty).unwrap_or(false),
-                        self.index
-                            .get(&item.path)
-                            .map(|e| e.base_sha.as_str())
-                            .unwrap_or(""),
-                        item.sha.as_deref(),
-                    );
-                    if decision == Reconcile::Refresh && opfs::read(&item.path).await.is_ok() {
-                        opfs::delete(&item.path).await?;
-                        refreshed.push(item.path.clone());
-                    }
-                }
-
-                self.synced_head = head;
-
-                let dirty = self.dirty();
                 Ok(serde_json::json!({
                     "success": true,
-                    "files_on_branch": items.iter().filter(|i| i.kind == "blob").count(),
+                    "files_on_branch": report.files_on_branch,
                     "branch": self.github.branch,
-                    "synced_head": self.synced_head,
+                    "synced_head": report.head,
                     "cache_refreshed": refreshed,
-                    "uncommitted_local_files": dirty,
+                    "uncommitted_local_files": report.uncommitted,
                     "note": if refreshed.is_empty() {
                         "tree reconciled: every cached file matches the branch."
                     } else {

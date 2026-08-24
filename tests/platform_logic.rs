@@ -311,3 +311,34 @@ fn an_unrecorded_base_sha_is_distrusted_not_trusted() {
         Reconcile::Refresh
     );
 }
+
+// ---- boot-time auto-reconcile (D10 armed at session start) -----------------
+// the 37-file discovery: a fresh session's entire opfs cache was stale since
+// incident #3 because reconcile only ever ran when the agent remembered to
+// call sync_repo — and a first commit passes the D10 refusal by design. the
+// worker now reconciles once per session, right after Configure verifies the
+// github token. should_auto_reconcile is the pure gate; these pins hold both
+// directions.
+
+use vanish::agent::tools::should_auto_reconcile;
+
+#[test]
+fn auto_reconcile_fires_once_for_a_verified_token() {
+    assert!(should_auto_reconcile(true, false), "first verified configure must arm D10");
+}
+
+#[test]
+fn auto_reconcile_never_reruns_within_a_session() {
+    // re-running would be harmless but wasteful; the pin documents that the
+    // flag is a once-per-session latch, so a later Configure (e.g. the user
+    // editing settings) does not redo a network listing.
+    assert!(!should_auto_reconcile(true, true));
+}
+
+#[test]
+fn auto_reconcile_never_fires_on_an_unverified_token() {
+    // verification failing means the token cannot even read the repo: the
+    // reconcile would fail too, and worse, arming the latch on a failed
+    // attempt would leave the session permanently unreconciled.
+    assert!(!should_auto_reconcile(false, false));
+}
