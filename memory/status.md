@@ -3,7 +3,48 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed this run (batch/task-queue mode — build order item 2 DONE, 2249454)
+## landed this run (internal eval suite — build order item 3 DONE, c8c7c6c)
+
+YES, vanish can now benchmark itself, end to end:
+
+- **agent::bench** = pure scoring core. 5 pinned tasks (read-and-report,
+  create-file, precise-append, rust-fn-addition, token-deletion), each
+  with a mechanical Checker (FileContains/FileExcludes/FileExists/
+  TestCountAtLeast/CommitExists). grade_all(BenchSnapshot) grades over
+  observable facts only — files read from opfs AFTER the batch drains.
+  task_complete is data, not evidence.
+- **Command::RunBenchmark** drives the pinned tasks through the EXISTING
+  batch driver (no new run machinery → same durability/stop semantics),
+  then writes vanish-bench/report.json + emits scorecard note +
+  BenchmarkFinished {passed,total}. ui button posts the same command an
+  external harness would — one path, no drift.
+- **tests/bench_grading.rs** pins the scoring function itself with
+  negative controls: near-misses must fail (wrong text/file, partial
+  multi-needle edit, surviving excluded token), matching is literal-not-
+  regex so target-file trickery can't game it, empty tree scores zero.
+
+### how this run went (3 red builds; the gate did its job)
+
+1. E0308 x10 (&str into Checker's String fields in the const table) →
+   contains!/excludes! macros; BenchTask lost its accidental serde
+   derives while there (&'static str fields were never serializable).
+2. E0015: to_string()/vec! are NOT const-callable on stable — a `const`
+   table cannot hold owned-String checkers at all. fixed with a
+   std::sync::OnceLock behind bench_tasks(). LESSON: pinned data tables
+   whose entries own Strings cannot be const on stable rust; reach for
+   OnceLock immediately, don't try const first.
+3. clippy fatal gate caught 3 lints (empty-line-after-doc-comment from
+   the const→static conversion, manual_async_fn, single_match). the wasm
+   lib AND tests compiled on attempt 2 — only lint remained. gate earns
+   its keep: these would have shipped as warnings nobody reads.
+
+also caught pre-commit this time: an edit_file replacement that orphaned
+five lines of the old task table past its boundary. re-read the edited
+region BEFORE committing; that discipline is becoming reliable.
+
+## landed earlier this session
+
+## landed earlier (batch/task-queue mode — build order item 2 DONE, 2249454)
 
 vanish is now SCORABLE. the programmatic driver exists:
 

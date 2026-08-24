@@ -91,12 +91,19 @@ taskboard) asked for four things. all four are resolved:
 ## open work
 
 - [ ] **v1 / benchmark readiness** — build order: ~~(1) auto-reconcile~~
-      DONE · ~~(2) batch/task-queue + export~~ **DONE (2249454)** →
-      (3) internal eval harness: ~20 pinned self-edit tasks driven through
-      Command::RunBatch / enqueue_batch, scored from
-      vanish-batch/results.json by green deploy + cargo test → (4) branch
+      DONE · ~~(2) batch/task-queue + export~~ DONE (2249454) ·
+      ~~(3) internal eval suite~~ **DONE (c8c7c6c)** → (4) branch
       isolation via agent/* refs (STACKED_PRS_PLAN §4) BEFORE any
-      concurrency or external benchmark. multiworker pool only after 4.
+      concurrency or external benchmark — external runs must not be able
+      to take down production main. multiworker pool only after 4.
+
+- [ ] **run the first live benchmark**: press "run benchmark" (or console:
+      `vanish` ui → Command::RunBenchmark via the worker). expect 5 tasks
+      running one-by-one, then a scorecard note ("benchmark: N/5 passed")
+      and vanish-bench/report.json in the file tree. NOTE: bench-rust-fn
+      edits src/lib.rs — run it on a branch you are willing to commit to,
+      or expect the dirty file. grading is mechanical; a fail means the
+      agent did not do the edit, not that the checker is broken.
 
 - [ ] **verify batch mode live**: enqueue a 2-task batch (e.g. via console:
       `vanish.enqueue_batch('[{"id":"t1","prompt":"read README.md and say
