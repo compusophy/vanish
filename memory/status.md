@@ -3,6 +3,44 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
+## benchmark readiness assessment (this run, no code changes)
+
+asked: "are we ready for a third party benchmark, or is there still a lot to
+build until v1?" verdict: **not ready — but the reliability core is closer
+than the board reads.** main was clean and green at 73163c1 (verified via
+check_deployment + commit log; no stale-tree surprises).
+
+would survive scrutiny today:
+- durability layer (opfs write-through, per-step checkpoints,
+  resume-after-discard with universal LoopResume markers)
+- self-correction (retry budget w/ backoff, check_deployment with real
+  compiler logs, history_is_well_formed asserted on every exit path)
+- a deploy-gated test layer (7 suites incl. behavioral evals with negative
+  controls) — structurally, this IS a judge; it just doesn't score TASKS.
+
+three disqualifiers:
+1. **no programmatic driver.** the only task-entry point is the prompt box;
+   transcripts live in opfs per conversation with no result export. a
+   benchmark harness cannot invoke or score us.
+2. **no environment isolation.** every commit → production main deploy.
+   concurrent runs would race one tree; per-task evidence is overwritten by
+   each next commit. STACKED_PRS_PLAN.md solves both and is written but
+   unbuilt.
+3. **executor mismatch.** swebench-style sandboxes need a shell we don't
+   have by design. our executors are the vercel build (wasm compile +
+   native cargo test). honest benchmark shape: self-edit tasks scored by
+   green deploy + tests — buildable from existing parts, not yet built.
+
+pre-v1 blockers regardless of benchmarking: auto-reconcile at boot (still
+top structural item), plus owed live verifications (tab-discard resume,
+mid-run thread-switch replay, D10 refusal recovery, stop-button flip).
+
+build order written into TASKBOARD "open work": auto-reconcile → batch/task
+queue mode + export → internal eval harness (~20 pinned self-edit tasks) →
+branch isolation before any concurrency/external exposure.
+
+---
+
 ## landed most recently (bell relocation to bottom-right, 3ec83b1)
 
 user: the bell was never supposed to be in the text input container — it

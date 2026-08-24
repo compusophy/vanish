@@ -90,6 +90,17 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [ ] **v1 / benchmark readiness** (assessment recorded this run — see
+      status.md "benchmark readiness assessment"). verdict: NOT ready.
+      build order: (1) auto-reconcile at boot [below], (2) batch/task-queue
+      mode + machine-readable result export — nothing can currently drive
+      the agent except typed prompts, (3) internal eval harness: ~20 pinned
+      self-edit tasks scored by green deploy + cargo test (reuses
+      DeployState + build-log parsing; the honest benchmark shape given no
+      shell), (4) branch isolation via agent/* refs (STACKED_PRS_PLAN §4)
+      BEFORE any concurrency or external benchmark — external runs must not
+      be able to take down production main. multiworker pool only after 4.
+
 - [ ] **verify universal resume live** (landed 5d9ee87 + b4de758, needs a
       real discard to prove it): start a run, switch tabs long enough for
       the browser to freeze/discard the page (memory saver ~2h desktop,
