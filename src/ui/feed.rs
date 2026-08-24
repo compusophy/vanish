@@ -20,6 +20,28 @@ thread_local! {
     static ACTIVE_CONTENT: RefCell<Option<Element>> = const { RefCell::new(None) };
 }
 
+/// dock reconciliation on return to the tab.
+///
+/// while this page is hidden the browser may freeze or discard it — memory
+/// saver, mobile os — and events that crossed during that window can be
+/// dropped or delivered late. the 3s watchdog only runs while a run is
+/// BELIEVED active, so a run that ended (or was resumed into another
+/// thread) while hidden could leave stale buttons until its next tick.
+/// visibilitychange fires the instant the user comes back: one RunState
+        // ping here closes any drift immediately instead of within 3s.
+pub fn wire_visibility_reconcile(ui: &Shared) {
+    let ui = ui.clone();
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        let worker = ui.borrow().worker.clone();
+        super::send(&worker, &crate::protocol::Command::RunState);
+    });
+    let _ = doc().add_event_listener_with_callback(
+        "visibilitychange",
+        cb.as_ref().unchecked_ref(),
+    );
+    cb.forget();
+}
+
 fn feed_root() -> Option<Element> {
     by_id("feed")
 }

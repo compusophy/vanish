@@ -170,38 +170,79 @@ pub fn boot_worker() {
         emit(Event::HistoryRestored { turns, trimmed });
         publish_conversations(&index);
 
-        // loop mode's promise survives its own death: if a loop run was in
-        // flight when the page died, continue it. take_loop_resume clears
-        // the marker, so a failed resume cannot loop on boot forever.
+        // every run's promise now survives its own death, not just loop
+        // mode's: if ANY run was in flight when the page died — refresh,
+        // ota reload, or the browser discarding a hidden tab (memory saver,
+        // mobile os), which kills the worker with no event at all — the
+        // next boot continues it instead of leaving a dead card in the feed.
+        // take_loop_resume clears the marker, so a failed resume cannot loop
+        // on boot forever.
         //
-        // the resume is deferred until Configure arrives: at boot the config
-        // in STATE is still empty (credentials travel with that command), so
-        // starting now would bounce off the credential check. PENDING_RESUME
-        // parks it; the Configure handler picks it up.
-        if let Some(marker) = crate::platform::transcript::take_loop_resume().await {
-            if marker.conversation == active && !STATE.with(|s| s.borrow().running) {
-                emit(Event::Note {
-                    thread: active.clone(),
-                    text: format!(
-                        "↻ loop mode was interrupted by a reload ({}s ago) — resuming once settings load",
-                        ((js_sys::Date::now() - marker.interrupted_at) / 1000.0) as u64
-                    ),
-                });
-                PENDING_RESUME.with(|p| *p.borrow_mut() = Some(marker.prompt));
-                // surface the pending state in the ui immediately: a reload
-                // that lands on broken credentials would otherwise leave the
-                // loop silently parked forever.
-                emit(Event::Note {
-                    thread: active.clone(),
-                    text: "⏸ loop resume pending — waiting for working credentials"
-                        .to_string(),
-                });
+        // the marked conversation is ADOPTED first when it differs from the
+        // active one: a tab discarded while the user was on another thread
+        // used to drop the marker as "stale" and lose the run outright.
+        // adoption loads that thread's history into worker memory so the
+        // resumed run has its real context.
+        //
+        // the resume itself is deferred until Configure arrives: at boot the
+        // config in STATE is still empty (credentials travel with that
+        // command), so starting now would bounce off the credential check.
+        // PENDING_RESUME parks it; the Configure handler picks it up.
+        let marker = crate::platform::transcript::take_loop_resume().await;
+        let marker = match marker {
+            Some(m) => m,
+            None => return,
+        };
+
+        // which conversation should hold the resumed run? refuse to adopt a
+        // conversation that no longer exists (a deleted thread must never
+        // resurrect as a surprise run) — control::resume_target answers this
+        // purely, and the eval suite pins it.
+        let index = crate::platform::transcript::load_index().await;
+        let existing: Vec<String> = index.items.iter().map(|c| c.id.clone()).collect();
+        let target = match crate::agent::control::resume_target(&existing, &marker.conversation)
+        {
+            Some(t) => t,
+            None => {
+                // the thread was deleted while the run was interrupted;
+                // nothing to continue. the marker is already cleared.
                 return;
             }
-            // stale: wrong thread or already running. drop it rather than
-            // injecting a nudge into a conversation that was not expecting one.
-            crate::platform::transcript::clear_loop_resume().await;
+        };
+
+        // a run that is ALREADY going (the user typed fast, or a previous
+        // resume fired) owns the worker: parking another resume behind it
+        // would strand the parked prompt forever, so the interrupted run is
+        // dropped rather than queued.
+        if STATE.with(|s| s.borrow().running) {
+            return;
         }
+
+        let resumed_here = target == active;
+        if !resumed_here {
+            adopt_conversation(&target).await;
+            let mut index = index;
+            index.active = target.clone();
+            let _ = crate::platform::transcript::save_index(&index).await;
+            publish_conversations(&index);
+        }
+
+        let kind = if marker.loop_mode { "loop mode" } else { "run" };
+        emit(Event::Note {
+            thread: target.clone(),
+            text: format!(
+                "↻ {kind} was interrupted ({ago}s ago) — resuming once settings load",
+                ago = ((js_sys::Date::now() - marker.interrupted_at) / 1000.0) as u64
+            ),
+        });
+        PENDING_RESUME.with(|p| *p.borrow_mut() = Some(marker.prompt));
+        // surface the pending state in the ui immediately: a reload that
+        // lands on broken credentials would otherwise leave the run
+        // silently parked forever.
+        emit(Event::Note {
+            thread: target,
+            text: "⏸ resume pending — waiting for working credentials".to_string(),
+        });
     });
 }
 
@@ -250,29 +291,37 @@ fn start_run(prompt: String) {
 }
 
 /// the async half of a run, factored out so both the user-initiated path and
-/// the boot-time loop-resume path share it.
+/// the boot-time resume path share it.
 ///
 /// the persist callback checkpoints after every durable unit; writes are
 /// serialized through a drain queue so overlapping opfs writes can never
 /// land out of order. the final save waits for the queue to drain first.
 ///
-/// the loop marker is written before the run starts and cleared when it
+/// a resume marker is written before EVERY run starts and cleared when it
 /// ends — completed, stopped, failed, or step limit — so it can only be
-/// observed while a loop run genuinely has no worker attached.
+/// observed while a run genuinely has no worker attached. this is what
+/// makes an interrupted run resumable: the browser may discard a hidden
+/// tab (and with it the whole worker) without firing any event, and the
+/// marker is the only trace left to continue from.
 fn spawn_run(config: Config, prompt: String, seq: u64) {
     let is_loop = config.loop_mode;
     let conversation_id = STATE.with(|s| s.borrow().conversation.clone());
 
-    if is_loop {
-        let marker = crate::platform::transcript::LoopResume {
-            conversation: conversation_id.clone(),
-            prompt: prompt.clone(),
-            interrupted_at: js_sys::Date::now(),
-        };
-        wasm_bindgen_futures::spawn_local(async move {
-            let _ = crate::platform::transcript::set_loop_resume(marker).await;
-        });
-    }
+    // EVERY run writes a resume marker, not just loop mode. loop mode needs
+    // it because its runs are unbounded — but so does any run that outlives
+    // its renderer: the browser discards hidden tabs (memory saver, mobile
+    // os) without firing an event, and the only trace left is this marker
+    // plus the per-step transcript checkpoints. without it, an interrupted
+    // plain run came back from a tab discard as a dead card in the feed.
+    let marker = crate::platform::transcript::LoopResume {
+        conversation: conversation_id.clone(),
+        prompt: prompt.clone(),
+        interrupted_at: js_sys::Date::now(),
+        loop_mode: is_loop,
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = crate::platform::transcript::set_loop_resume(marker).await;
+    });
 
     wasm_bindgen_futures::spawn_local(async move {
         let mut history = STATE.with(|s| s.borrow().history.clone());
@@ -457,11 +506,12 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
             }
         });
 
-        // the loop marker must not outlive its run: whatever ended this run,
-        // a stale marker would resurrect the loop on every future boot.
-        if is_loop {
-            crate::platform::transcript::clear_loop_resume().await;
-        }
+        // the resume marker must not outlive its run: whatever ended this
+        // run — completed, stopped, failed, step limit — a stale marker
+        // would resurrect it on the next boot as an involuntary run.
+        // EVERY run writes one now, so EVERY run clears one here; keeping
+        // the old is_loop gate would strand markers behind finished runs.
+        crate::platform::transcript::clear_loop_resume().await;
 
         // RunFinished goes out FIRST — before the checkpoint drain, before
         // the final save. the buttons only flip back on this event, so

@@ -59,21 +59,27 @@ pub struct ConversationMeta {
 pub struct Index {
     pub active: String,
     pub items: Vec<ConversationMeta>,
-    /// present while a loop-mode run is (or was) in flight. see LoopResume.
+    /// present while ANY run is (or was) in flight — not only loop mode.
+    /// a background tab discarded by the browser kills the worker with no
+    /// event; this marker is what lets the next boot continue the run.
+    /// see LoopResume.
     pub loop_resume: Option<LoopResume>,
 }
 
-/// a loop-mode run that outlived its worker.
+/// a run that outlived its worker.
 ///
-/// loop mode's promise is "run until stopped" — but a page refresh kills the
-/// worker, and the restored transcript alone just sits there. this marker,
-/// written when a loop run starts and cleared when one ends, is what lets
-/// boot resume the run instead of leaving it silently paused forever.
+/// ANY run can now be interrupted by forces outside its control: a page
+/// refresh, an ota reload, or — the silent one — the browser discarding a
+/// hidden tab (memory saver, mobile os). that discard kills the worker with
+/// no event at all; the per-step checkpoints mean the transcript survives,
+/// but without this marker the next boot just replays a dead run. the
+/// marker is what turns "interrupted" into "paused": boot adopts the marked
+/// conversation and continues the work.
 ///
 /// the prompt is re-sent as a nudge, not replayed verbatim: after a reload
-/// the model already has every prior step in context, so "the loop you were
-/// running was interrupted; continue" is the correct continuation signal —
-/// the original prompt would read as a second, duplicate instruction.
+/// the model already has every prior step in context, so "the run you were
+/// working on was interrupted; continue" is the correct continuation signal
+/// — the original prompt would read as a second, duplicate instruction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopResume {
     /// the conversation the interrupted run belonged to. resuming into any
@@ -85,6 +91,15 @@ pub struct LoopResume {
     /// epoch millis of the interruption, for the ui to say how long ago it
     /// was and for a stale-marker sanity check at boot.
     pub interrupted_at: f64,
+    /// true only when the interrupted run had loop mode on. serde(default)
+    /// keeps markers written by older builds parseable: they were always
+    /// loop runs, so absence reads as true.
+    #[serde(default = "default_true")]
+    pub loop_mode: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Index {

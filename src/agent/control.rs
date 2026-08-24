@@ -102,6 +102,29 @@ pub fn decide_after_turn(has_tool_calls: bool, loop_mode: bool) -> Action {
     }
 }
 
+// ---- interruption-resume targeting ---------------------------------------
+
+/// which conversation a boot-time resume should continue in, given the
+/// conversations that exist and the one recorded in the interruption marker.
+///
+/// EVERY run writes a resume marker, not just loop mode: the browser may
+/// discard a hidden tab at any moment (memory saver, mobile os) — killing
+/// the worker with no event. the transcript survives that (it checkpoints
+/// per step); the marker is what lets the next boot CONTINUE the run rather
+/// than leave a dead one behind. adoption is refused when the marked
+/// conversation no longer exists — a deleted thread must never resurrect as
+/// a surprise run — or when the marker names nothing at all. pure so the
+/// eval suite can pin the decision without touching storage.
+pub fn resume_target(items: &[String], marker_conversation: &str) -> Option<String> {
+    if marker_conversation.is_empty() {
+        return None;
+    }
+    items
+        .iter()
+        .find(|id| id.as_str() == marker_conversation)
+        .cloned()
+}
+
 // ---- mid-batch cancellation ---------------------------------------------
 
 /// synthetic results for tool calls abandoned when stop landed mid-batch.

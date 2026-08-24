@@ -357,6 +357,11 @@ pub fn boot_ui(worker_url: &str) {
     wire_rails();
     notify::wire();
     update::start_watching(&ui);
+    // when the user returns to a hidden-then-frozen tab, reconcile the dock
+    // against the worker immediately rather than on the next 3s watchdog
+    // tick — backgrounded tabs can drop or delay events, and the buttons
+    // must be correct the moment the tab is visible again.
+    feed::wire_visibility_reconcile(&ui);
 
     // NOTHING is sent to the worker here, and that is deliberate.
     //

@@ -3,8 +3,41 @@
 //! an unattended loop makes with no human watching, so their behavior is
 //! pinned here rather than trusted.
 
+use vanish::agent::control::resume_target;
 use vanish::agent::github::{CheckSummary, DeployState};
 use vanish::agent::retry_backoff_ms;
+
+// ---- interruption-resume targeting ---------------------------------------
+// every run writes a resume marker because the browser can discard a hidden
+// tab at any moment, killing the worker without an event. these pin WHICH
+// interrupted run a boot may continue: an existing conversation only, never
+// a deleted thread resurrected as a surprise run, never an empty target.
+
+#[test]
+fn resume_targets_the_marked_conversation_when_it_exists() {
+    let items = vec!["111".to_string(), "222".to_string()];
+    assert_eq!(resume_target(&items, "222"), Some("222".to_string()));
+    assert_eq!(resume_target(&items, "111"), Some("111".to_string()));
+}
+
+#[test]
+fn resume_never_resurrects_a_deleted_thread() {
+    let items = vec!["111".to_string()];
+    // the marked thread was deleted while the run was interrupted.
+    assert_eq!(resume_target(&items, "999"), None);
+}
+
+#[test]
+fn resume_refuses_an_empty_marker() {
+    let items = vec!["111".to_string()];
+    assert_eq!(resume_target(&items, ""), None);
+    assert_eq!(resume_target(&[], ""), None);
+}
+
+#[test]
+fn resume_with_no_conversations_at_all_is_none() {
+    assert_eq!(resume_target(&[], "111"), None);
+}
 
 // ---- retry backoff -------------------------------------------------------
 // the schedule an unattended loop follows after a transient llm failure.
