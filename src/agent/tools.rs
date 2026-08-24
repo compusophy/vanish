@@ -145,6 +145,7 @@ pub fn pr_gate(status: &crate::agent::github::PrStatus) -> Result<(), String> {
 /// the current wall-clock time in milliseconds since the unix epoch.
 /// wasm asks the browser (`js_sys::Date`); the native test build falls back
 /// to `std::time`. no network request is involved either way.
+pub fn now_epoch_ms() -> i64 {
     #[cfg(target_arch = "wasm32")]
     {
         js_sys::Date::now() as i64
