@@ -8,6 +8,7 @@
 //! model says it is done, when the step ceiling is reached, or when the user
 //! presses stop — and never because the platform ran out of patience.
 
+pub mod bench;
 pub mod control;
 pub mod github;
 pub mod http;

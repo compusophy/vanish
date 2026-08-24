@@ -612,6 +612,12 @@ fn render_active(ui: &Shared, event: Event) {
             append(&card);
         }
 
+        Event::BenchmarkFinished { passed, total } => {
+            if let Some(s) = by_id("status") {
+                s.set_text_content(Some(&format!("benchmark: {passed}/{total}")));
+            }
+        }
+
         // handled above the match (before background routing); unreachable
         // here, but the match must stay exhaustive.
         Event::RunStateReport { .. } => {}

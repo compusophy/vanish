@@ -842,6 +842,89 @@ thread_local! {
     static LAST_FINISH: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+// ---- internal eval suite --------------------------------------------------
+//
+// pinned self-edit tasks driven through drive_batch, then graded against
+// mechanical checkers over a snapshot of observable facts. grading lives in
+// agent::bench (pure); this is only io and sequencing.
+
+/// did a git commit land since the benchmark started? the commit event is
+/// emitted by the tool layer; watching the feed would be fragile, so the
+/// worker records the last committed sha it saw instead.
+fn snapshot_bench(commit_seen_before: bool) -> impl std::future::Future<Output = crate::agent::bench::BenchSnapshot> {
+    async move {
+        let mut files = std::collections::BTreeMap::new();
+        for path in crate::agent::bench::checked_paths() {
+            match crate::platform::opfs::read(path).await {
+                Ok(body) => {
+                    files.insert(path.to_string(), body);
+                }
+                // an unreadable file is indistinguishable from a missing one
+                // for checker purposes: both fail FileExists.
+                Err(_) => {}
+            }
+        }
+        crate::agent::bench::BenchSnapshot {
+            files,
+            test_count: 0,
+            has_commit: commit_seen_before,
+        }
+    }
+}
+
+/// run the whole eval suite. returns the report; also writes
+/// vanish-bench/report.json so the score survives a reload.
+async fn run_benchmark_suite() -> crate::agent::bench::BenchReport {
+    let tasks: Vec<crate::protocol::BatchTask> = crate::agent::bench::BENCH_TASKS
+        .iter()
+        .map(|t| crate::protocol::BatchTask {
+            id: t.id.to_string(),
+            prompt: t.prompt.to_string(),
+        })
+        .collect();
+
+    emit(Event::Note {
+        thread: conv(),
+        text: format!(
+            "benchmark starting — {} pinned task(s); each runs as its own one-shot",
+            tasks.len()
+        ),
+    });
+
+    handle(Command::RunBatch { tasks });
+    // wait for the batch to end (completed or cancelled) before grading:
+    // grading mid-batch would read half-written files.
+    while BATCH.with(|b| b.borrow().is_some()) {
+        crate::agent::http::sleep_ms(500).await;
+    }
+
+    let snap = snapshot_bench(false).await;
+    let report = crate::agent::bench::grade_all(&snap);
+
+    let body = serde_json::to_string_pretty(&report)
+        .unwrap_or_else(|_| "{{\"error\":\"unserializable report\"}}".to_string());
+    if let Err(e) = crate::platform::opfs::write("vanish-bench/report.json", &body).await {
+        emit(Event::Error {
+            thread: conv(),
+            scope: "bench".to_string(),
+            message: format!("could not write benchmark report: {e}"),
+        });
+    }
+
+    emit(Event::Note {
+        thread: conv(),
+        text: format!(
+            "— scorecard —\n{}",
+            report.scorecard()
+        ),
+    });
+    emit(Event::BenchmarkFinished {
+        passed: report.passed(),
+        total: report.total(),
+    });
+    report
+}
+
 fn handle(command: Command) {
     match command {
         Command::Configure(config) => {
@@ -1385,6 +1468,19 @@ fn handle(command: Command) {
                 text: format!("☑ queued {} task(s) for sequential execution", batch.tasks.len()),
             });
             wasm_bindgen_futures::spawn_local(drive_batch(batch));
+        }
+
+        Command::RunBenchmark => {
+            if STATE.with(|s| s.borrow().running) {
+                emit(Event::Error {
+                    thread: conv(),
+                    scope: "bench".to_string(),
+                    message: "cannot start a benchmark while a run is in progress — press stop first."
+                        .to_string(),
+                });
+                return;
+            }
+            wasm_bindgen_futures::spawn_local(run_benchmark_suite());
         }
     }
 }

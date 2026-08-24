@@ -55,6 +55,11 @@ pub enum Command {
     /// the queue survives tab discards (it persists beside the resume
     /// marker); the user pressing stop cancels whatever is left.
     RunBatch { tasks: Vec<BatchTask> },
+    /// run the internal eval suite: pinned self-edit tasks through RunBatch,
+    /// then grade the working tree against mechanical checkers. results land
+    /// in vanish-bench/report.json and Event::BenchmarkFinished carries the
+    /// scorecard.
+    RunBenchmark,
 }
 
 /// one unit of queued work. `id` is caller-chosen (e.g. "bench-001") and is
@@ -230,6 +235,10 @@ pub enum Event {
         /// queue short.
         status: String,
     },
+    /// the internal eval suite finished grading. `passed`/`total` are the
+    /// headline; the full per-task report lives in vanish-bench/report.json
+    /// and in the scorecard note that precedes this event.
+    BenchmarkFinished { passed: usize, total: usize },
 }
 
 /// one thread as the sidebar shows it.

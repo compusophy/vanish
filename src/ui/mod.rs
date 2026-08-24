@@ -849,6 +849,18 @@ fn wire_controls(ui: &Shared) {
         });
     }
 
+    // benchmark: run the pinned self-edit suite and grade it mechanically.
+    // the button is a thin wrapper over the same command an external harness
+    // would post, so the ui can never drift from the programmatic path.
+    {
+        let ui = ui.clone();
+        on_click("run-benchmark", move || {
+            let worker = ui.borrow().worker.clone();
+            send(&worker, &Command::RunBenchmark);
+            feed::note("benchmark queued — pinned tasks will run one by one");
+        });
+    }
+
     // editor close: just hides the pane; nothing is lost, the working tree
     // already has whatever was saved.
     {
