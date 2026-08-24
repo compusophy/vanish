@@ -81,6 +81,16 @@ pub struct BatchResult {
 }
 
 impl Config {
+    /// where the ui mirrors the saved config for the worker to self-load at
+    /// boot (opfs is visible from both contexts; localStorage is not).
+    pub const MIRROR_PATH: &'static str = "vanish-config/config.json";
+}
+
+/// opfs path of the config mirror, as a plain constant for callers that have
+/// no Config value handy.
+pub const CONFIG_MIRROR_PATH: &str = Config::MIRROR_PATH;
+
+impl Config {
     /// whether there is any point contacting the services yet.
     pub fn is_usable(&self) -> bool {
         !self.openrouter_key.is_empty()

@@ -90,6 +90,49 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [ ] **RED BUILD 0582489 — fix in flight, vercel/native cause unidentified**.
+      the two-sessions landing commit failed BOTH gates. workflow cause found
+      and fixed (--all-targets on wasm32 → E0463; now --lib --bins, pinned by
+      ci_gate). the VERCEL failure is a separate native-gate/wasm failure not
+      yet diagnosed: the two stranded eval suites (loop_nervous_system,
+      ci_gate) had never compiled anywhere before landing. the fix commit
+      adds $GITHUB_STEP_SUMMARY mirroring to the gate + workflow so the next
+      red build's actual compiler output is readable via the PUBLIC check-run
+      api (job logs need admin). NEXT RUN: commit the fix, check_deployment;
+      if still red, read the summary from the check run — no more blind
+      debugging. also verify the opfs config mirror seeds (one settings save)
+      and that boot_worker self-configures (⚙ note in feed).
+- [ ] live verification owed: ∞ loop restart after failure/step-limit;
+      stop mid-restart keeps it down; browser close+reopen within 12h
+      resumes; restart budget saturates at 6/hour with the pause note.
+
+- [x] **UNBLOCK ALL COMMITS — RESOLVED (agent/ci-gate-and-loop-survival)**.
+      user added Workflows rw to the token; sync_repo confirmed the tree at
+      dd3734e with all ten dirty files intact, work moved to
+      agent/ci-gate-and-loop-survival (git_create_branch carries dirty
+      files; git_checkout refuses them) and landed in one atomic commit,
+      then promoted through a green-checked pr. docs/ci-workflow.yml is a
+      retired pointer stub now that .github/workflows/ci.yml is live —
+      do not re-copy it; tests/ci_gate.rs enforces the live file.
+
+## landed (overnight-loop survival + ci gate, agent/ci-gate-and-loop-survival)
+
+- [x] **overnight-loop survival**: decide_after_run_end restarts
+      loop-mode runs 5s after failed/step_limit/completed endings (never
+      after stop, never off-loop-mode, never onto a thread the user
+      switched to, and NEVER for batch tasks — the driver owns its queue,
+      a successor there races it or ghosts after drain; found in review,
+      signature gained an in_batch flag + eval);
+      resume_marker_is_fresh expires boot markers at 12h with an explicit
+      too-old note instead of surprise runs; RestartBudget caps automatic
+      restarts at 6/hour, resets on manual run. evals in
+      tests/loop_nervous_system.rs incl. negative controls.
+      live verification still owed: toggle ∞, force a failure,
+      watch "∞ loop mode continues — restarting in 5s", confirm stop
+      mid-restart keeps the loop down; ALSO verify a full browser close +
+      reopen within 12h continues the loop (marker → resume → loop_mode
+      persists via saved Config → continuation re-arms).
+
 - [ ] **v1 / benchmark readiness** — build order: ~~(1) auto-reconcile~~
       DONE · ~~(2) batch/task-queue + export~~ DONE (2249454) ·
       ~~(3) internal eval suite~~ **DONE (c8c7c6c)** → (4) branch

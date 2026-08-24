@@ -223,7 +223,26 @@ fn save_config(cfg: &Config) -> Result<(), String> {
         .set_item(STORE, &raw)
         // a silent failure here is why settings used to appear to save and
         // then come back empty after a reload.
-        .map_err(|_| "browser refused to persist settings (storage full or blocked)".to_string())
+        .map_err(|_| "browser refused to persist settings (storage full or blocked)".to_string())?;
+
+    // mirror to opfs so the worker can self-configure at boot. localStorage
+    // belongs to the ui thread alone; without this mirror the worker starts
+    // credential-blind every reload, which once stranded it unable to read
+    // its own build logs until a human re-saved settings by hand.
+    // fire-and-forget: the localStorage save already succeeded, and a mirror
+    // failure only delays worker self-config, so it must never block or
+    // undo the user's save — but it must not be silent either (D4).
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) =
+            crate::platform::opfs::write(crate::protocol::CONFIG_MIRROR_PATH, &raw).await
+        {
+            feed::error(
+                "settings",
+                &format!("could not mirror config for the agent worker: {e}"),
+            );
+        }
+    });
+    Ok(())
 }
 
 // ---- rail collapse -----------------------------------------------------
