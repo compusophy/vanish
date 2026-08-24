@@ -230,6 +230,120 @@ impl BatchState {
     }
 }
 
+// ---- automatic loop continuation ------------------------------------------
+//
+// loop mode promises "run until a human stops it". three endings are not a
+// human stopping: the failure budget giving up, the step ceiling, and
+// (defensively) completion. each of those used to simply end the run — so
+// an overnight loop died quietly at 2am and looked, from the feed, like it
+// had never been asked to continue. these pure functions decide whether a
+// run that just ended should be followed by another one.
+
+/// what the worker should do after a run ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopContinuation {
+    /// start another run on the same thread after a delay.
+    Restart,
+    /// leave the run ended.
+    LetEnd,
+}
+
+/// may an ended run be followed by another one, automatically?
+///
+/// - loop mode off: a run is a unit of work with an end. never restart.
+/// - reason "stopped": NEVER restart, even in loop mode. stop is the only
+///   escape hatch from a wedged run (D9); second-guessing it would trap
+///   the user inside a loop they explicitly tried to kill.
+/// - the run belongs to a batch: NEVER restart. the batch driver owns the
+///   queue and starts the next task itself — a successor run here would
+///   race the driver or fire as a ghost after the queue drains.
+/// - the user switched to another thread mid-run: restarting there would
+///   startle the person typing on the thread they chose. skip; the boot
+///   resume machinery still covers genuine interruptions.
+/// - anything else (failed, step_limit, completed): restart. these are
+///   deaths an attended user would shrug off and relaunch — exactly what
+///   an unattended loop needs done for it.
+pub fn decide_after_run_end(
+    reason: &str,
+    loop_mode: bool,
+    still_on_thread: bool,
+    in_batch: bool,
+) -> LoopContinuation {
+    if !loop_mode {
+        return LoopContinuation::LetEnd;
+    }
+    if reason == "stopped" {
+        return LoopContinuation::LetEnd;
+    }
+    if in_batch {
+        return LoopContinuation::LetEnd;
+    }
+    if !still_on_thread {
+        return LoopContinuation::LetEnd;
+    }
+    LoopContinuation::Restart
+}
+
+/// how far back a resume marker may be trusted. a marker hours old is a
+/// pause button; a marker DAYS old is archaeology — auto-resuming it risks
+/// resurrecting something the user considers finished, on a machine state
+/// that no longer exists. twelve hours comfortably spans an overnight run.
+pub const RESUME_MARKER_MAX_AGE_MS: f64 = 12.0 * 3_600_000.0;
+
+/// should boot continue the run this marker describes?
+///
+/// a future timestamp counts as fresh: the device clock moving backwards
+/// between write and read should not cost the user their run.
+pub fn resume_marker_is_fresh(interrupted_at_ms: f64, now_ms: f64) -> bool {
+    now_ms - interrupted_at_ms <= RESUME_MARKER_MAX_AGE_MS
+}
+
+/// bounds automatic restarts so "the loop continues" cannot become a
+/// crash loop: a transcript that fails within seconds of every start, or a
+/// revoked key, would otherwise cycle run-after-run until the credits run
+/// dry. N attempts per rolling window, oldest falling off; a MANUAL run
+/// resets it, because a human pressing run is the strongest possible
+/// signal the work is still wanted.
+pub const RESTART_WINDOW_MS: f64 = 3_600_000.0;
+pub const MAX_RESTARTS_PER_WINDOW: u32 = 6;
+
+#[derive(Debug)]
+pub struct RestartBudget {
+    window_ms: f64,
+    max: usize,
+    stamps: Vec<f64>,
+}
+
+impl RestartBudget {
+    pub fn new(window_ms: f64, max: u32) -> Self {
+        Self {
+            window_ms,
+            max: max as usize,
+            stamps: Vec::new(),
+        }
+    }
+
+    /// ask to spend one restart. true = allowed (and recorded); false =
+    /// the window is saturated and the loop should stay down.
+    pub fn record(&mut self, now_ms: f64) -> bool {
+        self.stamps.retain(|t| now_ms - *t <= self.window_ms);
+        if self.stamps.len() >= self.max {
+            return false;
+        }
+        self.stamps.push(now_ms);
+        true
+    }
+
+    /// a manual run clears crash-loop suspicion entirely.
+    pub fn reset(&mut self) {
+        self.stamps.clear();
+    }
+
+    pub fn used(&self) -> usize {
+        self.stamps.len()
+    }
+}
+
 // ---- transcript well-formedness -----------------------------------------
 //
 // the invariant everything above protects, stated once and checked
