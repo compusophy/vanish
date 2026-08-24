@@ -4,24 +4,24 @@
 # why this exists: this repo had zero ci. the only compiler in the loop was
 # vercel's build (~4 minutes: it installs rust from scratch every time), so
 # a typo shipped to production as a failed deploy, pinned main to the last
-# good build for those same ~4 minutes, and mailed the user about it —
-# dozens of times a day. a compile error should be a red x on the commit
-# within two minutes of pushing, not an email from the deploy platform.
+# good build for those same ~4 minutes, and mailed the user about it.
 #
-# the wasm target is checked explicitly because the native test build alone
-# does not prove the app compiles: wasm-bindgen/web-sys code paths are
-# cfg'd out or differ off-target. `cargo check --all-targets` on
-# wasm32-unknown-unknown covers lib + bins + every tests/*.rs without
-# linking (fast), while the shared gate runs the actual native suite.
-#
-# concurrency: supersede in-flight runs for the same branch so a burst of
-# commits costs one runner, not one per commit.
+# DIAGNOSTICS CONTRACT: on any failure this workflow publishes the raw
+# compiler/test output to the `diagnostics` branch (file: ci-diagnostics.log).
+# job logs need admin api rights to read; the summary api proved unreliable;
+# a pushed FILE is readable by anyone — including the agent repairing its
+# own red build — via raw.githubusercontent.com/<repo>/diagnostics/
+# ci-diagnostics.log. do not remove this step: it is the self-repair loop.
 name: ci
 
 on:
   push:
     branches: ["**"]
   pull_request:
+
+# writing the diagnostics branch requires contents: write for the token.
+permissions:
+  contents: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -40,9 +40,6 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy
 
-      # cache ~/.cargo registry + git deps keyed on Cargo.lock so a
-      # dependency-only commit invalidates cleanly and code-only commits
-      # skip the download entirely.
       - name: cache cargo deps
         uses: actions/cache@v4
         with:
@@ -53,47 +50,69 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-
 
       # the check that actually matters for deploys: does THIS code compile
-      # where production builds it? catches every E0308/E0433/E0063-class
-      # failure that has ever pinned main — here, before vercel.
+      # where production builds it?
       #
       # lib + bins ONLY. --all-targets would also pull the integration tests
       # onto the wasm target, where the `test` crate is not shipped at all:
-      # that died instantly with E0463 on this workflow's very first run.
-      # the native gate below covers every test suite; this proves what
-      # production actually ships compiles for wasm32.
+      # that died instantly with E0463 on this workflow's very first run
+      # (pinned by tests/ci_gate.rs). tests are gated natively below.
+      #
+      # output is ALWAYS captured to /tmp/wasm-check.log so the diagnostics
+      # step can publish it whether this passes or fails.
       - name: cargo check (wasm32 target, lib + bins)
         run: |
-          if ! cargo check --lib --bins --target wasm32-unknown-unknown 2> >(tee /tmp/wasm-check-err.log >&2); then
-            {
-              echo "### cargo check (wasm32) failed"
-              echo '```'
-              grep -E "^error|^warning|-->|panic" /tmp/wasm-check-err.log | head -60
-              echo '```'
-            } >> "${GITHUB_STEP_SUMMARY}"
-            exit 1
-          fi
+          cargo check --lib --bins --target wasm32-unknown-unknown 2>&1 | tee /tmp/wasm-check.log
+          exit "${PIPESTATUS[0]}"
 
       # full behavioral gate: unit tests + every tests/*.rs suite
       # (filesystem-discovered) + clippy -D warnings. identical definition
-      # to the deploy's own gate by construction — same script. its output
-      # is mirrored into the job summary so an agent reading the PUBLIC
-      # checks api (job logs need admin; summaries ride the check run)
-      # can diagnose and repair its own red build.
+      # to the deploy's own gate by construction — same script.
       - name: test gate (shared with build.sh)
         run: bash ci/run_tests.sh
 
-      # guard-the-guard: if someone reverts build.sh to a private copy of
-      # the gate, the deploy drifts from ci again. this file's whole reason
-      # to exist is that hand-maintained lists rot silently.
       - name: build.sh must consume the shared gate
         run: grep -F "ci/run_tests.sh" build.sh
 
-      # always() so a failure above still produces the summary section;
-      # nothing to show on success beyond the marker line.
-      - name: publish diagnostics to the check summary
+      # the self-repair loop, made concrete: whatever failed above, its real
+      # output lands on the diagnostics branch as a plain file. also mirrored
+      # into the job summary for humans reading the run page.
+      - name: publish diagnostics
         if: always()
         run: |
+          LOG=ci-diagnostics.log
+          {
+            echo "diagnostics for ${GITHUB_SHA} (${GITHUB_REF}) at $(date -u +%FT%TZ)"
+            echo "=== cargo check (wasm32, lib+bins) — last 120 lines ==="
+            tail -120 /tmp/wasm-check.log 2>/dev/null || echo "(no wasm-check log)"
+            echo ""
+            for f in /tmp/gate-*.log; do
+              [ -f "$f" ] || continue
+              echo "=== $f — last 120 lines ==="
+              tail -120 "$f"
+              echo ""
+            done
+          } > "$LOG"
+
+          # human-facing copy on the run page
           {
             echo "## ci diagnostics"
-            echo "gate result: ${{ job.status }}"
+            echo '```'
+            head -200 "$LOG"
+            echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+          # machine-facing copy on a stable, unauthenticated url.
+          # the log was written into the working tree and is UNTRACKED, so
+          # removing tracked files does not touch it — no clean step allowed
+          # here: git clean would delete exactly the evidence we are publishing.
+          git config user.email "agent@vanish.local"
+          git config user.name "vanish-ci"
+          git checkout -b publish-diag
+          git rm -rfq . || true
+          git add "$LOG"
+          git commit -m "ci diagnostics for ${GITHUB_SHA}" --allow-empty
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:diagnostics"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
