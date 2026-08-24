@@ -161,7 +161,7 @@ where
     // synced_head lets a commit past the D10 refusal by design ("first sync
     // of a session passes through"); after auto-reconcile there is no such
     // blind spot — the guard is armed before any work happens.
-    crate::worker::reconciled_head(|sha| workspace.synced_head = sha);
+    crate::worker::reconciled_head(|sha| workspace.synced_head = sha.to_string());
 
     let tool_defs = tools::definitions();
 
