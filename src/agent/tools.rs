@@ -850,7 +850,7 @@ impl Workspace {
                     "head_sha": &s.head_sha[..7.min(s.head_sha.len())],
                     "mergeable": s.mergeable,
                     "deploy_verdict": s.deploy_verdict,
-                    "gate": match &gate { Ok(()) => "OPEN — merge permitted".to_string(), Err(e) => e },
+                    "gate": match &gate { Ok(()) => "OPEN — merge permitted".to_string(), Err(e) => e.clone() },
                 })
                 .to_string())
             }
