@@ -823,7 +823,7 @@ async fn drive_batch(mut batch: crate::agent::control::BatchState) {
             LAST_FINISH.with(|f| f.borrow_mut().take()).unwrap_or_else(|| "failed".to_string())
         };
 
-        batch.complete_current(reason);
+        batch.complete_current(&reason);
         save_batch(&batch);
         write_batch_results(&batch);
 
