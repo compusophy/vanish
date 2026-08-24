@@ -55,11 +55,11 @@ fn commands_round_trip() {
         // the programmatic driver: queued sequential tasks with results.
         Command::RunBatch {
             tasks: vec![
-                crate::protocol::BatchTask {
+                vanish::protocol::BatchTask {
                     id: "bench-001".into(),
                     prompt: "add a doc comment to src/lib.rs".into(),
                 },
-                crate::protocol::BatchTask {
+                vanish::protocol::BatchTask {
                     id: "bench-002".into(),
                     prompt: "fix any clippy warnings".into(),
                 },
@@ -141,7 +141,7 @@ fn events_round_trip() {
         // vanish-batch/results.json file.
         Event::BatchFinished {
             status: "completed".into(),
-            results: vec![crate::protocol::BatchResult {
+            results: vec![vanish::protocol::BatchResult {
                 id: "bench-001".into(),
                 reason: "completed".into(),
                 steps: 4,
