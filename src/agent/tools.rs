@@ -131,7 +131,7 @@ pub fn pr_gate(status: &crate::agent::github::PrStatus) -> Result<(), String> {
         "success" => Ok(()),
         "failure" => Err(format!(
             "pr #{n} head {} FAILED its build — fix before merging, never after",
-            &status.head_sha.chars().take(7).collect::<String>()
+            status.head_sha.chars().take(7).collect::<String>()
         )),
         "pending" => Err(format!(
             "pr #{n} build still running — call pr_status again until it settles"
