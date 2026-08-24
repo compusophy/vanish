@@ -40,7 +40,7 @@ fn timeout_promise(ms: i32) -> Promise {
             &JsValue::TRUE,
         );
         let Ok(set_timeout) = Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .and_then(|f| f.dyn_into::<Function>().map_err(|e| e))
+            .and_then(|f| f.dyn_into::<Function>().ok())
         else {
             return;
         };
@@ -64,7 +64,7 @@ pub async fn sleep_ms(ms: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         let global = js_sys::global();
         let Ok(set_timeout) = Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .and_then(|f| f.dyn_into::<Function>().map_err(|e| e))
+            .and_then(|f| f.dyn_into::<Function>().ok())
         else {
             // no timer available: resolve immediately rather than hanging the
             // caller forever.
@@ -217,8 +217,7 @@ impl EventStream {
             .ok()
             .and_then(|c| c.dyn_into::<Function>().ok())
             .and_then(|c| Reflect::construct(&c, &Array::new()).ok())
-            .ok_or_else(|| "TextDecoder unavailable".to_string())?
-            .into();
+            .ok_or_else(|| "TextDecoder unavailable".to_string())?;
 
         Ok(Self {
             reader,

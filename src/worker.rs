@@ -15,6 +15,9 @@ use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 use crate::agent::llm::Message;
 use crate::protocol::{Command, Config, Event, FinishReason, HistoryTurn};
 
+/// worker state. Default derives: every field's zero value is the real
+/// initial value (empty config/history, no run, nothing reconciled yet).
+#[derive(Default)]
 struct WorkerState {
     config: Config,
     history: Vec<Message>,
@@ -36,20 +39,6 @@ struct WorkerState {
     /// staleness discovery, where a fresh session trusted a snapshot that
     /// predated upstream fixes.
     auto_reconciled: bool,
-}
-
-impl Default for WorkerState {
-    fn default() -> Self {
-        Self {
-            config: Config::default(),
-            history: Vec::new(),
-            running: false,
-            run_seq: 0,
-            stop_requested: false,
-            conversation: String::new(),
-            auto_reconciled: false,
-        }
-    }
 }
 
 thread_local! {

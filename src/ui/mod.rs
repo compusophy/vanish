@@ -605,8 +605,8 @@ fn wire_worker(ui: &Shared) {
     on_error.forget();
 }
 
-fn on_click<F: FnMut() + 'static>(id: &str, mut f: F) {
-    let cb = Closure::<dyn FnMut()>::new(move || f());
+fn on_click<F: FnMut() + 'static>(id: &str, f: F) {
+    let cb = Closure::<dyn FnMut()>::new(f);
     require(id)
         .add_event_listener_with_callback("click", cb.as_ref().unchecked_ref())
         .expect("could not attach click handler");
