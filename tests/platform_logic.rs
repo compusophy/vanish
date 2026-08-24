@@ -123,6 +123,7 @@ fn loop_resume_marker_round_trips_with_defaults() {
         conversation: "conv-9".into(),
         prompt: "keep improving".into(),
         interrupted_at: 1_700_000_000_000.0,
+        loop_mode: true,
     };
     let idx = Index {
         active: "conv-9".into(),
@@ -134,11 +135,46 @@ fn loop_resume_marker_round_trips_with_defaults() {
     let m = back.loop_resume.expect("marker survives");
     assert_eq!(m.conversation, "conv-9");
     assert_eq!(m.prompt, "keep improving");
+    assert!(m.loop_mode);
+
+    // a plain run's marker round-trips with loop_mode false.
+    let plain = serde_json::to_string(&Index {
+        active: "conv-9".into(),
+        items: vec![],
+        loop_resume: Some(LoopResume {
+            conversation: "conv-9".into(),
+            prompt: "one-shot task".into(),
+            interrupted_at: 1_700_000_000_001.0,
+            loop_mode: false,
+        }),
+    })
+    .unwrap();
+    let back: Index = serde_json::from_str(&plain).unwrap();
+    assert!(!back.loop_resume.unwrap().loop_mode);
 
     // and an index saved before loop_resume existed parses with None.
     let old = r#"{"active":"a","items":[]}"#;
     let legacy: Index = serde_json::from_str(old).unwrap();
     assert!(legacy.loop_resume.is_none());
+}
+
+#[test]
+fn markers_from_before_every_run_resumed_still_parse_as_loop_runs() {
+    // markers written by older builds had no loop_mode field; they were
+    // always loop runs, so absence must read as true — otherwise an ota
+    // reload mid-loop would come back as a one-shot resume.
+    let legacy = r#"{
+        "active":"c1",
+        "items":[],
+        "loopResume":{
+            "conversation":"c1",
+            "prompt":"keep improving",
+            "interruptedAt":1700000000000
+        }
+    }"#;
+    let idx: Index = serde_json::from_str(legacy).unwrap();
+    let m = idx.loop_resume.expect("legacy marker parses");
+    assert!(m.loop_mode, "absent loop_mode must default to true");
 }
 
 fn conv(id: &str, updated: f64) -> vanish::platform::transcript::ConversationMeta {
