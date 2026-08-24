@@ -872,9 +872,10 @@ fn snapshot_bench(commit_seen_before: bool) -> impl std::future::Future<Output =
     }
 }
 
-/// run the whole eval suite. returns the report; also writes
-/// vanish-bench/report.json so the score survives a reload.
-async fn run_benchmark_suite() -> crate::agent::bench::BenchReport {
+/// run the whole eval suite. writes vanish-bench/report.json so the score
+/// survives a reload; the return value is for callers that want the report
+/// inline (spawn_local discards it).
+async fn run_benchmark_suite() {
     let tasks: Vec<crate::protocol::BatchTask> = crate::agent::bench::BENCH_TASKS
         .iter()
         .map(|t| crate::protocol::BatchTask {
@@ -922,7 +923,6 @@ async fn run_benchmark_suite() -> crate::agent::bench::BenchReport {
         passed: report.passed(),
         total: report.total(),
     });
-    report
 }
 
 fn handle(command: Command) {

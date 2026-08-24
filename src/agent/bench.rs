@@ -48,6 +48,36 @@ impl Checker {
     }
 }
 
+/// one pinned task. the prompts are deliberately concrete and small: a
+/// benchmark task that needs judgment produces noisy scores. `path`/text
+/// fields are String (not &str) so checkers stay serializable; the const
+/// table pays one to_string() per task at construction, which is nothing.
+macro_rules! contains {
+    ($p:expr, [$($n:expr),* $(,)?]) => {
+        Checker::FileContains {
+            path: $p.to_string(),
+            contains: vec![$($n.to_string()),*],
+        }
+    };
+}
+
+macro_rules! excludes {
+    ($p:expr, [$($n:expr),* $(,)?]) => {
+        Checker::FileExcludes {
+            path: $p.to_string(),
+            excludes: vec![$($n.to_string()),*],
+        }
+    };
+}
+
+/// one pinned task. `id` and `prompt` are &'static str because they are
+/// only ever cloned into BatchTask/BenchEntry, never held long-term.
+pub struct BenchTask {
+    pub id: &'static str,
+    pub prompt: &'static str,
+    pub checker: Checker,
+}
+
 /// the observable state grading reads. built by the worker from opfs after
 /// the whole batch finishes; pure code only ever sees this.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -62,53 +92,35 @@ pub struct BenchSnapshot {
 
 /// one pinned task. the prompts are deliberately concrete and small: a
 /// benchmark task that needs judgment produces noisy scores.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BenchTask {
-    pub id: &'static str,
-    pub prompt: &'static str,
-    pub checker: Checker,
-}
+///
+/// (the earlier duplicate BenchTask definition that stood here was folded
+/// into the one above; the const table below uses the checker macros.)
 
 pub const BENCH_TASKS: &[BenchTask] = &[
     BenchTask {
         id: "bench-read-and-report",
-        prompt: "Read README.md and reply with its first heading. Do not edit any file.",
-        checker: Checker::FileContains {
-            path: "vanish-bench/notes.md",
-            contains: vec!["#"],
-        },
+        prompt: "Read README.md and reply with its first heading in vanish-bench/notes.md.",
+        checker: contains!("vanish-bench/notes.md", ["#"]),
     },
     BenchTask {
         id: "bench-create-file",
         prompt: "Create the file vanish-bench/hello.txt containing exactly the text: hello vanish",
-        checker: Checker::FileContains {
-            path: "vanish-bench/hello.txt",
-            contains: vec!["hello vanish"],
-        },
+        checker: contains!("vanish-bench/hello.txt", ["hello vanish"]),
     },
     BenchTask {
         id: "bench-edit-precise",
         prompt: "In vanish-bench/hello.txt, append a second line reading: line two",
-        checker: Checker::FileContains {
-            path: "vanish-bench/hello.txt",
-            contains: vec!["hello vanish", "line two"],
-        },
+        checker: contains!("vanish-bench/hello.txt", ["hello vanish", "line two"]),
     },
     BenchTask {
         id: "bench-rust-fn",
         prompt: "Add a public function named bench_marker to src/lib.rs returning the u32 value 42. Do not remove anything else.",
-        checker: Checker::FileContains {
-            path: "src/lib.rs",
-            contains: vec!["fn bench_marker"],
-        },
+        checker: contains!("src/lib.rs", ["fn bench_marker"]),
     },
     BenchTask {
         id: "bench-remove-token",
         prompt: "In vanish-bench/todo.md, delete the line containing REMOVE_ME entirely.",
-        checker: Checker::FileExcludes {
-            path: "vanish-bench/todo.md",
-            excludes: vec!["REMOVE_ME"],
-        },
+        checker: excludes!("vanish-bench/todo.md", ["REMOVE_ME"]),
     },
 ];
 
