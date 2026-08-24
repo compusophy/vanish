@@ -40,7 +40,7 @@ fn timeout_promise(ms: i32) -> Promise {
             &JsValue::TRUE,
         );
         let Ok(set_timeout) = Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .and_then(Function::try_from)
+            .and_then(JsCast::dyn_into::<Function>)
         else {
             return;
         };
@@ -64,7 +64,7 @@ pub async fn sleep_ms(ms: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         let global = js_sys::global();
         let Ok(set_timeout) = Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .and_then(Function::try_from)
+            .and_then(JsCast::dyn_into::<Function>)
         else {
             // no timer available: resolve immediately rather than hanging the
             // caller forever.
