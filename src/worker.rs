@@ -173,9 +173,8 @@ pub fn boot_worker() {
         // unlike the marker this is NOT cleared on read: the queue survives
         // repeated boots until it drains or is cancelled.
         let parked = crate::platform::transcript::get_batch().await;
-        let resumed_batch = parked.as_deref().and_then(load_batch_from);
-        match (parked, resumed_batch) {
-            (Some(_), Some(batch)) => {
+        match parked.map(|json| (load_batch_from(&json), json)) {
+            Some((Some(batch), _)) => {
                 emit(Event::Note {
                     thread: conv(),
                     text: format!(
@@ -186,7 +185,7 @@ pub fn boot_worker() {
                 BATCH.with(|b| *b.borrow_mut() = Some(batch.clone()));
                 wasm_bindgen_futures::spawn_local(drive_batch(batch));
             }
-            (Some(_), None) => {
+            Some((None, _)) => {
                 // unparsable state would otherwise sit there forever; drop it
                 // loudly rather than silently (D4).
                 crate::platform::transcript::clear_batch().await;
@@ -196,7 +195,7 @@ pub fn boot_worker() {
                     message: "a parked batch was unreadable and has been discarded".to_string(),
                 });
             }
-            (None, None) => {}
+            None => {}
         }
 
         // every run's promise now survives its own death, not just loop
@@ -819,7 +818,7 @@ async fn drive_batch(mut batch: crate::agent::control::BatchState) {
 
         let superseded = STATE.with(|s| s.borrow().run_seq != my_seq);
         let reason = if superseded {
-            "stopped"
+            "stopped".to_string()
         } else {
             LAST_FINISH.with(|f| f.borrow_mut().take()).unwrap_or_else(|| "failed".to_string())
         };
