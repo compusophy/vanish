@@ -95,7 +95,7 @@ pub struct BenchSnapshot {
 ///
 /// (the earlier duplicate BenchTask definition that stood here was folded
 /// into the one above; the table below uses the checker macros.)
-
+///
 /// the suite is built once, lazily: Checker owns Strings, and String
 /// construction is not const-capable on stable rust (E0015), so a
 /// `const TABLE` cannot hold checkers directly.

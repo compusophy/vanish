@@ -849,26 +849,22 @@ thread_local! {
 // agent::bench (pure); this is only io and sequencing.
 
 /// did a git commit land since the benchmark started? the commit event is
-/// emitted by the tool layer; watching the feed would be fragile, so the
-/// worker records the last committed sha it saw instead.
-fn snapshot_bench(commit_seen_before: bool) -> impl std::future::Future<Output = crate::agent::bench::BenchSnapshot> {
-    async move {
-        let mut files = std::collections::BTreeMap::new();
-        for path in crate::agent::bench::checked_paths() {
-            match crate::platform::opfs::read(path).await {
-                Ok(body) => {
-                    files.insert(path.to_string(), body);
-                }
-                // an unreadable file is indistinguishable from a missing one
-                // for checker purposes: both fail FileExists.
-                Err(_) => {}
-            }
+/// emitted by the tool layer; watching the feed would be fragile, so this
+/// snapshot records only file facts today (has_commit stays a parameter
+/// for when commit observation lands).
+async fn snapshot_bench(commit_seen_before: bool) -> crate::agent::bench::BenchSnapshot {
+    let mut files = std::collections::BTreeMap::new();
+    for path in crate::agent::bench::checked_paths() {
+        // an unreadable file is indistinguishable from a missing one for
+        // checker purposes: both fail FileExists.
+        if let Ok(body) = crate::platform::opfs::read(path).await {
+            files.insert(path.to_string(), body);
         }
-        crate::agent::bench::BenchSnapshot {
-            files,
-            test_count: 0,
-            has_commit: commit_seen_before,
-        }
+    }
+    crate::agent::bench::BenchSnapshot {
+        files,
+        test_count: 0,
+        has_commit: commit_seen_before,
     }
 }
 
