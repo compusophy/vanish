@@ -76,10 +76,75 @@ pub fn should_auto_reconcile(github_usable: bool, already_reconciled: bool) -> b
     github_usable && !already_reconciled
 }
 
+// ---- branch policy (STACKED_PRS_PLAN §4; D10's sibling for refs) -----------
+//
+// main is promoted, never pushed blind. the rules live here as pure
+// functions so tests can pin them; the tool layer only applies verdicts.
+
+/// the production ref. every rule below keys off this one name.
+pub const PROTECTED_BRANCH: &str = "main";
+
+/// which branch a conversation commits to. pure: pinned by tests.
+///
+/// - a conversation that has claimed an agent/ branch keeps it (stable
+///   identity across runs — re-deriving would scatter work).
+/// - otherwise the DEFAULT is isolation: agent work lands on
+///   `agent/{conversation-id}`, never on main directly.
+pub fn branch_for_conversation(current: Option<&str>, conversation_id: &str) -> String {
+    match current {
+        Some(b) if Github::is_agent_ref(b) => b.to_string(),
+        _ => format!("agent/{conversation_id}"),
+    }
+}
+
+/// may a commit land directly on `branch`? pure: pinned by tests.
+///
+/// direct commits to the protected branch are refused with guidance;
+/// anything else (agent/* today, future human branches) passes through.
+pub fn commit_allowed_on(branch: &str) -> Result<(), String> {
+    if branch == PROTECTED_BRANCH {
+        return Err(format!(
+            "REFUSED: '{PROTECTED_BRANCH}' is protected — commit to an agent/ branch \
+             (git_create_branch + git_checkout) and promote it with open_pr once checks pass."
+        ));
+    }
+    Ok(())
+}
+
+/// the merge gate: when may pr #n land on the protected branch? pure over
+/// PrStatus so the whole discipline is testable without network access.
+///
+/// - mergeable must be a computed true (None = github still counting:
+///   merging then is a coin flip, so we wait);
+/// - ci must have SETTLED GREEN. "pending" refuses (a red build discovered
+///   after merge is the expensive kind); "none" refuses too — an absent
+///   signal is not a passing one, it is an unread one (D4).
+pub fn pr_gate(status: &crate::agent::github::PrStatus) -> Result<(), String> {
+    let n = status.number;
+    if status.mergeable != Some(true) {
+        return Err(format!(
+            "pr #{n} is not mergeable yet (mergeable={:?}) — resolve conflicts first",
+            status.mergeable
+        ));
+    }
+    match status.deploy_verdict.as_str() {
+        "success" => Ok(()),
+        "failure" => Err(format!(
+            "pr #{n} head {} FAILED its build — fix before merging, never after",
+            &status.head_sha.chars().take(7).collect::<String>()
+        )),
+        "pending" => Err(format!(
+            "pr #{n} build still running — call pr_status again until it settles"
+        )),
+        other => Err(format!(
+            "pr #{n} has no settled check verdict ({other}) — no green signal, no merge"
+        )),
+    }
+}
+
 /// the current wall-clock time in milliseconds since the unix epoch.
 /// wasm asks the browser (`js_sys::Date`); the native test build falls back
 /// to `std::time`. no network request is involved either way.
-pub fn now_epoch_ms() -> i64 {
     #[cfg(target_arch = "wasm32")]
     {
         js_sys::Date::now() as i64
@@ -240,6 +305,84 @@ pub fn definitions() -> serde_json::Value {
             "type": "object",
             "properties": { "message": { "type": "string" } },
             "required": ["message"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "git_create_branch",
+          "description": "create a new agent/* branch at the current head and switch this session to it. only names under agent/ are allowed; main is protected.",
+          "parameters": {
+            "type": "object",
+            "properties": { "name": { "type": "string", "description": "branch name; must start with agent/, e.g. agent/fix-d10-guard" } },
+            "required": ["name"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "git_checkout",
+          "description": "switch this session to a different branch (must be an agent/ branch, or the protected base branch for read-only work). the working tree is re-synced from that branch's head — commit or accept loss of dirty files first.",
+          "parameters": {
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "open_pr",
+          "description": "open a pull request from the current agent/ branch into main, with title and body.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": { "type": "string" },
+              "body": { "type": "string", "description": "what changed and why; verification evidence" }
+            },
+            "required": ["title", "body"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "pr_status",
+          "description": "read a pull request's mergeability and ci verdicts. call before merging; the build must be settled green.",
+          "parameters": {
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "merge_pr",
+          "description": "merge a pull request into main (squash). REFUSED unless github reports it mergeable AND its build checks are green — never merge red, never merge blind.",
+          "parameters": {
+            "type": "object",
+            "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "diff_branches",
+          "description": "list files changed between two refs (the parallel-diff view) — what a merge would carry.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "base": { "type": "string" },
+              "head": { "type": "string" }
+            },
+            "required": ["base", "head"]
           }
         }
       },
@@ -557,6 +700,11 @@ impl Workspace {
                     );
                 }
 
+                // branch policy: main is promoted, never pushed blind. a
+                // direct commit to it is refused with the escape hatch named
+                // (D9 applies to refusals too: always say the way out).
+                commit_allowed_on(&self.github.branch)?;
+
                 // D10: a commit built on unreconciled local files silently
                 // reverts whatever upstream landed. three incidents and
                 // counting — one reverted three commits while looking like a
@@ -613,6 +761,123 @@ impl Workspace {
                     "message": message,
                 })
                 .to_string())
+            }
+
+            "git_create_branch" => {
+                let name = arg(&args, "name").ok_or("git_create_branch requires 'name'")?;
+                if !Github::is_agent_ref(name) {
+                    return Err(format!(
+                        "REFUSED: '{name}' is not an agent/ branch — only refs under agent/ may be created."
+                    ));
+                }
+                // base the new branch on THIS session's verified head: it is
+                // the newest sha this tree provably matches (D10 discipline),
+                // so the branch starts from content we can vouch for.
+                let at = if self.synced_head.is_empty() {
+                    self.github.head_sha().await?
+                } else {
+                    self.synced_head.clone()
+                };
+                self.github.create_ref(name, &at).await?;
+                self.github.branch = name.to_string();
+                self.synced_head = at.clone();
+                Ok(serde_json::json!({
+                    "success": true,
+                    "branch": name,
+                    "created_at": &at[..7.min(at.len())],
+                    "note": "session switched to the new branch; commits now land there.",
+                })
+                .to_string())
+            }
+
+            "git_checkout" => {
+                let name = arg(&args, "name").ok_or("git_checkout requires 'name'")?;
+                let dirty = self.dirty();
+                if !dirty.is_empty() {
+                    return Err(format!(
+                        "{} uncommitted file(s) ({:?}) would be lost by switching branches — commit first.",
+                        dirty.len(),
+                        dirty
+                    ));
+                }
+                self.github.branch = name.to_string();
+                // re-verify against the new ref and reconcile the cache, so
+                // reads after a switch serve THAT branch's content.
+                let report = self.reconcile_against_branch().await?;
+                Ok(serde_json::json!({
+                    "success": true,
+                    "branch": name,
+                    "head": &report.head[..7.min(report.head.len())],
+                    "files_on_branch": report.files_on_branch,
+                })
+                .to_string())
+            }
+
+            "open_pr" => {
+                let title = arg(&args, "title").ok_or("open_pr requires 'title'")?;
+                let body = arg(&args, "body").unwrap_or("");
+                let head = self.github.branch.clone();
+                // prs come FROM agent/* INTO main. opening one from main is
+                // meaningless; from anything else it is unreviewed surface.
+                if !Github::is_agent_ref(&head) {
+                    return Err(format!(
+                        "REFUSED: prs are opened from an agent/ branch, not '{head}' — create one with git_create_branch first."
+                    ));
+                }
+                let (number, url) =
+                    self.github.create_pr(&head, PROTECTED_BRANCH, title, body).await?;
+                Ok(serde_json::json!({
+                    "success": true,
+                    "number": number,
+                    "url": url,
+                    "head": head,
+                    "base": PROTECTED_BRANCH,
+                    "note": "pr opened. call pr_status until checks settle green, then merge_pr.",
+                })
+                .to_string())
+            }
+
+            "pr_status" => {
+                let number = args
+                    .get("number")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("pr_status requires 'number'")?;
+                let s = self.github.pr_status(number).await?;
+                let gate = pr_gate(&s);
+                Ok(serde_json::json!({
+                    "number": s.number,
+                    "head_sha": &s.head_sha[..7.min(s.head_sha.len())],
+                    "mergeable": s.mergeable,
+                    "deploy_verdict": s.deploy_verdict,
+                    "gate": match &gate { Ok(()) => "OPEN — merge permitted".to_string(), Err(e) => e },
+                })
+                .to_string())
+            }
+
+            "merge_pr" => {
+                let number = args
+                    .get("number")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("merge_pr requires 'number'")?;
+                // the gate is checked HERE, immediately before the merge call:
+                // a verdict read earlier in the run says nothing about right now.
+                let s = self.github.pr_status(number).await?;
+                pr_gate(&s)?;
+                let merged = self.github.merge_pr(number).await?;
+                Ok(serde_json::json!({
+                    "success": true,
+                    "number": number,
+                    "github_response": merged.chars().take(300).collect::<String>(),
+                    "note": "merged. main has been PROMOTED through a green-gated pr, not pushed blind.",
+                })
+                .to_string())
+            }
+
+            "diff_branches" => {
+                let base = arg(&args, "base").ok_or("diff_branches requires 'base'")?;
+                let head = arg(&args, "head").ok_or("diff_branches requires 'head'")?;
+                let files = self.github.compare(base, head).await?;
+                Ok(serde_json::json!({ "base": base, "head": head, "files": files }).to_string())
             }
 
             "sync_repo" => {

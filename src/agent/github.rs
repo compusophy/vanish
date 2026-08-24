@@ -63,6 +63,14 @@ struct TreeResponse {
     truncated: bool,
 }
 
+/// one file in a compare result: what changed and how.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompareFile {
+    pub path: String,
+    pub status: String,
+    pub changes: u32,
+}
+
 fn field(v: &serde_json::Value, key: &str) -> String {
     v.get(key)
         .and_then(|x| x.as_str())
@@ -425,4 +433,146 @@ impl Github {
         let short = new_commit.sha.chars().take(7).collect::<String>();
         Ok((new_commit.sha, short))
     }
+
+    // ---- agent/* branch workflow (STACKED_PRS_PLAN §4.1) -------------------
+    //
+    // main is promoted, never pushed blind: agent work lands on agent/*
+    // refs and reaches main through a merged pr whose checks are green.
+    // these are thin REST wrappers; the policy (which names are allowed,
+    // when a merge is permitted) lives in tools::branch_policy so it can
+    // be pinned by tests without network access.
+
+    /// true if this ref name may be created/moved/deleted by the agent.
+    /// pure + pub: tests pin the exact boundary.
+    pub fn is_agent_ref(branch: &str) -> bool {
+        branch.starts_with("agent/")
+    }
+
+    /// create `branch` at `at_sha`. refuses to touch anything outside
+    /// agent/* — a typo'd or hostile name must fail here, not at the api
+    /// where it would silently succeed against a real branch.
+    pub async fn create_ref(&self, branch: &str, at_sha: &str) -> Result<String, String> {
+        if !Self::is_agent_ref(branch) {
+            return Err(format!(
+                "REFUSED: '{branch}' is not an agent/ branch — the agent may only create refs under agent/"
+            ));
+        }
+        let payload = serde_json::json!({
+            "ref": format!("refs/heads/{branch}"),
+            "sha": at_sha,
+        });
+        let _ = self
+            .post(
+                &format!("/repos/{}/git/refs", self.repo),
+                &payload.to_string(),
+                &format!("creating branch {branch}"),
+            )
+            .await?;
+        Ok(branch.to_string())
+    }
+
+    /// files changed between two refs — the parallel-diff view.
+    pub async fn compare(&self, base: &str, head: &str) -> Result<Vec<CompareFile>, String> {
+        let body = self
+            .get(
+                &format!("/repos/{}/compare/{}...{}", self.repo, base, head),
+                "comparing refs",
+            )
+            .await?;
+        let v: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("bad compare response: {e}"))?;
+        let mut out = Vec::new();
+        for f in v.get("files").and_then(|f| f.as_array()).into_iter().flatten() {
+            out.push(CompareFile {
+                path: field(f, "filename"),
+                status: field(f, "status"),
+                changes: f.get("changes").and_then(|c| c.as_u64()).unwrap_or(0) as u32,
+            });
+        }
+        Ok(out)
+    }
+
+    /// open a pull request head -> base.
+    pub async fn create_pr(
+        &self,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<(u64, String), String> {
+        let payload = serde_json::json!({
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        });
+        let resp = self
+            .post(
+                &format!("/repos/{}/pulls", self.repo),
+                &payload.to_string(),
+                "opening pull request",
+            )
+            .await?;
+        let v: serde_json::Value =
+            serde_json::from_str(&resp).map_err(|e| format!("bad pr response: {e}"))?;
+        let number = v
+            .get("number")
+            .and_then(|n| n.as_u64())
+            .ok_or("pr response had no number")?;
+        let url = field(&v, "html_url");
+        Ok((number, url))
+    }
+
+    /// merge a pull request. squash keeps main's history one-commit-per-unit,
+    /// which matches how the agent already commits.
+    pub async fn merge_pr(&self, number: u64) -> Result<String, String> {
+        let payload = serde_json::json!({ "merge_method": "squash" });
+        let resp = request(
+            "PUT",
+            &format!("{API}/repos/{}/pulls/{}/merge", self.repo, number),
+            &self.headers(),
+            Some(&payload.to_string()),
+        )
+        .await?;
+        // 405/409 mean conflict/unmergeable — surface github's own words.
+        Self::check(resp, &format!("merging pr #{number}"))
+    }
+
+    /// mergeability + ci state of a pr, as one verdict string:
+    /// "clean" | "dirty" | "unknown" combined with the head's deploy checks.
+    pub async fn pr_status(&self, number: u64) -> Result<PrStatus, String> {
+        let body = self
+            .get(&format!("/repos/{}/pulls/{}", self.repo, number), "reading pull request")
+            .await?;
+        let v: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| format!("bad pr response: {e}"))?;
+        let mergeable = v.get("mergeable").and_then(|m| m.as_bool());
+        let head_sha = field(v.get("head").unwrap_or(&serde_json::Value::Null), "sha");
+
+        let deploy = if head_sha.is_empty() {
+            DeployState::from(Vec::new())
+        } else {
+            self.deployment_state(&head_sha).await?
+        };
+
+        Ok(PrStatus {
+            number,
+            head_sha,
+            mergeable,
+            deploy_verdict: deploy.verdict,
+        })
+    }
+}
+
+/// everything merge discipline needs to know about one pr. plain data so
+/// the decision (tools::pr_gate) stays pure and testable.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrStatus {
+    pub number: u64,
+    pub head_sha: String,
+    /// github's three-valued answer: Some(true/false) once computed,
+    /// None while github is still working it out.
+    pub mergeable: Option<bool>,
+    /// "success" | "failure" | "pending" | "none"
+    pub deploy_verdict: String,
 }
