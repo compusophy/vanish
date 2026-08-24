@@ -2,6 +2,20 @@
 
 > standing directives and open work. read at the start of a run, update at
 > the end. user feedback lands here once and stays honored.
+>
+> READ ORDER: CHARTER.md (mission + constitution) → this file →
+> memory/status.md. the charter outranks tactics; D-rules are its case law.
+
+## the mission (CHARTER.md, 2026-08-25)
+
+build toward recursive self-improvement: an agent whose primary work is
+making itself more capable, safely and verifiably — tool → autonomous →
+general. vanish is the vehicle: self-sovereign, browser-resident, no
+infrastructure between it and its work. eight articles govern every run:
+close the loop, evidence over assertion, memory is identity, durability is
+a right, the human is sovereign, honesty is structural, measure the
+gradient, improve the harness not just the output. amendments require the
+owner; the agent may only propose them.
 
 ## the architecture (as of the rust/wasm rebuild)
 
@@ -89,6 +103,50 @@ taskboard) asked for four things. all four are resolved:
       a web worker, which has no request bounding it at all.
 
 ## open work
+
+- [ ] **PROMOTION BLOCKED ON TOKEN SCOPE #3: pull_requests write missing**.
+      open_pr from agent/fix-red-landing-and-self-config → main returned
+      http 403 "Resource not accessible by personal access token" — the
+      fine-grained PAT has contents+workflows but NOT pull requests:
+      read and write. everything else is DONE AND GREEN at head 19c92af
+      (bba0104 = code, 19c92af = memory): both gates pass, all suites
+      green. USER ACTION: add "Pull requests: Read and write" to the
+      token, then open_pr + pr_status until green + merge_pr.
+- [ ] live verification owed: ∞ loop restart after failure/step-limit;
+      stop mid-restart keeps it down; browser close+reopen within 12h
+      resumes; restart budget saturates at 6/hour with the pause note;
+      ⚙ self-config note appears in feed on boot after mirror is seeded.
+- [ ] consider: a guard test that pins build.sh's delegation AND reads
+      ci/run_tests.sh for the same gate id (done); next structural item
+      is verifying committed bytes vs local for EVERY file in an atomic
+      changeset (spot-check rule written into status.md this run).
+
+- [x] **UNBLOCK ALL COMMITS — RESOLVED (agent/ci-gate-and-loop-survival)**.
+      user added Workflows rw to the token; sync_repo confirmed the tree at
+      dd3734e with all ten dirty files intact, work moved to
+      agent/ci-gate-and-loop-survival (git_create_branch carries dirty
+      files; git_checkout refuses them) and landed in one atomic commit,
+      then promoted through a green-checked pr. docs/ci-workflow.yml is a
+      retired pointer stub now that .github/workflows/ci.yml is live —
+      do not re-copy it; tests/ci_gate.rs enforces the live file.
+
+## landed (overnight-loop survival + ci gate, agent/ci-gate-and-loop-survival)
+
+- [x] **overnight-loop survival**: decide_after_run_end restarts
+      loop-mode runs 5s after failed/step_limit/completed endings (never
+      after stop, never off-loop-mode, never onto a thread the user
+      switched to, and NEVER for batch tasks — the driver owns its queue,
+      a successor there races it or ghosts after drain; found in review,
+      signature gained an in_batch flag + eval);
+      resume_marker_is_fresh expires boot markers at 12h with an explicit
+      too-old note instead of surprise runs; RestartBudget caps automatic
+      restarts at 6/hour, resets on manual run. evals in
+      tests/loop_nervous_system.rs incl. negative controls.
+      live verification still owed: toggle ∞, force a failure,
+      watch "∞ loop mode continues — restarting in 5s", confirm stop
+      mid-restart keeps the loop down; ALSO verify a full browser close +
+      reopen within 12h continues the loop (marker → resume → loop_mode
+      persists via saved Config → continuation re-arms).
 
 - [ ] **v1 / benchmark readiness** — build order: ~~(1) auto-reconcile~~
       DONE · ~~(2) batch/task-queue + export~~ DONE (2249454) ·
