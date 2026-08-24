@@ -46,32 +46,26 @@ thread_local! {
 
 /// create the bell, badge and panel if the page does not have them.
 ///
-/// the bell docks into .dock-status (the same row as the run status text),
-/// pushed to the right edge; the panel floats above the dock. both are
-/// created on demand so their existence never depends on hand-maintained
-/// html staying in sync with this module.
+/// the bell is FIXED to the bottom-right corner of the viewport — beside the
+/// harness rail's edge, not inside the prompt container. an earlier version
+/// mounted it into .dock-status (the run-status row above the input box),
+/// which read as if it belonged to the text input; it never did. the panel
+/// floats just above it. both are created on demand so their existence never
+/// depends on hand-maintained html staying in sync with this module.
 fn ensure_dom() {
     if by_id("notif-bell").is_some() {
         return;
     }
 
-    let host = match doc()
-        .query_selector(".dock-status")
-        .ok()
-        .flatten()
-    {
+    let host = match doc().query_selector("body").ok().flatten() {
         Some(h) => h,
         None => {
-            // no dock either means the page itself failed to render; say so
-            // loudly rather than mounting notifications into nothing.
+            // no body means the page itself failed to render; say so loudly
+            // rather than mounting notifications into nothing.
             web_sys::console::error_1(&JsValue::from_str(
-                "notify: no .dock-status found — mounting the bell on <body> as a fallback",
+                "notify: no <body> element found — the notification centre cannot mount",
             ));
-            doc()
-                .query_selector("body")
-                .ok()
-                .flatten()
-                .expect("notify: no <body> element to mount the bell on")
+            panic!("notify: no <body> element to mount the notification centre on");
         }
     };
 

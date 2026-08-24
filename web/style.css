@@ -576,25 +576,24 @@ textarea:focus {
 }
 
 /* ---- notification centre --------------------------------------------- */
-/* update notices live behind a bell in the dock-status row instead of
-   floating over the stop button. the dom is mounted by notify.rs itself;
+/* update notices live behind a bell FIXED to the bottom-right corner of the
+   viewport — beside the harness rail, never inside the prompt container.
+   an earlier version mounted it into .dock-status, which read as if it
+   belonged to the text input. the dom is mounted by notify.rs itself;
    these rules only dress it. */
 
-.dock-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .notif-bell {
-  margin-left: auto;
-  position: relative;
-  width: 26px;
-  height: 26px;
-  flex-shrink: 0;
+  /* fixed, not flexed: it does not participate in any container layout */
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 55;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  background: rgba(12, 16, 25, 0.9);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
   cursor: pointer;
   padding: 0;
   font-size: 13px;
@@ -602,10 +601,11 @@ textarea:focus {
 }
 .notif-bell::before {
   content: "🔔";
-  font-size: 12px;
+  font-size: 15px;
 }
 .notif-bell:hover {
   background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(0, 240, 180, 0.35);
 }
 
 .notif-badge {
@@ -628,7 +628,8 @@ textarea:focus {
 .notif-panel {
   position: fixed;
   right: 20px;
-  bottom: 84px;
+  /* directly above the bell (bottom 20 + height 34 + 10px gap) */
+  bottom: 64px;
   z-index: 60;
   width: 340px;
   max-height: 60vh;
