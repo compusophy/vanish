@@ -1,0 +1,71 @@
+# pre-deploy verification: every push to any branch compiles against the
+# REAL wasm target and runs the full gate before vercel ever sees it.
+#
+# why this exists: this repo had zero ci. the only compiler in the loop was
+# vercel's build (~4 minutes: it installs rust from scratch every time), so
+# a typo shipped to production as a failed deploy, pinned main to the last
+# good build for those same ~4 minutes, and mailed the user about it —
+# dozens of times a day. a compile error should be a red x on the commit
+# within two minutes of pushing, not an email from the deploy platform.
+#
+# the wasm target is checked explicitly because the native test build alone
+# does not prove the app compiles: wasm-bindgen/web-sys code paths are
+# cfg'd out or differ off-target. `cargo check --all-targets` on
+# wasm32-unknown-unknown covers lib + bins + every tests/*.rs without
+# linking (fast), while the shared gate runs the actual native suite.
+#
+# concurrency: supersede in-flight runs for the same branch so a burst of
+# commits costs one runner, not one per commit.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pinned toolchain; the wasm target matches build.sh exactly.
+      - name: install rust (stable, wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      # cache ~/.cargo registry + git deps keyed on Cargo.lock so a
+      # dependency-only commit invalidates cleanly and code-only commits
+      # skip the download entirely.
+      - name: cache cargo deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # the check that actually matters for deploys: does THIS code compile
+      # where production builds it? catches every E0308/E0433/E0063-class
+      # failure that has ever pinned main — here, before vercel.
+      - name: cargo check (wasm32 target, all targets incl. tests)
+        run: cargo check --all-targets --target wasm32-unknown-unknown
+
+      # full behavioral gate: unit tests + every tests/*.rs suite
+      # (filesystem-discovered) + clippy -D warnings. identical definition
+      # to the deploy's own gate by construction — same script.
+      - name: test gate (shared with build.sh)
+        run: bash ci/run_tests.sh
+
+      # guard the guard: if someone reverts build.sh to a private copy of
+      # the gate, the deploy drifts from ci again. this file's whole reason
+      # to exist is that hand-maintained lists rot silently.
+      - name: build.sh must consume the shared gate
+        run: grep -F "ci/run_tests.sh" build.sh

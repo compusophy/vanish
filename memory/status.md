@@ -3,6 +3,118 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
+## landed this run (the token-scope wall came down — both stranded sessions published)
+
+user granted Workflows: read and write on the PAT, exactly as TASKBOARD
+requested. what happened:
+
+- sync_repo first (D10): tree reconciled at dd3734e, all ten dirty files
+  intact — nothing needed rewriting, exactly as predicted.
+- git_create_branch agent/ci-gate-and-loop-survival (carries dirty files;
+  checkout does not), then ONE atomic commit: ci/run_tests.sh shared gate,
+  build.sh delegation, tests/ci_gate.rs guard-the-guard,
+  .github/workflows/ci.yml LIVE (the workflow-scope commit that 403'd twice
+  before now succeeds — endpoint-specific scope confirmed fixed),
+  control.rs loop-survival decisions + worker wiring +
+  tests/loop_nervous_system.rs evals.
+- docs/ci-workflow.yml converted to a retired pointer stub: with the live
+  workflow landed, a verbatim docs/ copy is just a second definition of ci
+  guaranteed to drift. tests/ci_gate.rs reads only the live path.
+- memory updated in the SAME changeset so a failed publish cannot strand
+  stale claims of success.
+
+
+## landed this run (overnight-loop survival — agent/pre-deploy-ci-gate)
+
+user: "i want a loop to go overnight... many cases kill infinite runs,
+page reloads we tried to fix but didn't." full audit of the resume
+machinery found it mostly WORKS (marker written per run, cleared on end,
+boot adopts marked thread even when not active, batch resumes too) —
+the actual gaps were three decisions, all now pure + pinned:
+
+1. **non-stop endings killed the loop permanently** (THE overnight killer).
+   failure budget give-up, step ceiling, completion — each just ended the
+   run; nothing restarted it. FIX: control::decide_after_run_end(reason,
+   loop_mode, still_on_thread) → Restart/LetEnd; worker spawns a successor
+   run after 5s unless reason=="stopped" (NEVER second-guess stop, D9),
+   loop_mode off, or the user switched threads mid-run (never startle the
+   thread they chose). superseded runs stay dead. unknown future reasons
+   default to continuing in loop mode.
+2. **stale markers resurrected ancient runs**: boot resume had NO age
+   limit. FIX: control::resume_marker_is_fresh — 12h window (spans a work
+   night, not a weekend), backwards-clock safe; older markers emit an
+   explicit "too old to resume automatically" note instead of a surprise
+   run. this is the residue of every past reload-survival incident.
+3. **no crash-loop breaker**: restart-on-death without a budget would pump
+   API credits when something structural broke. FIX: control::RestartBudget
+   — 6 automatic restarts per rolling 1h window, oldest expires, manual
+   Command::Run RESETS it (a human pressing run overrides the breaker).
+   saturation emits "∞ loop paused — press run to resume".
+- tests/loop_nervous_system.rs: 9 new evals pin all three decisions incl.
+  negative controls (stop never restarts; loop-off never restarts;
+  saturated budget refuses; reset revives).
+- live verification still owed: toggle ∞, let a run fail (or hit the step
+  ceiling) unattended, watch "∞ loop mode continues — restarting in 5s",
+  confirm a fresh run starts on the same thread; press stop mid-restart
+  and confirm the loop stays down.
+- COMMIT BLOCKED (second incident): the atomic changeset still contains
+  .github/workflows/ci.yml and the token still lacks the `workflow`
+  scope → POST /git/trees 403s for EVERY commit. also learned this run:
+  git_checkout refuses to carry dirty files across branches (by design),
+  but git_create_branch switches AND takes them along — that is the
+  escape hatch when you started on main with dirty work. work sits on
+  agent/loop-survival-landing at head dd3734e + durable local edits,
+  waiting only on the token scope. nothing needs rewriting.
+- review catch before landing: batch tasks go through start_run, so with
+  loop mode on every completed BATCH task would have triggered an
+  automatic successor — racing the batch driver or ghosting after drain.
+  decide_after_run_end gained an in_batch flag; worker reads
+  BATCH.is_some() at decision time; eval pins all three reasons refused.
+  LESSON: any new "continue automatically" path must enumerate WHO ELSE
+  starts runs (batch driver, boot resume) and defer to them.
+
+## this run: why deploys kept failing, and what landed (agent/pre-deploy-ci-gate)
+
+user asked: "we get so many build errors — can we catch these before
+deploy, or is vercel how we find out?" answer found in the repo itself:
+
+- **the repo had ZERO CI** (api.github.com .../actions/workflows → empty).
+  vercel's ~4min build — which installs rust from scratch every time — was
+  the only compiler in the loop. every E0308/E0433-class mistake shipped as
+  a failed production deploy, pinned main to the last good build for those
+  same ~4 minutes, and mailed the user. that is the email flood, explained.
+- **found while auditing build.sh**: its hardcoded suite list ran SIX of
+  the EIGHT suites on disk — bench_grading and branch_policy were silently
+  never gated by the deploy. hand-maintained lists rot without a sound.
+- **landed on agent/pre-deploy-ci-gate (see TASKBOARD for commit status)**:
+  - `ci/run_tests.sh` — ONE definition of the gate (unit tests + every
+    tests/*.rs via FILESYSTEM DISCOVERY + clippy -D warnings), consumed by
+    both build.sh and ci so they cannot drift. discovery = a new suite is
+    gated from birth; no list to forget to update.
+  - `build.sh` now delegates to it (wasm-build-first ordering preserved:
+    compile errors still report fastest during a deploy).
+  - `tests/ci_gate.rs` — grep-shaped invariants pinning that build.sh keeps
+    delegating to the shared gate and never regains a private suite list,
+    same technique as tests/event_loop_liveness.rs (comments don't survive
+    refactors; greps do).
+  - `docs/ci-workflow.yml` — the full github actions workflow (push+pr on
+    all branches; cargo check --all-targets on wasm32-unknown-unknown —
+    native-only does not prove the app compiles off-target; shared gate;
+    per-ref concurrency cancel), PARKED at docs/ because...
+- **the token-scope wall (new incident class, recorded here because it
+  will recur)**: committing .github/workflows/ci.yml with this repo's PAT
+  fails at POST /git/trees with http 403 "resource not accessible by
+  personal access token" — the `workflow` scope is missing. blobs upload;
+  only the tree naming the workflow path is refused. AND because the
+  harness commits all dirty files atomically, a dirty workflow file
+  POISONS every subsequent git_commit until it lands or leaves the tree.
+  branch creation succeeded earlier the same session, and commits minutes
+  before did too — scope failures are endpoint-specific, not global; do
+  not reason from "commits worked earlier".
+- lesson for every future run: **draft anything permission-sensitive at an
+  unrestricted path first; move into restricted paths LAST**, after
+  verifying scopes against the actual endpoint, not a proxy for it.
+
 ## landed this run (internal eval suite — build order item 3 DONE, c8c7c6c)
 
 YES, vanish can now benchmark itself, end to end:

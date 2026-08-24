@@ -1,0 +1,13 @@
+# this file is retired — the workflow is LIVE at .github/workflows/ci.yml.
+#
+# it was parked here only because this repo's agent token then lacked the
+# `workflow` scope, which makes github refuse any tree that names a path
+# under .github/workflows/. the user granted Workflows: read and write and
+# the live workflow landed in the same atomic commit as the rest of this
+# changeset, so keeping a verbatim copy at docs/ would just be a second
+# definition of ci guaranteed to drift from the real one eventually.
+#
+# tests/ci_gate.rs enforces the LIVE file's contents (wasm target check,
+# shared gate script); nothing here needs maintaining. if you are reading
+# this because you expected the workflow contents: read
+# .github/workflows/ci.yml instead.

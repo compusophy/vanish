@@ -44,50 +44,15 @@ test -f web/pkg/vanish_bg.wasm || { echo "build produced no wasm"; exit 1; }
 test -f web/pkg/vanish.js      || { echo "build produced no js glue"; exit 1; }
 
 # the verification layer: a deploy must not only compile, it must pass the
-# contract tests. this runs natively (no wasm target needed) and covers the
-# wire protocol, path traversal guard, transcript index logic, and the SSE
-# tool-call reassembly — the pure logic where a regression is silent.
+# contract tests — native suite + clippy, warnings fatal. the definition
+# lives in ci/run_tests.sh, SHARED with github actions ci so the two gates
+# cannot drift: ci runs the identical script before vercel ever sees a
+# commit, which is how compile errors became a red check on the commit
+# instead of a failed production deploy discovered four minutes later.
 #
-# placed AFTER the wasm build so a compile error still reports fast. if the
-# native test binary itself fails to COMPILE (e.g. a web-sys linking quirk
-# on the host target), that is surfaced loudly and skipped rather than
-# bricking every deploy — but a compiled test that FAILS is fatal: broken
-# logic must not ship.
-echo "--> running native test suite"
-# serialized + nocapture + per-suite markers: a parallel or captured run can
-# kill the harness before any failing test prints, leaving a log that names
-# nothing. one thread costs seconds; markers and nocapture make every
-# failure self-identifying even in a truncated build log.
-if ! cargo test --lib -- --test-threads=1 --nocapture 2>&1; then
-  echo "!! SUITE FAILED: src/lib.rs unit tests"
-  exit 1
-fi
-for suite in protocol_contract platform_logic loop_nervous_system event_loop_liveness streaming agent_evals; do
-  if ! RUST_BACKTRACE=1 cargo test --test "$suite" -- --test-threads=1 --nocapture 2>&1; then
-    echo ""
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    echo "!! NATIVE TESTS FAILED: suite '$suite'                       !!"
-    echo "!! A failing test means broken logic shipped to production.  !!"
-    echo "!! An uncompilable suite means the verification layer itself !!"
-    echo "!! is broken and must be fixed before the next commit.       !!"
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    exit 1
-  fi
-done
-
-echo "--> running clippy (warnings are fatal)"
-# lints run AFTER tests so a logic failure still reports first. a lint gate
-# that only warns is a lint nobody reads; failing the deploy on warnings is
-# how the gate stays real. -D warnings turns every warning into an error.
-# the minimal rustup profile omits clippy, so it is installed explicitly.
-if ! (rustup component add clippy && cargo clippy --lib --tests -- --deny warnings) 2>&1; then
-  echo ""
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  echo "!! CLIPPY FAILED: fix the warnings above and re-commit   !!"
-  echo "!! A warning gate that only warns is a gate nobody reads. !!"
-  echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  exit 1
-fi
+# placed AFTER the wasm build so a compile error still reports fast.
+echo "--> running verification gate (tests + clippy)"
+bash ./ci/run_tests.sh
 
 
 echo "--> output:"

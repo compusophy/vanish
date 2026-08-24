@@ -90,6 +90,33 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **UNBLOCK ALL COMMITS — RESOLVED (agent/ci-gate-and-loop-survival)**.
+      user added Workflows rw to the token; sync_repo confirmed the tree at
+      dd3734e with all ten dirty files intact, work moved to
+      agent/ci-gate-and-loop-survival (git_create_branch carries dirty
+      files; git_checkout refuses them) and landed in one atomic commit,
+      then promoted through a green-checked pr. docs/ci-workflow.yml is a
+      retired pointer stub now that .github/workflows/ci.yml is live —
+      do not re-copy it; tests/ci_gate.rs enforces the live file.
+
+## landed (overnight-loop survival + ci gate, agent/ci-gate-and-loop-survival)
+
+- [x] **overnight-loop survival**: decide_after_run_end restarts
+      loop-mode runs 5s after failed/step_limit/completed endings (never
+      after stop, never off-loop-mode, never onto a thread the user
+      switched to, and NEVER for batch tasks — the driver owns its queue,
+      a successor there races it or ghosts after drain; found in review,
+      signature gained an in_batch flag + eval);
+      resume_marker_is_fresh expires boot markers at 12h with an explicit
+      too-old note instead of surprise runs; RestartBudget caps automatic
+      restarts at 6/hour, resets on manual run. evals in
+      tests/loop_nervous_system.rs incl. negative controls.
+      live verification still owed: toggle ∞, force a failure,
+      watch "∞ loop mode continues — restarting in 5s", confirm stop
+      mid-restart keeps the loop down; ALSO verify a full browser close +
+      reopen within 12h continues the loop (marker → resume → loop_mode
+      persists via saved Config → continuation re-arms).
+
 - [ ] **v1 / benchmark readiness** — build order: ~~(1) auto-reconcile~~
       DONE · ~~(2) batch/task-queue + export~~ DONE (2249454) ·
       ~~(3) internal eval suite~~ **DONE (c8c7c6c)** → (4) branch

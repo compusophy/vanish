@@ -222,6 +222,26 @@ pub fn boot_worker() {
             None => return,
         };
 
+        // a marker hours old is a pause button; one days old is
+        // archaeology. auto-resuming it would resurrect something the user
+        // reasonably considers finished — the residue of every past attempt
+        // to make reloads survivable was exactly such surprise runs. the
+        // threshold is pure and pinned (control::resume_marker_is_fresh).
+        if !crate::agent::control::resume_marker_is_fresh(
+            marker.interrupted_at,
+            js_sys::Date::now(),
+        ) {
+            let age_h = ((js_sys::Date::now() - marker.interrupted_at) / 3_600_000.0) as u64;
+            emit(Event::Note {
+                thread: conv(),
+                text: format!(
+                    "↺ an interrupted run ({age_h}h old) was found but is too old to \
+                     resume automatically — start it again manually if you want it."
+                ),
+            });
+            return;
+        }
+
         // which conversation should hold the resumed run? refuse to adopt a
         // conversation that no longer exists (a deleted thread must never
         // resurrect as a surprise run) — control::resume_target answers this
@@ -332,6 +352,13 @@ fn start_run(prompt: String) {
 fn spawn_run(config: Config, prompt: String, seq: u64) {
     let is_loop = config.loop_mode;
     let conversation_id = STATE.with(|s| s.borrow().conversation.clone());
+    // kept aside for the automatic loop-continuation below; the async body
+    // moves everything else it captures.
+    let prompt_for_restart = prompt.clone();
+    /// pause between an ended run and its automatic successor: long enough
+    /// for the final saves and ui transitions of the dead run to land, short
+    /// enough that an overnight loop loses minutes, not hours.
+    const RESTART_DELAY_MS: i32 = 5_000;
 
     // EVERY run writes a resume marker, not just loop mode. loop mode needs
     // it because its runs are unbounded — but so does any run that outlives
@@ -606,7 +633,87 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
                 message: format!("could not save the conversation: {e}"),
             }),
         }
+
+        // ---- automatic loop continuation --------------------------------
+        //
+        // loop mode promises run-until-stopped. a failure budget, a step
+        // ceiling, or even a clean completion is not the user stopping —
+        // those endings used to simply strand an unattended loop, and it
+        // died quietly in the night looking like a hang. the decision is
+        // pure (control::decide_after_run_end) and pinned by evals.
+        //
+        // a superseded run stays dead: its stop hatch already reported the
+        // ending, and continuing from it would fight whatever took control.
+        // a run started by the batch driver belongs to the queue: the
+        // driver advances it, and an automatic successor here would race
+        // it or fire as a ghost after the batch drains.
+        let in_batch = BATCH.with(|b| b.borrow().is_some());
+        let still_on_thread = STATE.with(|s| s.borrow().conversation == conversation_id);
+        let continuation = if !superseded {
+            crate::agent::control::decide_after_run_end(
+                outcome.reason.as_str(),
+                config.loop_mode,
+                still_on_thread,
+                in_batch,
+            )
+        } else {
+            crate::agent::control::LoopContinuation::LetEnd
+        };
+        if continuation == crate::agent::control::LoopContinuation::Restart {
+            // crash-loop breaker: N automatic restarts per rolling window,
+            // then the loop stays down until a manual run resets it. this is
+            // what keeps "the loop continues" from becoming a billing pump.
+            let allowed = RESTART_BUDGET.with(|b| b.borrow_mut().record(js_sys::Date::now()));
+            if !allowed {
+                emit(Event::Note {
+                    thread: conversation_id.clone(),
+                    text: format!(
+                        "∞ loop paused — {} restart(s) in the last {}h all failed or ended early. \
+                         press run to resume the loop; nothing was lost.",
+                        crate::agent::control::MAX_RESTARTS_PER_WINDOW,
+                        (crate::agent::control::RESTART_WINDOW_MS / 3_600_000.0) as u64,
+                    ),
+                });
+                return;
+            }
+
+            let delay = RESTART_DELAY_MS;
+            let conv = conversation_id.clone();
+            let prompt = prompt_for_restart.clone();
+            emit(Event::Note {
+                thread: conversation_id.clone(),
+                text: format!(
+                    "∞ loop mode continues — restarting in {}s (previous run ended: {})",
+                    delay / 1000,
+                    outcome.reason.as_str()
+                ),
+            });
+            wasm_bindgen_futures::spawn_local(async move {
+                crate::agent::http::sleep_ms(delay).await;
+                // re-check both guards after the wait: the user may have
+                // stopped or switched threads during it. start_run performs
+                // its own credential check, so no duplication here.
+                let (running, on_thread) =
+                    STATE.with(|s| (s.borrow().running, s.borrow().conversation == conv));
+                if running || !on_thread {
+                    return;
+                }
+                start_run(prompt);
+            });
+        }
     });
+}
+
+thread_local! {
+    /// crash-loop breaker state for automatic loop continuations. reset by
+    /// every MANUAL run (Command::Run), because a human pressing the button
+    /// is the strongest possible signal the work is still wanted.
+    static RESTART_BUDGET: RefCell<crate::agent::control::RestartBudget> = RefCell::new(
+        crate::agent::control::RestartBudget::new(
+            crate::agent::control::RESTART_WINDOW_MS,
+            crate::agent::control::MAX_RESTARTS_PER_WINDOW,
+        ),
+    );
 }
 
 /// load a conversation into worker memory and replay it to the feed.
@@ -1162,6 +1269,10 @@ fn handle(command: Command) {
             // switching threads mid-run is refused elsewhere; a run always
             // belongs to the conversation that is active when it starts.
             let _ = thread_id;
+            // a human pressing run is the strongest possible signal the
+            // work is still wanted: clear crash-loop suspicion so a paused
+            // loop can always be relaunched by hand.
+            RESTART_BUDGET.with(|b| b.borrow_mut().reset());
             start_run(prompt);
         }
 

@@ -3,9 +3,181 @@
 //! an unattended loop makes with no human watching, so their behavior is
 //! pinned here rather than trusted.
 
-use vanish::agent::control::resume_target;
+use vanish::agent::control::{
+    decide_after_run_end, resume_marker_is_fresh, resume_target, LoopContinuation, RestartBudget,
+    MAX_RESTARTS_PER_WINDOW, RESUME_MARKER_MAX_AGE_MS, RESTART_WINDOW_MS,
+};
 use vanish::agent::github::{CheckSummary, DeployState};
 use vanish::agent::retry_backoff_ms;
+
+// ---- automatic loop continuation ------------------------------------------
+// loop mode promises run-until-stopped. a failure budget, a step ceiling,
+// or a clean completion is NOT the user stopping — each used to simply end
+// the run, so an unattended loop died quietly in the night. these pin which
+// endings continue and which must never be second-guessed.
+
+#[test]
+fn loop_mode_restarts_on_non_stop_endings() {
+    // failed (budget spent), step_limit (ceiling hit) and completed all get
+    // another attempt — an attended user would relaunch by hand; that is
+    // exactly what the unattended case needs done for it.
+    for reason in ["failed", "step_limit", "completed"] {
+        assert_eq!(
+            decide_after_run_end(reason, true, true, false),
+            LoopContinuation::Restart,
+            "reason {reason} must restart an overnight loop"
+        );
+    }
+}
+
+#[test]
+fn stop_is_never_second_guessed() {
+    // stop is the only escape hatch from a wedged run (D9). restarting
+    // after it would trap the user inside a loop they explicitly killed.
+    assert_eq!(
+        decide_after_run_end("stopped", true, true, false),
+        LoopContinuation::LetEnd
+    );
+}
+
+#[test]
+fn loop_off_never_restarts() {
+    for reason in ["completed", "stopped", "failed", "step_limit"] {
+        assert_eq!(
+            decide_after_run_end(reason, false, true, false),
+            LoopContinuation::LetEnd,
+            "reason {reason}: without loop mode a run is a unit of work with an end"
+        );
+    }
+}
+
+#[test]
+fn a_user_who_switched_threads_is_not_restarted_under() {
+    // they are typing on the thread they chose; a surprise run appearing
+    // there is worse than a dead loop.
+    assert_eq!(
+        decide_after_run_end("failed", true, false, false),
+        LoopContinuation::LetEnd
+    );
+}
+
+#[test]
+fn batch_runs_are_never_continued_by_the_loop() {
+    // batch tasks run through start_run too; the driver owns the queue and
+    // starts each next task itself. an automatic successor would race the
+    // driver or fire as a ghost after the queue drains.
+    for reason in ["completed", "failed", "step_limit"] {
+        assert_eq!(
+            decide_after_run_end(reason, true, true, true),
+            LoopContinuation::LetEnd,
+            "reason {reason}: a batch task's ending belongs to the driver"
+        );
+    }
+}
+
+#[test]
+fn unknown_reasons_default_to_continuing_in_loop_mode() {
+    // a FinishReason added later must not silently break continuation;
+    // the conservative default for loop mode is to go on.
+    assert_eq!(
+        decide_after_run_end("something_new", true, true, false),
+        LoopContinuation::Restart
+    );
+}
+
+// ---- resume marker freshness ------------------------------------------------
+
+#[test]
+fn fresh_markers_resume_and_stale_ones_do_not() {
+    let now = 1_800_000_000_000.0;
+    assert!(resume_marker_is_fresh(now - 60_000.0, now), "a minute old");
+    assert!(
+        resume_marker_is_fresh(now - 11.0 * 3_600_000.0, now),
+        "eleven hours still spans an overnight run"
+    );
+    // exactly at the threshold counts as fresh (inclusive bound).
+    assert!(resume_marker_is_fresh(now - RESUME_MARKER_MAX_AGE_MS, now));
+    assert!(
+        !resume_marker_is_fresh(now - RESUME_MARKER_MAX_AGE_MS - 1.0, now),
+        "past the window it is archaeology, not a pause"
+    );
+    assert!(!resume_marker_is_fresh(now - 48.0 * 3_600_000.0, now), "two days");
+}
+
+#[test]
+fn a_backwards_clock_does_not_cost_the_run() {
+    // device clock moved backwards between write and read: negative age
+    // must read as fresh, not as infinitely stale.
+    let written_later = 1_800_000_000_000.0 + 5 * 60_000.0;
+    let read_now = 1_800_000_000_000.0;
+    assert!(resume_marker_is_fresh(written_later, read_now));
+}
+
+#[test]
+fn the_marker_window_spans_a_work_night_but_not_a_weekend() {
+    const H: f64 = 3_600_000.0;
+    assert!(RESUME_MARKER_MAX_AGE_MS >= 8.0 * H);
+    assert!(RESUME_MARKER_MAX_AGE_MS <= 24.0 * H);
+    assert_eq!(RESUME_MARKER_MAX_AGE_MS, 12.0 * H);
+}
+
+// ---- crash-loop breaker ------------------------------------------------------
+// automatic restarts must not become a billing pump when something is
+// structurally broken (poisoned transcript, revoked key): N per rolling
+// window, oldest falling off, and a manual run resets everything.
+
+#[test]
+fn the_budget_allows_exactly_max_restarts_then_refuses() {
+    let mut b = RestartBudget::new(RESTART_WINDOW_MS, MAX_RESTARTS_PER_WINDOW);
+    let t = 1000.0;
+    for i in 0..MAX_RESTARTS_PER_WINDOW as u64 {
+        assert!(
+            b.record(t + i as f64 * 60_000.0),
+            "restart {} within the budget must be allowed",
+            i + 1
+        );
+    }
+    assert!(
+        !b.record(t + 6.0 * 60_000.0),
+        "the window is saturated: staying down is the point"
+    );
+}
+
+#[test]
+fn old_attempts_expire_so_a_slow_loop_survives() {
+    let window = RESTART_WINDOW_MS;
+    let mut b = RestartBudget::new(window, 2);
+    let t = 500_000.0;
+    assert!(b.record(t));
+    assert!(b.record(t + window / 2.0)); // two used, first expires at t+window
+    assert!(b.record(t + window + 1_000.0)); // first fell off; allowed again
+    assert_eq!(b.used(), 2);
+}
+
+#[test]
+fn saturation_clears_once_everything_has_expired() {
+    let window = RESTART_WINDOW_MS;
+    let mut b = RestartBudget::new(window, 1);
+    let t = 42.0;
+    assert!(b.record(t));
+    assert!(!b.record(t + 1_000.0));
+    assert!(
+        b.record(t + window + 1_000.0),
+        "once the failure has aged out of the window, one more try is honest"
+    );
+}
+
+#[test]
+fn a_manual_run_resets_crash_loop_suspicion() {
+    let mut b = RestartBudget::new(RESTART_WINDOW_MS, 1);
+    assert!(b.record(0.0));
+    assert!(!b.record(1.0));
+    b.reset();
+    assert!(
+        b.record(2.0),
+        "a human pressing run overrides the breaker entirely"
+    );
+}
 
 // ---- interruption-resume targeting ---------------------------------------
 // every run writes a resume marker because the browser can discard a hidden
