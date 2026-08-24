@@ -90,21 +90,23 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
-- [ ] **RED BUILD 0582489 — fix in flight, vercel/native cause unidentified**.
-      the two-sessions landing commit failed BOTH gates. workflow cause found
-      and fixed (--all-targets on wasm32 → E0463; now --lib --bins, pinned by
-      ci_gate). the VERCEL failure is a separate native-gate/wasm failure not
-      yet diagnosed: the two stranded eval suites (loop_nervous_system,
-      ci_gate) had never compiled anywhere before landing. the fix commit
-      adds $GITHUB_STEP_SUMMARY mirroring to the gate + workflow so the next
-      red build's actual compiler output is readable via the PUBLIC check-run
-      api (job logs need admin). NEXT RUN: commit the fix, check_deployment;
-      if still red, read the summary from the check run — no more blind
-      debugging. also verify the opfs config mirror seeds (one settings save)
-      and that boot_worker self-configures (⚙ note in feed).
+- [x] **RED BUILD RESOLVED — bba0104 GREEN on both gates.** root cause was
+      stale partial copies of control.rs and build.sh shipping instead of
+      the working-tree versions (read_file served complete files all
+      session; only the diagnostics log revealed the divergence). the
+      self-repair loop now exists: any red build pushes raw compiler
+      output to the `diagnostics` branch, readable unauthenticated at
+      raw.githubusercontent.com/compusophy/vanish/diagnostics/
+      ci-diagnostics.log. worker self-config from opfs landed too — one
+      manual settings save after loading this deploy seeds the mirror.
 - [ ] live verification owed: ∞ loop restart after failure/step-limit;
       stop mid-restart keeps it down; browser close+reopen within 12h
-      resumes; restart budget saturates at 6/hour with the pause note.
+      resumes; restart budget saturates at 6/hour with the pause note;
+      ⚙ self-config note appears in feed on boot after mirror is seeded.
+- [ ] consider: a guard test that pins build.sh's delegation AND reads
+      ci/run_tests.sh for the same gate id (done); next structural item
+      is verifying committed bytes vs local for EVERY file in an atomic
+      changeset (spot-check rule written into status.md this run).
 
 - [x] **UNBLOCK ALL COMMITS — RESOLVED (agent/ci-gate-and-loop-survival)**.
       user added Workflows rw to the token; sync_repo confirmed the tree at

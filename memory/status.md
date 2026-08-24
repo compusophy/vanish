@@ -3,7 +3,59 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## this run: 0582489 went red on BOTH gates — and why the agent could not see why
+## this run: five red builds, one root cause family, and the self-repair loop finally exists
+
+the two-sessions landing (0582489) went red on BOTH gates. the fix chain,
+each step driven by evidence once the evidence existed:
+
+1. **workflow step bug** (mine): cargo check --all-targets --target
+   wasm32 pulls tests onto a target where the `test` crate does not ship
+   → E0463 every run regardless of code health. fixed: --lib --bins;
+   pinned by ci_gate's the_wasm_check_never_builds_test_crates.
+2. **diagnosis was impossible at first**: job logs need admin api rights
+   (403 even for our own token), annotations carry only exit codes, the
+   check-run summary came back null. FIX THAT LASTED: the workflow now
+   pushes raw failing output to the `diagnostics` branch
+   (ci-diagnostics.log), readable unauthenticated via
+   raw.githubusercontent.com/compusophy/vanish/diagnostics/
+   ci-diagnostics.log. THIS IS THE SELF-REPAIR LOOP — every future red
+   build names its own file, line, and error within ~5 minutes.
+3. **root cause of the lib failure**: committed control.rs was a STALE
+   PARTIAL COPY ending at history_is_well_formed — the entire
+   loop-survival section existed locally but never reached github, while
+   worker.rs shipped complete and referenced all ten missing items.
+   read_file served me the complete file ALL SESSION; only the rustc log
+   revealed the divergence. same class for build.sh (old hand-rolled
+   suite list shipped instead of delegation). LESSON (incident #4 of the
+   stale-tree family): after any commit, spot-check ONE critical file
+   against raw.githubusercontent.com before trusting the publish; and
+   NEVER land test files that have not compiled anywhere.
+4. **two real test bugs** in the stranded bench_grading suite (found by
+   the gate working as intended): CommitExists asserted without setting
+   has_commit=true; FileExcludes pinned deleted-file-passes semantics
+   that contradict the impl AND make removal tasks gameable by rm.
+   fixed to pin the strict, load-bearing semantics.
+5. last failure was clippy single_match in my own self-config block —
+   the fatal-lint gate doing its job.
+
+FINAL STATE: bba0104 GREEN on both gates. all suites pass: agent_evals
+15, bench_grading 9, branch_policy 7, ci_gate 5, event_loop_liveness 5,
+loop_nervous_system 9, platform_logic 25, protocol_contract 11,
+streaming 11.
+
+also landed: worker self-config from opfs (vanish-config/config.json
+mirrored by ui save_config; boot_worker loads it and runs the full
+Configure path). answers the user's question — YES, harness credentials
+belong in opfs, not only localStorage: localStorage is ui-thread-only,
+which is why the worker booted credential-blind all night despite the
+saved vercel token. NOTE: mirror fills on the NEXT settings save; one
+manual save after loading this deploy seeds it forever.
+
+rules added to my own practice:
+- after git_commit touching source, fetch the raw blob of ONE key file
+  and diff mentally against local — catches partial-publish instantly.
+- red build → diagnostics branch FIRST, theory SECOND. no more blind
+  auditing of hundreds of lines when exact errors are one fetch away.
 
 - 0582489 (the two-sessions landing commit) failed github actions "verify"
   AND vercel. job logs need ADMIN rights over the api (403 even for the
