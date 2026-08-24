@@ -131,8 +131,9 @@ pub fn boot_worker() {
     // credentials — check_deployment's compiler output, github, openrouter —
     // available from second zero.
     wasm_bindgen_futures::spawn_local(async move {
-        match crate::platform::opfs::read(crate::protocol::CONFIG_MIRROR_PATH).await {
-            Ok(raw) => match serde_json::from_str::<Config>(&raw) {
+        // first ever boot reads nothing: not an error, just no mirror yet.
+        if let Ok(raw) = crate::platform::opfs::read(crate::protocol::CONFIG_MIRROR_PATH).await {
+            match serde_json::from_str::<Config>(&raw) {
                 Ok(cfg) => {
                     let has_credentials =
                         !cfg.openrouter_key.is_empty() || !cfg.github_token.is_empty();
@@ -167,8 +168,7 @@ pub fn boot_worker() {
                          replaced on the next settings save"
                     ),
                 }),
-            },
-            Err(_) => {} // first ever boot: nothing mirrored yet, not an error
+            }
         }
     });
 
