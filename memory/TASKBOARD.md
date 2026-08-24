@@ -90,15 +90,14 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
-- [x] **RED BUILD RESOLVED — bba0104 GREEN on both gates.** root cause was
-      stale partial copies of control.rs and build.sh shipping instead of
-      the working-tree versions (read_file served complete files all
-      session; only the diagnostics log revealed the divergence). the
-      self-repair loop now exists: any red build pushes raw compiler
-      output to the `diagnostics` branch, readable unauthenticated at
-      raw.githubusercontent.com/compusophy/vanish/diagnostics/
-      ci-diagnostics.log. worker self-config from opfs landed too — one
-      manual settings save after loading this deploy seeds the mirror.
+- [ ] **PROMOTION BLOCKED ON TOKEN SCOPE #3: pull_requests write missing**.
+      open_pr from agent/fix-red-landing-and-self-config → main returned
+      http 403 "Resource not accessible by personal access token" — the
+      fine-grained PAT has contents+workflows but NOT pull requests:
+      read and write. everything else is DONE AND GREEN at head 19c92af
+      (bba0104 = code, 19c92af = memory): both gates pass, all suites
+      green. USER ACTION: add "Pull requests: Read and write" to the
+      token, then open_pr + pr_status until green + merge_pr.
 - [ ] live verification owed: ∞ loop restart after failure/step-limit;
       stop mid-restart keeps it down; browser close+reopen within 12h
       resumes; restart budget saturates at 6/hour with the pause note;
