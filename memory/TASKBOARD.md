@@ -90,6 +90,13 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [ ] **auto-reconcile at boot** (top priority, structural): the worker
+      should run the reconcile pass on Event::Ready (list_tree + head_sha,
+      drop diverged clean caches, record synced_head) so D10's guard is
+      armed from second zero instead of depending on the agent remembering
+      to sync. until it lands: first action of EVERY run is sync_repo.
+      discovered via the 37-file cache staleness found this run — see
+      status.md "the 37-file discovery".
 - [x] **mid-run unlock** (51815df): switching conversations and creating
       new ones works while a run continues in the background (guarded
       write-back + final save addressed to the run's conversation_id).
