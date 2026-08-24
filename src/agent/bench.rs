@@ -94,35 +94,44 @@ pub struct BenchSnapshot {
 /// benchmark task that needs judgment produces noisy scores.
 ///
 /// (the earlier duplicate BenchTask definition that stood here was folded
-/// into the one above; the const table below uses the checker macros.)
+/// into the one above; the table below uses the checker macros.)
 
-pub const BENCH_TASKS: &[BenchTask] = &[
-    BenchTask {
-        id: "bench-read-and-report",
-        prompt: "Read README.md and reply with its first heading in vanish-bench/notes.md.",
-        checker: contains!("vanish-bench/notes.md", ["#"]),
-    },
-    BenchTask {
-        id: "bench-create-file",
-        prompt: "Create the file vanish-bench/hello.txt containing exactly the text: hello vanish",
-        checker: contains!("vanish-bench/hello.txt", ["hello vanish"]),
-    },
-    BenchTask {
-        id: "bench-edit-precise",
-        prompt: "In vanish-bench/hello.txt, append a second line reading: line two",
-        checker: contains!("vanish-bench/hello.txt", ["hello vanish", "line two"]),
-    },
-    BenchTask {
-        id: "bench-rust-fn",
-        prompt: "Add a public function named bench_marker to src/lib.rs returning the u32 value 42. Do not remove anything else.",
-        checker: contains!("src/lib.rs", ["fn bench_marker"]),
-    },
-    BenchTask {
-        id: "bench-remove-token",
-        prompt: "In vanish-bench/todo.md, delete the line containing REMOVE_ME entirely.",
-        checker: excludes!("vanish-bench/todo.md", ["REMOVE_ME"]),
-    },
-];
+/// the suite is built once, lazily: Checker owns Strings, and String
+/// construction is not const-capable on stable rust (E0015), so a
+/// `const TABLE` cannot hold checkers directly.
+static TASKS: std::sync::OnceLock<Vec<BenchTask>> = std::sync::OnceLock::new();
+
+pub fn bench_tasks() -> &'static [BenchTask] {
+    TASKS.get_or_init(|| {
+        vec![
+            BenchTask {
+                id: "bench-read-and-report",
+                prompt: "Read README.md and write its first heading into vanish-bench/notes.md.",
+                checker: contains!("vanish-bench/notes.md", ["#"]),
+            },
+            BenchTask {
+                id: "bench-create-file",
+                prompt: "Create the file vanish-bench/hello.txt containing exactly the text: hello vanish",
+                checker: contains!("vanish-bench/hello.txt", ["hello vanish"]),
+            },
+            BenchTask {
+                id: "bench-edit-precise",
+                prompt: "In vanish-bench/hello.txt, append a second line reading: line two",
+                checker: contains!("vanish-bench/hello.txt", ["hello vanish", "line two"]),
+            },
+            BenchTask {
+                id: "bench-rust-fn",
+                prompt: "Add a public function named bench_marker to src/lib.rs returning the u32 value 42. Do not remove anything else.",
+                checker: contains!("src/lib.rs", ["fn bench_marker"]),
+            },
+            BenchTask {
+                id: "bench-remove-token",
+                prompt: "In vanish-bench/todo.md, delete the line containing REMOVE_ME entirely.",
+                checker: excludes!("vanish-bench/todo.md", ["REMOVE_ME"]),
+            },
+        ]
+    })
+}
 
 /// grade one task against the snapshot. pass/fail plus the reason string
 /// for the report — the reason names the CHECKER, not a vibe.
@@ -188,7 +197,7 @@ impl BenchReport {
 /// from opfs to build the snapshot — no guessing, no whole-tree scan.
 pub fn checked_paths() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
-    for t in BENCH_TASKS {
+    for t in bench_tasks() {
         let p = match &t.checker {
             Checker::FileContains { path, .. }
             | Checker::FileExcludes { path, .. }
@@ -205,7 +214,7 @@ pub fn checked_paths() -> Vec<&'static str> {
 /// grade the whole suite, in pinned submission order regardless of outcome.
 pub fn grade_all(snap: &BenchSnapshot) -> BenchReport {
     BenchReport {
-        entries: BENCH_TASKS
+        entries: bench_tasks()
             .iter()
             .map(|t| {
                 let (ok, reason) = grade_task(t, snap);

@@ -876,7 +876,7 @@ fn snapshot_bench(commit_seen_before: bool) -> impl std::future::Future<Output =
 /// survives a reload; the return value is for callers that want the report
 /// inline (spawn_local discards it).
 async fn run_benchmark_suite() {
-    let tasks: Vec<crate::protocol::BatchTask> = crate::agent::bench::BENCH_TASKS
+    let tasks: Vec<crate::protocol::BatchTask> = crate::agent::bench::bench_tasks()
         .iter()
         .map(|t| crate::protocol::BatchTask {
             id: t.id.to_string(),
