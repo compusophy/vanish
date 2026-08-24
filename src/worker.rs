@@ -589,22 +589,6 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
     });
 }
 
-/// refuse an operation that would corrupt a live run. kept for the one
-/// remaining dangerous case (deleting the running conversation); switching
-/// and new-conversation are now SAFE mid-run — see spawn_run's guarded
-/// write-back and the addressed persist() queue.
-fn reject_while_running(action: &str) -> bool {
-    let running = STATE.with(|s| s.borrow().running);
-    if running {
-        emit(Event::Error {
-            thread: conv(),
-            scope: "conversation".to_string(),
-            message: format!("cannot {action} while a run is in progress — press stop first."),
-        });
-    }
-    running
-}
-
 /// load a conversation into worker memory and replay it to the feed.
 /// shared by SwitchConversation (which then also moves index.active) and
 /// Attach (which must not), so the two cannot drift on how adoption works.

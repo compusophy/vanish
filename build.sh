@@ -75,11 +75,12 @@ for suite in protocol_contract platform_logic loop_nervous_system event_loop_liv
   fi
 done
 
-echo "--> running clippy (warnings are fatal on changed code)"
+echo "--> running clippy (warnings are fatal)"
 # lints run AFTER tests so a logic failure still reports first. a lint gate
 # that only warns is a lint nobody reads; failing the deploy on warnings is
 # how the gate stays real. -D warnings turns every warning into an error.
-if ! cargo clippy --lib --tests -- --deny warnings 2>&1; then
+# the minimal rustup profile omits clippy, so it is installed explicitly.
+if ! (rustup component add clippy && cargo clippy --lib --tests -- --deny warnings) 2>&1; then
   echo ""
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   echo "!! CLIPPY FAILED: fix the warnings above and re-commit   !!"
