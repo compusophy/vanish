@@ -103,6 +103,7 @@ fn index_sorts_most_recently_updated_first() {
             conv("3", 200.0),
         ],
         loop_resume: None,
+        batch: None,
     };
     let sorted = idx.sorted();
     assert_eq!(
@@ -129,6 +130,7 @@ fn loop_resume_marker_round_trips_with_defaults() {
         active: "conv-9".into(),
         items: vec![],
         loop_resume: Some(marker.clone()),
+        batch: None,
     };
     let json = serde_json::to_string(&idx).unwrap();
     let back: Index = serde_json::from_str(&json).unwrap();
@@ -147,6 +149,7 @@ fn loop_resume_marker_round_trips_with_defaults() {
             interrupted_at: 1_700_000_000_001.0,
             loop_mode: false,
         }),
+        batch: None,
     })
     .unwrap();
     let back: Index = serde_json::from_str(&plain).unwrap();
