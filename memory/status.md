@@ -3,7 +3,25 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed most recently (background-tab deaths: universal resume, 5d9ee87 + b4de758)
+## landed most recently (bell relocation to bottom-right, 3ec83b1)
+
+user: the bell was never supposed to be in the text input container — it
+was supposed to be at the bottom right, with the harness panel. correct:
+notify::ensure_dom mounted into .dock-status (the run-status row directly
+above the prompt box), so it read as part of the input.
+
+- [x] ensure_dom now mounts on <body>; the bell is position:fixed at
+      right:20px / bottom:20px (34×34, z-index 55), floating beside the
+      harness rail's edge regardless of dock layout. the panel anchors
+      directly above it (bottom:64px = bell top 54 + 10px gap). the old
+      `.dock-status { display:flex }` rule that existed only to host the
+      bell was removed with it.
+- lesson: a self-mounting dom must still choose its mount point like it is
+  user-facing design, not plumbing. "mounts itself" fixed drift; it did not
+  fix placement. placement feedback belongs in the same iteration as the
+  feature.
+
+## landed earlier (background-tab deaths: universal resume, 5d9ee87 + b4de758)
 
 user report: "tasks die when i switch tabs or open other programs — isn't
 the point of workers that they persist without being throttled?"
