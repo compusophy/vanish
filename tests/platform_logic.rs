@@ -163,13 +163,16 @@ fn markers_from_before_every_run_resumed_still_parse_as_loop_runs() {
     // markers written by older builds had no loop_mode field; they were
     // always loop runs, so absence must read as true — otherwise an ota
     // reload mid-loop would come back as a one-shot resume.
+    // note: these types carry no serde(rename_all), so the wire shape is
+    // snake_case — writing camelCase here would silently parse as None
+    // thanks to #[serde(default)] and the assertion below would catch it.
     let legacy = r#"{
         "active":"c1",
         "items":[],
-        "loopResume":{
+        "loop_resume":{
             "conversation":"c1",
             "prompt":"keep improving",
-            "interruptedAt":1700000000000
+            "interrupted_at":1700000000000
         }
     }"#;
     let idx: Index = serde_json::from_str(legacy).unwrap();
