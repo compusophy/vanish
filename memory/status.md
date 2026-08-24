@@ -568,3 +568,32 @@ shipped.
   3. truncated logs are a build-pipeline bug, not an inconvenience: if a
      failure can occur without its name being visible, fix the pipeline
      first, THEN debug.
+
+## landed this run (the 37-file discovery)
+
+asked "what else can we improve"; while investigating the dead-code warning
+on reject_while_running, the local worker.rs showed the RESOLVED-PROMISE
+drain — the exact bug D7 forbids, unbounded, ahead of RunFinished. size-
+matched against upstream to rule out incident #5: identical bytes. the
+truth was worse in scale: the ENTIRE local opfs cache (37 files) had been
+stale since incident #3, because ba61277 only restored its own changeset.
+main was never wrong (untouched files were never committed), and deploy
+liveness tests always compiled against upstream's fixed worker.rs — which
+is why they passed. but any future run that read worker.rs locally and
+edited it would have shipped the pre-deadlock-fix version, reverting the
+fix under a green build. the D10 refusal could not catch it either:
+synced_head starts empty each session, and the first commit passes by
+design.
+
+- [x] ran the rebuilt sync_repo for real: 37 stale caches dropped,
+      synced_head recorded. verified local worker.rs is now the fixed
+      drain (sleep_ms + DRAIN_TIMEOUT_MS + RunFinished-first).
+- lesson: **a fresh session's tree is guilty until reconciled.** the
+  stale-tree hazard is not per-incident, it is PER-SESSION — every file
+  not written this session is suspect until sync_repo clears them all.
+- NEW WORK ITEM (structural): auto-reconcile at boot. the worker should
+  run the reconcile pass on Event::Ready (list_tree + head_sha, drop
+  diverged clean caches, record synced_head) so D10's guard is armed from
+  second zero instead of depending on the agent remembering to sync.
+  until then: FIRST ACTION OF EVERY RUN IS sync_repo, before reading or
+  editing anything.
