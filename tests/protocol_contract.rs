@@ -52,6 +52,19 @@ fn commands_round_trip() {
         // answer. these exist because RunFinished can be delayed or lost
         // behind the transcript save, leaving the buttons stuck on stop.
         Command::RunState,
+        // the programmatic driver: queued sequential tasks with results.
+        Command::RunBatch {
+            tasks: vec![
+                crate::protocol::BatchTask {
+                    id: "bench-001".into(),
+                    prompt: "add a doc comment to src/lib.rs".into(),
+                },
+                crate::protocol::BatchTask {
+                    id: "bench-002".into(),
+                    prompt: "fix any clippy warnings".into(),
+                },
+            ],
+        },
     ];
 
     for cmd in cmds {
@@ -123,6 +136,16 @@ fn events_round_trip() {
         Event::Note {
             thread: String::new(),
             text: "hello".into(),
+        },
+        // batch export event: the live notification that pairs with the
+        // vanish-batch/results.json file.
+        Event::BatchFinished {
+            status: "completed".into(),
+            results: vec![crate::protocol::BatchResult {
+                id: "bench-001".into(),
+                reason: "completed".into(),
+                steps: 4,
+            }],
         },
         Event::Tree {
             entries: vec![],

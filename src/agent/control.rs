@@ -149,6 +149,87 @@ pub fn cancellation_results(calls: &[ToolCall]) -> Vec<Message> {
         .collect()
 }
 
+// ---- batch queue (the programmatic driver) --------------------------------
+//
+// a benchmark harness needs to submit work and read outcomes; the prompt box
+// is neither. BatchState is the durable queue: it persists beside the resume
+// marker so a tab discard mid-batch resumes where it left off, and its
+// results are exported to opfs when the batch ends.
+
+/// one task's progress through a batch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TaskStatus {
+    /// not yet started.
+    Queued,
+    /// currently executing.
+    Running,
+    /// finished with this outcome (mirrors FinishReason, as a string, so the
+    /// exported results file stays plain json).
+    Done(String),
+}
+
+/// the durable state of a running batch. persisted with the transcript index.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatchState {
+    pub tasks: Vec<(String, String)>,
+    pub status: Vec<TaskStatus>,
+    pub current: usize,
+}
+
+impl BatchState {
+    pub fn new(tasks: Vec<(String, String)>) -> Self {
+        let status = vec![TaskStatus::Queued; tasks.len()];
+        Self {
+            tasks,
+            status,
+            current: 0,
+        }
+    }
+
+    /// the prompt to run next, if any task remains. empty when the queue is
+    /// drained — callers distinguish "done" from "run this".
+    pub fn next_prompt(&self) -> Option<String> {
+        self.tasks.get(self.current).map(|(_, p)| p.clone())
+    }
+
+    pub fn mark_running(&mut self) {
+        if let Some(slot) = self.status.get_mut(self.current) {
+            *slot = TaskStatus::Running;
+        }
+    }
+
+    /// record the outcome of the current task and advance the cursor.
+    /// advancing past the end is how "queue drained" is represented; callers
+    /// detect completion via `next_prompt() -> None`.
+    pub fn complete_current(&mut self, reason: &str) {
+        if let Some(slot) = self.status.get_mut(self.current) {
+            *slot = TaskStatus::Done(reason.to_string());
+        }
+        self.current += 1;
+    }
+
+    /// results so far, in submission order. unfinished tasks are simply not
+    /// in the list yet — a cancelled batch exports what actually ran.
+    pub fn results(&self) -> Vec<crate::protocol::BatchResult> {
+        self.tasks
+            .iter()
+            .zip(self.status.iter())
+            .filter_map(|((id, _), s)| match s {
+                TaskStatus::Done(reason) => Some(crate::protocol::BatchResult {
+                    id: id.clone(),
+                    reason: reason.clone(),
+                    steps: 0,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
 // ---- transcript well-formedness -----------------------------------------
 //
 // the invariant everything above protects, stated once and checked

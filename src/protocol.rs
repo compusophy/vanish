@@ -48,6 +48,31 @@ pub enum Command {
     /// "which thread is on screen" question moves to the ui's worker pool,
     /// and several workers coexisting means no single global active id.
     Attach { id: String },
+    /// queue several tasks to run sequentially, each as its own one-shot run
+    /// ending at task_complete. this is the programmatic driver: a benchmark
+    /// harness submits work through it instead of typing into the prompt box,
+    /// and gets Event::BatchFinished back with machine-readable results.
+    /// the queue survives tab discards (it persists beside the resume
+    /// marker); the user pressing stop cancels whatever is left.
+    RunBatch { tasks: Vec<BatchTask> },
+}
+
+/// one unit of queued work. `id` is caller-chosen (e.g. "bench-001") and is
+/// what results are keyed by — prompts are data, ids are identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchTask {
+    pub id: String,
+    pub prompt: String,
+}
+
+/// the outcome of one batch task. `reason` mirrors FinishReason as a plain
+/// snake_case string so the exported results file needs no schema beyond
+/// json: "completed" | "stopped" | "step_limit" | "failed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchResult {
+    pub id: String,
+    pub reason: String,
+    pub steps: u32,
 }
 
 impl Config {
@@ -195,6 +220,15 @@ pub enum Event {
     Conversations {
         items: Vec<ConversationSummary>,
         active: String,
+    },
+    /// a queued batch ended (finished, or cancelled by stop). `results` is
+    /// also written to opfs at vanish-batch/results.json — this event is the
+    /// live notification, that file is the durable export.
+    BatchFinished {
+        results: Vec<BatchResult>,
+        /// "completed" when every task ran; "cancelled" when stop cut the
+        /// queue short.
+        status: String,
     },
 }
 

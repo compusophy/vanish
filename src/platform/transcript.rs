@@ -64,6 +64,12 @@ pub struct Index {
     /// event; this marker is what lets the next boot continue the run.
     /// see LoopResume.
     pub loop_resume: Option<LoopResume>,
+    /// a queued batch (see control::BatchState). present only while tasks
+    /// remain; cleared when the batch finishes or is cancelled. persisting
+    /// it HERE means a tab discard mid-batch resumes the queue on next boot,
+    /// exactly like an interrupted run — the batch driver gets the same
+    /// durability every single run already has.
+    pub batch: Option<String>,
 }
 
 /// a run that outlived its worker.
@@ -318,6 +324,36 @@ pub async fn clear_loop_resume() {
     let mut index = load_index().await;
     if index.loop_resume.is_some() {
         index.loop_resume = None;
+        let _ = save_index(&index).await;
+    }
+}
+
+// ---- batch queue persistence ---------------------------------------------
+//
+// the batch state is stored as its serialized control::BatchState json in
+// `Index.batch`. a String rather than a typed field keeps platform/ from
+// depending on agent/control — the worker owns the (de)serialization, this
+// module only owns durability.
+
+/// persist the queue. called on every state transition so a discard at any
+/// point resumes from the last known truth.
+pub async fn set_batch(state_json: &str) -> Result<(), String> {
+    let mut index = load_index().await;
+    index.batch = Some(state_json.to_string());
+    save_index(&index).await
+}
+
+/// the queue, if one is parked. does NOT clear it: unlike the resume marker,
+/// a batch must survive repeated boots until it drains or is cancelled —
+/// take-on-read would lose the remaining tasks on the first reload.
+pub async fn get_batch() -> Option<String> {
+    load_index().await.batch
+}
+
+/// the batch ended; forget it.
+pub async fn clear_batch() {
+    let mut index = load_index().await;
+    if index.batch.take().is_some() {
         let _ = save_index(&index).await;
     }
 }

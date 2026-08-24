@@ -602,6 +602,16 @@ fn render_active(ui: &Shared, event: Event) {
             set_status("ready", false);
         }
 
+        Event::BatchFinished { results, status } => {
+            let label = if status == "completed" { "completed" } else { "cancelled" };
+            let card = create("div", "commit-card");
+            card.set_text_content(Some(&format!(
+                "☑ batch {label}: {} task(s) — results exported to vanish-batch/results.json",
+                results.len()
+            )));
+            append(&card);
+        }
+
         // handled above the match (before background routing); unreachable
         // here, but the match must stay exhaustive.
         Event::RunStateReport { .. } => {}

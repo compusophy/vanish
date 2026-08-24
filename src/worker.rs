@@ -166,6 +166,39 @@ pub fn boot_worker() {
         emit(Event::HistoryRestored { turns, trimmed });
         publish_conversations(&index);
 
+        // a batch parked by an earlier boot resumes here — BEFORE the
+        // loop-resume marker handling, because the two are independent: a
+        // batch can be interrupted BETWEEN tasks (no run in flight, no
+        // marker), and take-on-read of the marker must not strand it.
+        // unlike the marker this is NOT cleared on read: the queue survives
+        // repeated boots until it drains or is cancelled.
+        let parked = crate::platform::transcript::get_batch().await;
+        let resumed_batch = parked.as_deref().and_then(load_batch_from);
+        match (parked, resumed_batch) {
+            (Some(_), Some(batch)) => {
+                emit(Event::Note {
+                    thread: conv(),
+                    text: format!(
+                        "↻ resuming interrupted batch — {} task(s) remaining",
+                        batch.tasks.len() - batch.current
+                    ),
+                });
+                BATCH.with(|b| *b.borrow_mut() = Some(batch.clone()));
+                wasm_bindgen_futures::spawn_local(drive_batch(batch));
+            }
+            (Some(_), None) => {
+                // unparsable state would otherwise sit there forever; drop it
+                // loudly rather than silently (D4).
+                crate::platform::transcript::clear_batch().await;
+                emit(Event::Error {
+                    thread: conv(),
+                    scope: "batch".to_string(),
+                    message: "a parked batch was unreadable and has been discarded".to_string(),
+                });
+            }
+            (None, None) => {}
+        }
+
         // every run's promise now survives its own death, not just loop
         // mode's: if ANY run was in flight when the page died — refresh,
         // ota reload, or the browser discarding a hidden tab (memory saver,
@@ -232,13 +265,6 @@ pub fn boot_worker() {
             ),
         });
         PENDING_RESUME.with(|p| *p.borrow_mut() = Some(marker.prompt));
-        // surface the pending state in the ui immediately: a reload that
-        // lands on broken credentials would otherwise leave the run
-        // silently parked forever.
-        emit(Event::Note {
-            thread: target,
-            text: "⏸ resume pending — waiting for working credentials".to_string(),
-        });
     });
 }
 
@@ -529,6 +555,12 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
                 steps: outcome.steps,
                 reason: outcome.reason,
             });
+            // batch bookkeeping: record how THIS run ended so the batch
+            // driver can advance its queue. a superseded (force-stopped)
+            // run stays silent and lets the driver see the seq bump instead.
+            LAST_FINISH.with(|f| {
+                *f.borrow_mut() = Some(outcome.reason.as_str().to_string());
+            });
         }
 
         // let any in-flight checkpoint finish before the authoritative final
@@ -655,6 +687,160 @@ pub fn reconciled_head(with: impl FnOnce(&str)) {
             with(sha);
         }
     });
+}
+
+// ---- batch driver ---------------------------------------------------------
+//
+// the programmatic work-submission path. a harness calls enqueue_batch (or
+// the ui posts Command::RunBatch); tasks run sequentially, each as its own
+// one-shot run ending at task_complete. results are exported to opfs and
+// announced via Event::BatchFinished.
+
+thread_local! {
+    /// the live batch queue. persisted to the transcript index on every
+    /// transition, so a tab discard resumes it on next boot — the same
+    /// durability single runs get from LoopResume.
+    static BATCH: RefCell<Option<crate::agent::control::BatchState>> =
+        const { RefCell::new(None) };
+}
+
+const BATCH_RESULTS_PATH: &str = "vanish-batch/results.json";
+
+/// export results so far. called after every task AND at cancel time, so the
+/// file is always current — an external harness can poll it mid-batch.
+fn write_batch_results(batch: &crate::agent::control::BatchState) {
+    let payload = serde_json::json!({
+        "results": batch.results(),
+        "remaining": batch.tasks.len().saturating_sub(batch.current),
+    });
+    let body = match serde_json::to_string_pretty(&payload) {
+        Ok(b) => b,
+        Err(e) => {
+            emit(Event::Error {
+                thread: conv(),
+                scope: "batch".to_string(),
+                message: format!("could not serialize batch results: {e}"),
+            });
+            return;
+        }
+    };
+    let thread = conv();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = crate::platform::opfs::write(BATCH_RESULTS_PATH, &body).await {
+            emit(Event::Error {
+                thread,
+                scope: "batch".to_string(),
+                message: format!("could not write batch results: {e}"),
+            });
+        }
+    });
+}
+
+/// persist + remember the queue state. every transition goes through here.
+fn save_batch(batch: &crate::agent::control::BatchState) {
+    BATCH.with(|b| *b.borrow_mut() = Some(batch.clone()));
+    match serde_json::to_string(batch) {
+        Ok(json) => {
+            let json = json.to_string();
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = crate::platform::transcript::set_batch(&json).await;
+            });
+        }
+        Err(e) => emit(Event::Error {
+            thread: conv(),
+            scope: "batch".to_string(),
+            message: format!("could not persist batch state: {e}"),
+        }),
+    }
+}
+
+fn load_batch_from(json: &str) -> Option<crate::agent::control::BatchState> {
+    serde_json::from_str(json).ok()
+}
+
+/// end the batch: announce, export, clear memory and disk.
+async fn finish_batch(status: &str) {
+    let results = BATCH.with(|b| {
+        b.borrow().as_ref().map(crate::agent::control::BatchState::results)
+    });
+    BATCH.with(|b| *b.borrow_mut() = None);
+    crate::platform::transcript::clear_batch().await;
+    emit(Event::Note {
+        thread: conv(),
+        text: format!(
+            "☑ batch {status} — {} task(s) recorded, full results at {BATCH_RESULTS_PATH}",
+            results.as_ref().map(Vec::len).unwrap_or(0)
+        ),
+    });
+    emit(Event::BatchFinished {
+        status: status.to_string(),
+        results: results.unwrap_or_default(),
+    });
+}
+
+/// run the queued tasks one by one. each is a fresh one-shot run through
+/// start_run — the SAME path as a typed prompt, so batch behavior cannot
+/// diverge from interactive behavior — and its outcome lands back in the
+/// batch state. stop, cooperative or forced, cancels whatever has not
+/// started yet; failures and step-limits are recorded and the queue continues.
+async fn drive_batch(mut batch: crate::agent::control::BatchState) {
+    while let Some(prompt) = batch.next_prompt() {
+        // wait until the worker is idle: a stale parked batch must never fire
+        // into a busy worker or yank control from a user's own run.
+        while STATE.with(|s| s.borrow().running) {
+            crate::agent::http::sleep_ms(500).await;
+        }
+
+        batch.mark_running();
+        save_batch(&batch);
+
+        emit(Event::Note {
+            thread: conv(),
+            text: format!(
+                "▶ batch task {}/{} starting",
+                batch.current + 1,
+                batch.tasks.len()
+            ),
+        });
+
+        start_run(prompt);
+
+        // capture the seq of the run we just started, then wait for THIS run
+        // to end. a forced stop bumps run_seq; seeing that means the run was
+        // killed out from under the batch and the whole queue is dead.
+        let my_seq = STATE.with(|s| s.borrow().run_seq);
+        loop {
+            crate::agent::http::sleep_ms(500).await;
+            let (running, seq) = STATE.with(|s| (s.borrow().running, s.borrow().run_seq));
+            if !running || seq != my_seq {
+                break;
+            }
+        }
+
+        let superseded = STATE.with(|s| s.borrow().run_seq != my_seq);
+        let reason = if superseded {
+            "stopped"
+        } else {
+            LAST_FINISH.with(|f| f.borrow_mut().take()).unwrap_or_else(|| "failed".to_string())
+        };
+
+        batch.complete_current(reason);
+        save_batch(&batch);
+        write_batch_results(&batch);
+
+        if reason == "stopped" {
+            finish_batch("cancelled").await;
+            return;
+        }
+    }
+
+    finish_batch("completed").await;
+}
+
+thread_local! {
+    /// the FinishReason of the most recent completed run, set by spawn_run
+    /// and consumed by drive_batch. a channel of one.
+    static LAST_FINISH: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn handle(command: Command) {
@@ -1172,7 +1358,48 @@ fn handle(command: Command) {
                 publish_conversations(&index);
             });
         }
+
+        Command::RunBatch { tasks } => {
+            if STATE.with(|s| s.borrow().running) {
+                emit(Event::Error {
+                    thread: conv(),
+                    scope: "batch".to_string(),
+                    message: "cannot queue a batch while a run is in progress — press stop first."
+                        .to_string(),
+                });
+                return;
+            }
+            let batch = crate::agent::control::BatchState::new(
+                tasks.into_iter().map(|t| (t.id, t.prompt)).collect(),
+            );
+            if batch.is_empty() {
+                emit(Event::Error {
+                    thread: conv(),
+                    scope: "batch".to_string(),
+                    message: "an empty batch has nothing to run".to_string(),
+                });
+                return;
+            }
+            save_batch(&batch);
+            emit(Event::Note {
+                thread: conv(),
+                text: format!("☑ queued {} task(s) for sequential execution", batch.tasks.len()),
+            });
+            wasm_bindgen_futures::spawn_local(drive_batch(batch));
+        }
     }
+}
+
+/// submit work programmatically. this is the function an external benchmark
+/// harness calls instead of typing into the prompt box: tasks run
+/// sequentially, results land in opfs at vanish-batch/results.json, and
+/// Event::BatchFinished announces completion on the ui channel.
+#[wasm_bindgen]
+pub fn enqueue_batch(tasks_json: &str) -> Result<(), JsValue> {
+    let tasks: Vec<crate::protocol::BatchTask> = serde_json::from_str(tasks_json)
+        .map_err(|e| JsValue::from_str(&format!("bad batch json: {e}")))?;
+    handle(Command::RunBatch { tasks });
+    Ok(())
 }
 
 /// exposed so the ui can render a finish reason without duplicating the enum.

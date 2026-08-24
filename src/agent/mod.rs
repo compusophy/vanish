@@ -71,6 +71,19 @@ pub struct RunOutcome {
     pub reason: FinishReason,
 }
 
+/// the plain-string form results export uses. kept next to the enum so a
+/// new FinishReason cannot be added without facing this mapping.
+impl FinishReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FinishReason::Completed => "completed",
+            FinishReason::Stopped => "stopped",
+            FinishReason::StepLimit => "step_limit",
+            FinishReason::Failed => "failed",
+        }
+    }
+}
+
 /// delay before retrying a failed llm call: exponential with a cap.
 ///
 /// 2s → 8s → 30s → 60s → 60s. short enough that a rate-limit window or a

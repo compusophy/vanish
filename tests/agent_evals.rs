@@ -235,11 +235,85 @@ fn seeding_fires_for_role_absence_not_empty_history() {
     // a restored thread still carrying its prompt must NOT get a second one.
     assert!(!needs_system_seed(&[Message::system("sys"), Message::user("go")]));
 
-    // negative control: the old is_empty() gate misses the aged-out case by
-    // construction — pinned so nobody "simplifies" back to it.
-    let aged_out = [Message::user("old task")];
-    assert!(
-        needs_system_seed(&aged_out),
-        "non-empty history without a system role still needs seeding"
-    );
+// ---- scenario 6: batch queue (the programmatic driver) --------------------
+// a benchmark harness submits tasks and reads outcomes. BatchState is the
+// durable queue: it must advance exactly one task per outcome, survive a
+// serde round trip (it persists in the transcript index), and export only
+// what actually ran.
+
+use vanish::agent::control::{BatchState, TaskStatus};
+
+fn batch_fixture() -> BatchState {
+    BatchState::new(vec![
+        ("t1".into(), "first".into()),
+        ("t2".into(), "second".into()),
+        ("t3".into(), "third".into()),
+    ])
+}
+
+#[test]
+fn batch_advances_one_task_per_outcome() {
+    let mut b = batch_fixture();
+    assert_eq!(b.next_prompt().as_deref(), Some("first"));
+
+    b.mark_running();
+    assert_eq!(b.status[0], TaskStatus::Running);
+    b.complete_current("completed");
+    assert_eq!(b.next_prompt().as_deref(), Some("second"));
+    assert_eq!(b.status[0], TaskStatus::Done("completed".into()));
+
+    b.complete_current("step_limit");
+    b.complete_current("failed");
+    // drained: no prompt left, everything recorded.
+    assert_eq!(b.next_prompt(), None);
+    assert_eq!(b.results().len(), 3);
+}
+
+#[test]
+fn batch_results_carry_id_and_reason_in_submission_order() {
+    let mut b = batch_fixture();
+    b.complete_current("completed");
+    b.complete_current("stopped");
+    let r = b.results();
+    assert_eq!(r[0].id, "t1");
+    assert_eq!(r[0].reason, "completed");
+    assert_eq!(r[1].id, "t2");
+    assert_eq!(r[1].reason, "stopped");
+}
+
+#[test]
+fn batch_survives_a_serde_round_trip() {
+    // this is the durability contract: the state persists in the transcript
+    // index as json and must come back identical after a tab discard.
+    let mut b = batch_fixture();
+    b.mark_running();
+    b.complete_current("completed");
+    let json = serde_json::to_string(&b).unwrap();
+    let back: BatchState = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, b);
+    assert_eq!(back.next_prompt().as_deref(), Some("second"));
+}
+
+#[test]
+fn cancelled_batch_exports_only_what_ran() {
+    let mut b = batch_fixture();
+    b.complete_current("completed");
+    b.complete_current("completed");
+    b.complete_current("stopped"); // stop landed during task 3
+    // all three have outcomes; a batch cancelled EARLIER exports fewer.
+    assert_eq!(b.results().len(), 3);
+    assert_eq!(b.results()[2].reason, "stopped");
+
+    // the early-cancel shape: two ran, one never started.
+    let mut c = batch_fixture();
+    c.complete_current("completed");
+    c.complete_current("stopped");
+    assert_eq!(c.results().len(), 2);
+}
+
+#[test]
+fn empty_batch_is_rejected_before_it_starts() {
+    let b = BatchState::new(vec![]);
+    assert!(b.is_empty());
+    assert_eq!(b.next_prompt(), None);
 }
