@@ -235,6 +235,15 @@ fn seeding_fires_for_role_absence_not_empty_history() {
     // a restored thread still carrying its prompt must NOT get a second one.
     assert!(!needs_system_seed(&[Message::system("sys"), Message::user("go")]));
 
+    // negative control: the old is_empty() gate misses the aged-out case by
+    // construction — pinned so nobody "simplifies" back to it.
+    let aged_out = [Message::user("old task")];
+    assert!(
+        needs_system_seed(&aged_out),
+        "non-empty history without a system role still needs seeding"
+    );
+}
+
 // ---- scenario 6: batch queue (the programmatic driver) --------------------
 // a benchmark harness submits tasks and reads outcomes. BatchState is the
 // durable queue: it must advance exactly one task per outcome, survive a
