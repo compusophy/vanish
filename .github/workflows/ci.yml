@@ -52,10 +52,10 @@ jobs:
       # the check that actually matters for deploys: does THIS code compile
       # where production builds it?
       #
-      # lib + bins ONLY. --all-targets would also pull the integration tests
-      # onto the wasm target, where the `test` crate is not shipped at all:
-      # that died instantly with E0463 on this workflow's very first run
-      # (pinned by tests/ci_gate.rs). tests are gated natively below.
+      # lib + bins ONLY. building the integration tests FOR the wasm target
+      # would fail every run with E0463, because the `test` crate is not
+      # shipped for wasm32-unknown-unknown at all (pinned by tests/ci_gate.rs).
+      # tests are gated natively below.
       #
       # output is ALWAYS captured to /tmp/wasm-check.log so the diagnostics
       # step can publish it whether this passes or fails.

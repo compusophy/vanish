@@ -97,23 +97,27 @@ fn ci_checks_the_wasm_target_before_anyone_trusts_a_commit() {
 }
 
 /// the workflow's very first run died instantly with exit code 101: the wasm
-/// step used `--all-targets`, which builds the integration tests FOR wasm32
-/// too — and the `test` crate is not shipped for wasm32-unknown-unknown at
-/// all, so every checkout fails at E0463 regardless of code health. the wasm
-/// proof must cover what production ships (lib + bins); the tests are gated
-/// natively by the shared script. pinned here because the tempting "fix" is
-/// to re-add --all-targets for thoroughness.
+/// step used a flag that also builds the integration tests FOR wasm32 — and
+/// the `test` crate is not shipped for wasm32-unknown-unknown at all, so
+/// every checkout fails with E0463 regardless of code health. the wasm proof
+/// must cover what production ships (lib + bins); tests are gated natively
+/// by the shared script. pinned here because the tempting "fix" is to
+/// re-widen the check for thoroughness.
+///
+/// (the assertion greps for the flag itself, so this doc comment must never
+/// spell that flag out: a grep guard is defeated by prose mentioning it.)
 #[test]
 fn the_wasm_check_never_builds_test_crates() {
     let Some(wf) = workflow_source() else {
         return;
     };
+    // assembled so this source file never contains the literal either.
+    let flag = format!("--{}{}", "all", "-targets");
     assert!(
-        !wf.contains("--all-targets"),
-        ".github/workflows/ci.yml checks --all-targets on wasm32. the `test` \
-         crate is not precompiled for wasm32-unknown-unknown, so this fails \
-         every run with E0463 ('can't find crate for `test`') no matter how \
-         healthy the code is. check --lib --bins for wasm; leave the tests \
-         to the native gate."
+        !wf.contains(&flag),
+        ".github/workflows/ci.yml widens the wasm check to every target \
+         again. building tests for wasm32 fails every run because the \
+         `test` crate does not exist for that target. check lib + bins \
+         for wasm; leave the tests to the native gate."
     );
 }
