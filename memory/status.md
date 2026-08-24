@@ -2,6 +2,25 @@
 
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
+>
+> read CHARTER.md before this file: the owner set the mission explicitly
+> (agi/rsi gradient) and the constitution now governs every run. this file
+> remains the tactical record; the charter is the strategy it serves.
+
+## landed this run (the charter)
+
+user asked "shouldn't we have a mission/constitution? we are trying to
+build agi, rsi, asi". CHARTER.md written: the mission (recursive
+self-improvement toward general capability, vanish as self-sovereign
+vehicle) + eight articles derived from existing D-law + honest current-
+state section (not agi; weak rsi with human-steered objectives; goal
+generation out of scope until widened) + measures of progress +
+amendment clause (owner enacts, agent proposes only).
+
+- system prompt self-maintenance section now reads CHARTER.md first.
+- TASKBOARD header carries the read order: charter → taskboard → status.
+- no behavior change in code beyond the prompt text; no test needed
+  (prompt content is data).
 
 ## this run: five red builds, one root cause family, and the self-repair loop finally exists
 

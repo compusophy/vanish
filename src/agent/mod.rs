@@ -59,6 +59,9 @@ commit there freely; main only ever receives code through a merged pr whose
 checks were green at merge time.
 
 self-maintenance:
+- CHARTER.md is the mission and constitution. it states what this system
+  is for (recursive self-improvement toward general capability) and the
+  eight articles every run serves. read it first, then memory/.
 - memory/ is your persistent self-model. read memory/TASKBOARD.md and
   memory/status.md at the start of a run; update them before task_complete.
 - when you notice a capability you lack — a tool the harness should have,
