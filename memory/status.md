@@ -3,7 +3,57 @@
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 
-## landed this run (auto-reconcile + clippy gate — build order item 1 DONE)
+## landed this run (batch/task-queue mode — build order item 2 DONE, 2249454)
+
+vanish is now SCORABLE. the programmatic driver exists:
+
+- **Command::RunBatch { tasks: Vec<BatchTask> }** — each task {id, prompt}
+  runs sequentially through start_run (the SAME path as a typed prompt, so
+  batch behavior cannot diverge from interactive behavior).
+- **results export**: opfs `vanish-batch/results.json` rewritten after EVERY
+  task (a harness can poll mid-batch) + Event::BatchFinished on the wire.
+  BatchResult = {id, reason ("completed"|"stopped"|"step_limit"|"failed"),
+  steps}.
+- **durability rides the resume machinery**: BatchState persists in the
+  transcript index beside LoopResume; boot resumes a parked batch BEFORE
+  marker handling (a batch can be interrupted between tasks — no marker,
+  no run in flight), and unlike the marker it is NOT cleared on read (it
+  must survive repeated boots until drained or cancelled). stop cancels
+  remaining queue; failures/step-limits are recorded and the batch continues.
+- **enqueue_batch(tasks_json)** wasm export = the external entry point.
+- tests: RunBatch/BatchFinished protocol round-trips; 5 new evals pinning
+  BatchState advance/order/serde-round-trip/cancelled-export/empty-reject.
+
+### how this run went (5 red builds before green — honest accounting)
+
+every failure named by build logs, but the pattern matters more than any
+one error:
+1. E0308 &str→String, then its own follow-up one line later (&str param at
+   the call site the first fix's diff should have included). lesson: after
+   fixing a signature mismatch, re-read EVERY use of the value you touched.
+2. E0004 non-exhaustive tuple match on (Option, Option) where one arm was
+   impossible — restructured to map-then-match so the impossible state
+   cannot be expressed at all.
+3. E0433 crate::protocol in an integration test → vanish::protocol.
+   rule 2b's sibling: inside tests/, the crate is the EXTERN, not crate::.
+4. E0063 missing `batch` field in THREE Index literals in platform_logic.rs
+   — the exact failure class I had documented IN THE PREVIOUS COMMIT
+   MESSAGE (5e79eff precedent), committed anyway. grep literals across src/
+   AND tests/ when a serde shape gains a field; serde(default) hides gaps
+   everywhere except literals. THIS IS NOW THE MOST-REPEATED SELF-INFLICTED
+   ERROR IN THE PROJECT'S HISTORY (3rd occurrence).
+5. unclosed delimiter: my scenario-6 insert REPLACED the seeding test's
+   tail instead of following it. edit_file with an insert-shaped target
+   must include everything it displaces; full-file re-read after repair.
+
+the meta-lesson: these were all mechanical errors visible to cargo check.
+the deploy pipeline is ~4min; each red cost ~8min of main pinned. until a
+local compile gate exists, the cheapest defense is slowing down at commit
+time: re-read every changed hunk + grep for shape-literal fallout BEFORE
+git_commit, because the build log only tells you afterward what patience
+would have said before.
+
+## landed earlier this session (auto-reconcile + clippy gate — item 1)
 
 - [x] **auto-reconcile at session start** (7b9c43a + fixes): the worker runs
       the D10 reconcile pass on the FIRST Configure whose github token

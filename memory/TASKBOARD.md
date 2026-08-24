@@ -91,12 +91,19 @@ taskboard) asked for four things. all four are resolved:
 ## open work
 
 - [ ] **v1 / benchmark readiness** — build order: ~~(1) auto-reconcile~~
-      **DONE (7b9c43a, this run)** → (2) batch/task-queue mode +
-      machine-readable result export (nothing can drive the agent except
-      typed prompts) → (3) internal eval harness: ~20 pinned self-edit tasks
-      scored by green deploy + cargo test → (4) branch isolation via agent/*
-      refs (STACKED_PRS_PLAN §4) BEFORE any concurrency or external
-      benchmark. multiworker pool only after 4.
+      DONE · ~~(2) batch/task-queue + export~~ **DONE (2249454)** →
+      (3) internal eval harness: ~20 pinned self-edit tasks driven through
+      Command::RunBatch / enqueue_batch, scored from
+      vanish-batch/results.json by green deploy + cargo test → (4) branch
+      isolation via agent/* refs (STACKED_PRS_PLAN §4) BEFORE any
+      concurrency or external benchmark. multiworker pool only after 4.
+
+- [ ] **verify batch mode live**: enqueue a 2-task batch (e.g. via console:
+      `vanish.enqueue_batch('[{"id":"t1","prompt":"read README.md and say
+      done"},{"id":"t2","prompt":"list files"}]')`). expect ▶ task notes,
+      results.json appearing in the file tree after each task, ☑ finished
+      card. then reload mid-batch: expect "↻ resuming interrupted batch".
+      stop mid-batch: expect "cancelled" and remaining tasks dropped.
 
 - [ ] **verify auto-reconcile live** (landed 7b9c43a): reload the app with
       credentials saved. expect the "⇅ tree reconciled against <sha> at
