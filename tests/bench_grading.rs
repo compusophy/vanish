@@ -88,10 +88,16 @@ fn file_excludes_fails_when_token_survives_anywhere() {
     let partial = snap(&[("vanish-bench/todo.md", "- keep\n- REMOVE_ME later")]);
     assert!(!c.check(&partial), "surviving token must fail the checker");
 
-    // a deleted FILE trivially contains nothing — this counts as passing,
-    // which is correct for "remove the line": the line cannot survive a
-    // deleted file. pinned so the semantics are a decision, not an accident.
-    assert!(c.check(&snap(&[])));
+    // an ABSENT file fails too, deliberately: FileExcludes demands the file
+    // EXIST and be clean. deleting the entire todo.md is not completing
+    // "delete the line" — it is destroying the file — and grading it as
+    // success would make every removal task gameable by rm. this strictness
+    // is also what makes "an empty tree scores zero" true at the suite
+    // level (pinned by grade_all_reports_every_pinned_task_in_order).
+    assert!(
+        !c.check(&snap(&[])),
+        "a removed file must not satisfy a removal checker"
+    );
 }
 
 // ---- exists / count / commit ----------------------------------------------
@@ -109,6 +115,9 @@ fn test_count_and_commit_checkers_read_the_snapshot() {
     assert!(!Checker::TestCountAtLeast { minimum: 10 }.check(&s));
     s.test_count = 10;
     assert!(Checker::TestCountAtLeast { minimum: 10 }.check(&s));
+    // the snapshot starts with has_commit=false (snap() pins that); a commit
+    // landing is what flips it, and CommitExists reads exactly that fact.
+    s.has_commit = true;
     assert!(Checker::CommitExists.check(&s.clone()));
     s.has_commit = false;
     assert!(!Checker::CommitExists.check(&s));
