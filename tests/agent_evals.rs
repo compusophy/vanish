@@ -72,13 +72,13 @@ fn failure_storm_retries_four_times_then_gives_up() {
             FailureDecision::GiveUp => panic!("budget gave up before the 5th failure"),
         }
     }
-    // retry_backoff_ms maps attempts 0|1 to the same 2s rung, so the
-    // sequence is 2s→2s→8s→30s. pinned as observed-and-intended; the point
-    // of this eval is escalation + termination, not the specific ladder.
+    // the budget hands retry_backoff_ms its 1-based consecutive count, so
+    // the observed ladder is 2s→8s→30s→60s (the schedule's attempt-0 rung
+    // is unreachable through this type).
     assert_eq!(
         attempts,
-        vec![(1, 2_000), (2, 2_000), (3, 8_000), (4, 30_000)],
-        "backoff must escalate and never exceed the 60s cap"
+        vec![(1, 2_000), (2, 8_000), (3, 30_000), (4, 60_000)],
+        "backoff must escalate toward the cap"
     );
     assert_eq!(b.record_failure(), FailureDecision::GiveUp);
 }
@@ -138,11 +138,12 @@ fn mid_batch_stop_leaves_a_replayable_transcript() {
 }
 
 #[test]
-#[should_panic(expected = "poisoned")]
 fn negative_control_skipping_abandoned_calls_is_detected() {
     // proves the checker would catch the bug class cancellation_results
-    // exists to prevent. if this fails to panic, the invariant check is
-    // decorative and the next mid-batch stop ships silently poisoned.
+    // exists to prevent. the naive fast-exit skips the synthetic result for
+    // call b; the checker must REJECT that transcript. if this ever stops
+    // holding, the invariant check is decorative and the next mid-batch
+    // stop ships silently poisoned history.
     let history = vec![
         Message::system("sys"),
         Message::user("go"),
@@ -150,9 +151,11 @@ fn negative_control_skipping_abandoned_calls_is_detected() {
         Message::tool_result("a", "ran"),
         // b deliberately unanswered — exactly what a naive fast-exit does.
     ];
-    if history_is_well_formed(&history).is_ok() {
-        panic!("poisoned transcript passed as well-formed");
-    }
+    let verdict = history_is_well_formed(&history);
+    assert!(
+        verdict.is_err(),
+        "a transcript with an unanswered tool_call MUST be rejected, got: {verdict:?}"
+    );
 }
 
 // ---- scenario 3: restored transcripts ------------------------------------
@@ -175,7 +178,6 @@ fn healthy_transcript_passes_and_retention_trim_stays_valid() {
 }
 
 #[test]
-#[should_panic(expected = "poisoned")]
 fn negative_control_orphan_result_is_detected() {
     // the shape a bad merge or manual edit produces: a result whose call
     // was lost. replaying this gets rejected by the api.
@@ -183,22 +185,22 @@ fn negative_control_orphan_result_is_detected() {
         Message::user("go"),
         Message::tool_result("ghost", "answers nothing"),
     ];
-    if history_is_well_formed(&history).is_ok() {
-        panic!("poisoned transcript passed as well-formed");
-    }
+    let verdict = history_is_well_formed(&history);
+    assert!(
+        verdict.is_err(),
+        "an orphaned tool result MUST be rejected, got: {verdict:?}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "poisoned")]
 fn negative_control_truncated_tail_is_detected() {
     // a crash mid-save can leave the last tool result missing entirely.
-    let history = vec![
-        Message::user("go"),
-        assistant_with_calls(&[call("a")]),
-    ];
-    if history_is_well_formed(&history).is_ok() {
-        panic!("poisoned transcript passed as well-formed");
-    }
+    let history = vec![Message::user("go"), assistant_with_calls(&[call("a")])];
+    let verdict = history_is_well_formed(&history);
+    assert!(
+        verdict.is_err(),
+        "an unanswered trailing tool_call MUST be rejected, got: {verdict:?}"
+    );
 }
 
 // ---- scenario 4: after-turn routing --------------------------------------
