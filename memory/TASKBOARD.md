@@ -114,14 +114,18 @@ taskboard) asked for four things. all four are resolved:
       before building HashMap<conversation, WorkerHandle>; if yes, git
       strategy must land before concurrent agents share one tree.
 
-- [x] **verification layer for autonomous loop mode** — LANDED (267647f).
-      cargo test runs in build.sh; a failing test fails the deploy. three
-      suites cover protocol round-trips, the traversal guard, transcript
-      index logic, and SSE tool-call reassembly. system prompt rule 8
-      requires each iteration to state observable behavior + verification.
-      the evidence standard for unattended loop mode is now "compiles AND
-      passes tests", not just "compiles". next hardening step if needed:
-      extend coverage as new pure logic lands (rule 8 enforces this).
+- [x] **verification layer for autonomous loop mode** — LANDED (267647f),
+      EXTENDED into behavioral evals (1d3a6a8): cargo test runs in build.sh
+      per-suite with markers; a failing test fails the deploy. suites:
+      protocol contract, platform logic (+ reconcile_entry), loop nervous
+      system, event-loop liveness, streaming, and agent_evals (failure
+      storm, mid-batch stop replayability, restored transcripts, after-turn
+      routing, seeding) — the evals carry negative controls that directly
+      assert rejection verdicts. system prompt rule 8 requires each
+      iteration to state observable behavior + verification. next
+      hardening step: evals for ui-state machines (dock transitions,
+      thread routing) once their logic is extracted pure; live-fire the
+      D10 refusal in a real session; verify bell + OTA notices render.
 
 - [x] web access — `http_fetch`, `web_read` (r.jina.ai reader proxy),
       `web_search` (duckduckgo instant answers) in `src/agent/tools.rs`,

@@ -529,3 +529,42 @@ occurrence of the same mechanism. what landed:
   they are its most dangerous victim, because deleting a directive deletes
   the defense against the next incident. treat memory/ edits with the same
   raw-blob cross-check as source edits.
+
+## landed this run (behavioral eval layer)
+
+the user's ask: "make the app better in a verifiable eval way, not just
+guessing." the gap: unit tests pinned pure functions, but the loop's
+DECISIONS had zero behavioral coverage — exactly where two bricking bugs
+shipped.
+
+- [x] `src/agent/control.rs`: the loop's decision layer extracted as pure
+      code — FailureBudget (consecutive counting + give-up threshold),
+      decide_after_turn (tools/nudge/complete), cancellation_results,
+      needs_system_seed, history_is_well_formed (every tool_call answered
+      before the next assistant turn).
+- [x] agent::run routes all decisions through control::* and EVERY exit
+      path goes through one exit! macro asserting transcript well-formedness
+      before returning. violations log loudly at the source instead of
+      surfacing days later as an api rejection.
+- [x] tests/agent_evals.rs: five scenarios WITH negative controls that
+      directly assert rejection verdicts (see lesson below). ten evals total.
+- [x] **notify::wire was dead code** — boot_ui never called it, so even the
+      self-mounting DOM would never have rendered. wired into boot; the
+      bell is live for real now. caught via dead-code warnings in the build
+      log — read those warnings, they are diagnosis.
+- [x] build.sh: per-suite test runs with markers + --nocapture +
+      RUST_BACKTRACE=1. parallel/captured runs could kill the harness
+      before any failing test printed, naming nothing.
+- lessons, paid for in three red builds:
+  1. **a #[should_panic] negative control must panic when the checker is
+     RIGHT about BAD input.** my first controls asserted on the wrong side
+     and punished the checker for rejecting corruption — they would have
+     failed on every future checker improvement and passed on regressions.
+     assert the Err verdict directly instead.
+  2. **verify the counting base before pinning a ladder**: FailureBudget
+     counts 1-based, so retry_backoff_ms sees 1..4 → 2s/8s/30s/60s. i
+     "fixed" a correct table into a wrong one by assuming 0-based, and the
+     line number in the next failure exposed it.
+  3. truncated logs are a build-pipeline bug, not an inconvenience: if a
+     failure can occur without its name being visible, fix the pipeline
+     first, THEN debug.
