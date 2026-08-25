@@ -7,6 +7,51 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (path-claim registry — STACKED_PRS_PLAN §4 item 3, C1)
+
+user said "keep going". taskboard read: §4 items 1–2 of the stacked-prs
+plan (github.rs primitives, PR tooling) were already landed and pinned;
+item 3 — the opfs path-claim registry (plan §2 C1) — was the next
+buildable piece, and it is the prerequisite for the multiworker pool
+(phase 2). what landed on agent/path-claim-registry:
+
+- **src/agent/claims.rs (new)**: pure `ClaimRegistry` core — `check` /
+  `claim` / `release_conversation` / `release_paths` / `expire`, all
+  taking `now_ms` explicitly so every decision is testable without a
+  clock. verdict enum `Clear | Contested{holder}`; `CLAIM_TTL_MS = 30min`
+  so a vanished conversation cannot contest paths forever. expiry uses
+  saturating_sub so a backwards clock reads as old, never negative-fresh.
+  session-level accessors (`registry_*`) over a thread_local live in the
+  same file, same pattern as WorkerState — claims must outlive runs to be
+  useful (warning conv B about work conv A did earlier), and keeping the
+  global state behind accessors keeps the pure core directly unit-testable.
+- **wiring**: write_file and edit_file call `claim_path()` before writing
+  (edit_file only AFTER its ambiguity check passes — a refused edit must
+  not record a claim for work not done); a contested write PROCEEDS but
+  its result JSON carries `"warning": "⚠ path also claimed by conversation
+  'X' …"`. git_commit releases claims on committed paths (merged content
+  supersedes pre-commit state). git_status sweeps expired claims and now
+  reports `path_claims` + `claims_expired`. worker.rs gained
+  `active_conversation(f)` + `release_run_claims(conv)`; agent::run sets
+  the workspace's claim_owner from STATE.conversation at start, and
+  spawn_run's teardown releases that conversation's claims right after
+  clearing the resume marker (before RunFinished — release emits a Note).
+- tests/path_claims.rs (new suite): 13 evals with negative controls —
+  contested-vs-clear both directions, own-conversation revisits are NOT
+  conflicts (would false-alarm every multi-step edit), ttl boundary pinned,
+  backwards-clock control, check-does-not-record, release scoping (only
+  own claims / by-path regardless of owner), expire returns exactly the
+  dead entries, session-surface round trip, warning text names path +
+  holder + remedy.
+
+honest limits: single-worker today, so nothing can CONTEST anything yet —
+the registry is dormant until the phase-2 worker pool exists. that is per
+charter article i ("capabilities shipped before they are needed are waste"
+— this one shipped WITH its consumer one step away, not speculatively).
+live verification owed once a second worker exists: two conversations
+editing the same path → each sees the other's ⚠ warning; run ends →
+release note appears; git_status shows path_claims draining to empty.
+
 ## landed this run (the recurring boot reconcile error — root cause + fix)
 
 user: "it seems like this reconcile error happens a lot after completion".

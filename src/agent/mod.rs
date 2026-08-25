@@ -9,6 +9,7 @@
 //! presses stop — and never because the platform ran out of patience.
 
 pub mod bench;
+pub mod claims;
 pub mod control;
 pub mod github;
 pub mod http;
@@ -190,6 +191,10 @@ where
     // of a session passes through"); after auto-reconcile there is no such
     // blind spot — the guard is armed before any work happens.
     crate::worker::reconciled_head(|sha| workspace.synced_head = sha.to_string());
+    // attribute this run's file claims to its conversation (STACKED_PRS_PLAN
+    // §2 C1): when a second worker exists, concurrent conversations must see
+    // WHO holds a contested path, not just that someone does.
+    crate::worker::active_conversation(|id| workspace.claim_owner = id.to_string());
 
     let tool_defs = tools::definitions();
 

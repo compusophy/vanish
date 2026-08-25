@@ -349,6 +349,31 @@ thread_local! {
     static RECONCILED_HEAD: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+/// the conversation id of THIS run, read by agent::run so path claims are
+/// attributed to the right thread (STACKED_PRS_PLAN §2 C1). empty before
+/// boot completes; an unknown owner still gets its own claims recorded.
+pub fn active_conversation(f: impl FnOnce(&str)) {
+    let id = STATE.with(|s| s.borrow().conversation.clone());
+    f(&id);
+}
+
+/// called when a run ends: its claims must stop contesting paths, or
+/// finished work would warn future writes forever.
+pub fn release_run_claims(conversation_id: &str) -> Vec<String> {
+    let released = crate::agent::claims::registry_release_conversation(conversation_id);
+    if !released.is_empty() {
+        emit(Event::Note {
+            thread: conversation_id.to_string(),
+            text: format!(
+                "released {} path claim(s): {:?}",
+                released.len(),
+                released
+            ),
+        });
+    }
+    released
+}
+
 /// shared body of Command::Run and the boot-time loop resume. everything
 /// that checks state, emits RunStarted and drives the async run lives here
 /// so the two entry points cannot drift.
@@ -616,6 +641,12 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
         // EVERY run writes one now, so EVERY run clears one here; keeping
         // the old is_loop gate would strand markers behind finished runs.
         crate::platform::transcript::clear_loop_resume().await;
+
+        // and this run's path claims must not outlive it either: a finished
+        // conversation holding a claim would contest every future write to
+        // that path as a ghost. released paths are surfaced so the model can
+        // see what stopped being contested.
+        release_run_claims(&conversation_id);
 
         // RunFinished goes out FIRST — before the checkpoint drain, before
         // the final save. the buttons only flip back on this event, so

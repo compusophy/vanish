@@ -104,6 +104,30 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **path-claim registry LANDED (agent/path-claim-registry)** —
+      STACKED_PRS_PLAN §4 item 3 (§2 C1): pure ClaimRegistry in
+      src/agent/claims.rs (ttl 30min, saturating expiry), thread_local
+      session accessors, wired into write_file/edit_file (advisory ⚠
+      warning naming the holder), git_commit (release committed paths),
+      git_status (`path_claims` + `claims_expired`), worker run teardown
+      (release on end). 13 evals in tests/path_claims.rs with negative
+      controls. DORMANT until the phase-2 worker pool exists — single
+      worker means nothing can contest. live verification owed then:
+      two conversations edit one path → mutual ⚠; run ends → release
+      note; git_status drains to empty.
+- [ ] **worker pool / multiagent phase 2** — now unblocked by the claim
+      registry: HashMap<conversation, WorkerHandle> in ui/mod.rs, lazy
+      spawn, cap 3–4. claims give concurrent conversations their early
+      warning; git strategy (per-conversation agent/* branches) already
+      landed via branch_for_conversation. re-read docs/MULTIAGENT_PLAN.md
+      phases 2–3 before building.
+- [ ] **e2e workflow + preview deploys (STACKED_PRS_PLAN §4 items 4–5 /
+      §3 P1–P3)**: .github/workflows/e2e.yml driving playwright against a
+      vercel PREVIEW deployment (caveat: deployment protection may wall
+      previews behind auth — relax for previews or use a bypass token,
+      else nothing can test against them); e2e as required check on main;
+      system-prompt documentation of the merge discipline AFTER the tools.
+      this is what turns "deploy to production" into "promote-on-green".
 - [x] **pr_wait LANDED (PR #6 merged, squash ff1ad44)** — pr_status polling
       loops (8–10 identical calls per merge) flooded conversations; the user
       called it out explicitly. NEVER poll pr_status in a loop again: call
