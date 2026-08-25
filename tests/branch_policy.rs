@@ -7,8 +7,8 @@
 
 use vanish::agent::github::{Github, PrStatus};
 use vanish::agent::tools::{
-    branch_for_conversation, commit_allowed_on, pr_gate, should_keep_waiting, wait_step_ms,
-    PROTECTED_BRANCH,
+    branch_for_conversation, commit_allowed_on, default_deploy_target, pr_gate,
+    should_keep_waiting, wait_step_ms, PROTECTED_BRANCH,
 };
 
 // ---- ref naming ------------------------------------------------------------
@@ -134,4 +134,30 @@ fn the_wait_budget_bounds_pending_but_not_a_settled_answer() {
     // any settled verdict returns immediately regardless of budget.
     assert!(!should_keep_waiting("success", 0, u64::MAX));
     assert!(!should_keep_waiting("failure", 0, u64::MAX));
+}
+
+// ---- check_deployment's default target --------------------------------------
+//
+// with no sha named, the tool used to read the LIVE branch head — which by
+// check time is usually no longer this session's commit. one incident saw
+// main's head (with a CANCELLED duplicate workflow) reported as "our commit
+// failed". the default must be the sha THIS SESSION last synced/committed.
+
+#[test]
+fn deploy_check_defaults_to_this_sessions_head_not_the_live_one() {
+    // normal case: the session pushed 03884ee, but upstream/merge moved the
+    // branch to aaa1111 since. checking "our" commit must mean 03884ee.
+    assert_eq!(
+        default_deploy_target("03884ee6fda4a3ce2d1fd3941529532d4b94043e", "aaa1111"),
+        "03884ee6fda4a3ce2d1fd3941529532d4b94043e"
+    );
+}
+
+#[test]
+fn deploy_check_falls_back_to_live_head_only_when_never_synced() {
+    // an empty synced_head (session never synced or committed) has nothing
+    // better to offer than the live head.
+    assert_eq!(default_deploy_target("", "aaa1111"), "aaa1111");
+    // whitespace-only counts as empty too — trim before trusting.
+    assert_eq!(default_deploy_target("   ", "bbb2222"), "bbb2222");
 }

@@ -100,14 +100,27 @@ impl DeployState {
     /// pub + pure: tests/loop_nervous_system.rs pins this matrix, and it is
     /// the exact logic check_deployment uses to say whether a commit is live.
     pub fn from(checks: Vec<CheckSummary>) -> Self {
-        let failed = |s: &str| matches!(s, "failure" | "error" | "timed_out" | "cancelled");
+        // a CANCELLED run is a non-verdict, not a failure: github cancels
+        // duplicate workflow runs when a newer commit supersedes them, so the
+        // cancellation says "this build was skipped", never "the code broke".
+        // counting it as failure once reported our own green landing as red.
+        // drop it BEFORE aggregating; if nothing decisive remains, the state
+        // is honestly "none" (an unread signal) rather than a fabricated
+        // verdict. the raw checks stay attached for display either way.
+        let decisive: Vec<CheckSummary> = checks
+            .iter()
+            .filter(|c| c.state != "cancelled")
+            .cloned()
+            .collect();
+
+        let failed = |s: &str| matches!(s, "failure" | "error" | "timed_out");
         let running = |s: &str| matches!(s, "pending" | "queued" | "in_progress" | "waiting");
 
-        let verdict = if checks.is_empty() {
+        let verdict = if decisive.is_empty() {
             "none"
-        } else if checks.iter().any(|c| failed(&c.state)) {
+        } else if decisive.iter().any(|c| failed(&c.state)) {
             "failure"
-        } else if checks.iter().any(|c| running(&c.state)) {
+        } else if decisive.iter().any(|c| running(&c.state)) {
             "pending"
         } else {
             "success"
