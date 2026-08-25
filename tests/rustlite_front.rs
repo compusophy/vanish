@@ -132,10 +132,10 @@ fn parens_override_precedence() {
 }
 
 #[test]
-fn while_loop_let_and_calls_parse() {
+fn while_loop_let_assign_and_return_parse() {
     let src = r#"
         fn count(n: i32) -> i32 {
-            let i = 0;
+            let i: i32 = 0;
             while i < n {
                 i = i + 1;
             }
@@ -153,17 +153,37 @@ fn while_loop_let_and_calls_parse() {
         }
         other => panic!("expected let, got {other:?}"),
     }
-    let Stmt::While { cond, .. } = &fns[0].body.stmts[1] else {
+    let Stmt::While { cond, body } = &fns[0].body.stmts[1] else {
         panic!("expected while");
     };
     assert_eq!(
         *cond,
         bin(BinOp::Lt, Expr::Var("i".into()), Expr::Var("n".into()))
     );
+    // the loop body carries the assignment: i = i + 1
+    match &body.stmts[0] {
+        Stmt::Assign { name, value } => {
+            assert_eq!(name, "i");
+            assert_eq!(
+                *value,
+                bin(BinOp::Add, Expr::Var("i".into()), Expr::IntLit(1))
+            );
+        }
+        other => panic!("expected assignment in loop body, got {other:?}"),
+    }
     match &fns[0].body.stmts[2] {
         Stmt::Return(Some(Expr::Var(v))) => assert_eq!(v, "i"),
         other => panic!("expected `return i;`, got {other:?}"),
     }
+}
+
+#[test]
+fn untyped_let_is_refused_the_annotation_is_required_in_v1() {
+    let err = parse("fn f() -> i32 { let x = 1; return x; }").unwrap_err();
+    assert!(
+        err.msg.contains("type name") || err.msg.contains("found"),
+        "{err:?}"
+    );
 }
 
 #[test]

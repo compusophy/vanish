@@ -210,7 +210,14 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
+    /// typed binding: `let x: i32 = expr;`. the annotation is REQUIRED in
+    /// v1 — it keeps type checking a one-pass walk instead of an inference
+    /// engine, which is the whole reason the checker stays small.
     Let { name: String, ty: Ty, init: Expr },
+    /// reassignment of a binding or parameter in scope: `x = expr;`.
+    /// emission maps to wasm local.set; assigning to an undeclared name is
+    /// a checker error, not a parse error (parsing stays scope-blind).
+    Assign { name: String, value: Expr },
     While { cond: Expr, body: Block },
     Return(Option<Expr>),
     Expr(Expr),
@@ -444,12 +451,26 @@ impl Parser {
                 self.expect(&Tok::Semi)?;
                 Ok(Stmt::Return(value))
             }
+            Some(Tok::Ident(_)) if self.is_assign_stmt() => {
+                let name = self.ident()?;
+                self.next(); // consume the '=' peeked at below
+                let value = self.parse_expr(0)?;
+                self.expect(&Tok::Semi)?;
+                Ok(Stmt::Assign { name, value })
+            }
             _ => {
                 let e = self.parse_expr(0)?;
                 self.expect(&Tok::Semi)?;
                 Ok(Stmt::Expr(e))
             }
         }
+    }
+
+    /// disambiguates `x = ...;` (assignment) from an expression statement.
+    /// only lookahead, never consumes. a bare `=` can never start a valid
+    /// expression in v1 (no compound ops yet), so two tokens decide it.
+    fn is_assign_stmt(&self) -> bool {
+        matches!(self.toks.get(self.pos + 1), Some(Tok::Assign))
     }
 
     /// Pratt parser over the fixed precedence ladder. levels are indices:
