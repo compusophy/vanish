@@ -101,7 +101,6 @@ fn verdict_matrix() {
         (vec![("vercel", "success"), ("vercel", "failure")], "failure"),
         (vec![("vercel", "error")], "failure"),
         (vec![("vercel", "timed_out")], "failure"),
-        (vec![("vercel", "cancelled")], "failure"),
         // still-running beats success: reporting success mid-build would
         // let the loop move on from possibly-broken code.
         (vec![("vercel", "success"), ("vercel", "pending")], "pending"),
@@ -126,6 +125,41 @@ fn verdict_matrix() {
         assert_eq!(state.checks.len(), raw.len());
         assert_eq!(state.settled(), expected == "success" || expected == "failure");
     }
+}
+
+// ---- cancelled is a non-verdict, not a failure -----------------------------
+// github cancels superseded duplicate workflow runs; that says "skipped",
+// never "broken". counting cancellation as failure once reported our own
+// green landing as red and stalled a whole session. these pin the repair.
+
+#[test]
+fn a_cancelled_check_alone_is_not_a_failure() {
+    // negative control on the OLD bug: this exact input used to assert
+    // "failure". now it must be an honest non-verdict.
+    let state = DeployState::from(checks(&[("verify", "cancelled")]));
+    assert_eq!(state.verdict, "none");
+    assert!(!state.settled(), "a skipped build must keep the loop waiting, not declare victory or defeat");
+
+    // the raw checks are preserved for display even though they did not
+    // drive the verdict.
+    assert_eq!(state.checks.len(), 1);
+    assert_eq!(state.checks[0].state, "cancelled");
+}
+
+#[test]
+fn cancellation_never_masks_a_real_verdict() {
+    // cancelled + green → success: the surviving run's word stands.
+    let state = DeployState::from(checks(&[("dup", "cancelled"), ("vercel", "success")]));
+    assert_eq!(state.verdict, "success");
+
+    // cancelled + red → failure: a real failure still wins immediately.
+    let state = DeployState::from(checks(&[("dup", "cancelled"), ("vercel", "failure")]));
+    assert_eq!(state.verdict, "failure");
+    assert!(state.settled());
+
+    // cancelled + still-running → pending: waiting beats guessing.
+    let state = DeployState::from(checks(&[("dup", "cancelled"), ("vercel", "in_progress")]));
+    assert_eq!(state.verdict, "pending");
 }
 
 #[test]

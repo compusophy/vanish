@@ -159,6 +159,26 @@ pub fn should_keep_waiting(verdict: &str, waited_ms: u64, budget_ms: u64) -> boo
     verdict == "pending" && waited_ms < budget_ms
 }
 
+// ---- check_deployment decisions (pure so tests can pin them) ---------------
+
+/// which commit check_deployment judges when the model does not name one.
+///
+/// NOT the branch head. by the time check_deployment runs, the head has
+/// usually moved past this session's commit (a later run, an upstream push,
+/// or the merge itself), and reading the wrong sha reports a verdict for
+/// work nobody asked about — one incident saw a CANCELLED duplicate
+/// workflow on main's head reported as "our commit failed". the honest
+/// default is the newest sha THIS SESSION pushed or synced against:
+/// `synced_head`. only when the session has never synced do we fall back to
+/// the live branch head, because there is nothing better to offer.
+pub fn default_deploy_target(synced_head: &str, live_head: &str) -> String {
+    if synced_head.trim().is_empty() {
+        live_head.to_string()
+    } else {
+        synced_head.to_string()
+    }
+}
+
 /// the current wall-clock time in milliseconds since the unix epoch.
 /// wasm asks the browser (`js_sys::Date`); the native test build falls back
 /// to `std::time`. no network request is involved either way.
@@ -484,7 +504,7 @@ pub fn definitions() -> serde_json::Value {
           "parameters": {
             "type": "object",
             "properties": {
-              "sha": { "type": "string", "description": "commit to check; omit for the current branch head" },
+              "sha": { "type": "string", "description": "commit to check; omit for THIS SESSION's last synced/committed sha (falls back to the live branch head only if this session never synced)" },
               "wait": { "type": "boolean", "description": "wait for the build to settle instead of returning a pending snapshot (default true)" }
             }
           }
@@ -1092,7 +1112,14 @@ impl Workspace {
             "check_deployment" => {
                 let sha = match arg(&args, "sha") {
                     Some(s) if !s.trim().is_empty() => s.to_string(),
-                    _ => self.github.head_sha().await?,
+                    // default to THIS SESSION's synced head, not the live
+                    // branch head: by now the head has usually moved past the
+                    // commit we just pushed, and a verdict for someone else's
+                    // sha is worse than no verdict (D4 — misattributed signal).
+                    _ => {
+                        let live = self.github.head_sha().await?;
+                        default_deploy_target(&self.synced_head, &live)
+                    }
                 };
                 let wait = args
                     .get("wait")
