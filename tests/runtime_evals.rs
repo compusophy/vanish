@@ -3,12 +3,12 @@
 //! hostile-input fuzz that makes "a cartridge can only trap, never panic"
 //! a structural property rather than an aspiration.
 
-use vanish::cartridges::runtime::{decode, invoke, Trap, Val};
+use vanish::cartridges::runtime::{decode, invoke, Trap, Val, MAX_CALL_DEPTH};
 use vanish::cartridges::{rustlite::parse, wasm::emit_module};
 
 fn compile(src: &str) -> Vec<u8> {
-    let fns = parse(src).expect("parse");
-    emit_module(&fns).expect("emit")
+    let program = parse(src).expect("parse");
+    emit_module(&program).expect("emit")
 }
 
 /// compile and return (module, entry function index by source order).
@@ -58,9 +58,8 @@ fn calls_compose_across_frames() {
 #[test]
 fn deep_call_chains_keep_frames_isolated() {
     // three frames deep; every level reads its own param, not a caller's.
-    // rustlite v1 has no if-statement yet (recursion needs it), so frame
-    // isolation is proven with a fixed chain instead of self-recursion —
-    // revisit when `if` lands.
+    // a fixed chain proves isolation without recursion; recursion itself
+    // is proven below now that `if` exists.
     let src = r#"
         fn one(x: i64) -> i64 { return x + 1; }
         fn two(x: i64) -> i64 { return one(x) * 10; }
@@ -198,6 +197,22 @@ fn type_confusion_on_the_stack_traps_named() {
 }
 
 #[test]
+fn unreachable_traps_named_and_never_executes_in_checked_code() {
+    // hand-built: an `unreachable` that IS reached.
+    let mut m = module_shim();
+    m.funcs[0].code = vec![
+        vanish::cartridges::runtime::Instr::Unreachable,
+        vanish::cartridges::runtime::Instr::FunctionEnd,
+    ];
+    assert_eq!(invoke(&m, 0, &[], 1000).unwrap_err(), Trap::Unreachable);
+    // compiled: the emitter closes an every-path-returns body with one, and
+    // the checked program never gets there — both arms are exercised.
+    let (m, _) = build("fn m(a: i64, b: i64) -> i64 { if a > b { return a; } else { return b; } }");
+    assert_eq!(invoke(&m, 0, &[Val::I64(1), Val::I64(2)], 100).unwrap(), Some(Val::I64(2)));
+    assert_eq!(invoke(&m, 0, &[Val::I64(2), Val::I64(1)], 100).unwrap(), Some(Val::I64(2)));
+}
+
+#[test]
 fn branch_target_out_of_bounds_traps_named() {
     // hostile module: Br past the end of the code vector.
     let mut m = module_shim();
@@ -221,7 +236,182 @@ fn module_shim() -> vanish::cartridges::runtime::Module {
             code: vec![Instr::FunctionEnd],
             type_idx: 0,
         }],
+        ..Default::default()
     }
+}
+
+// ---- control flow: if/else and recursion -----------------------------------------
+
+#[test]
+fn if_else_selects_the_taken_arm() {
+    let src = "fn max(a: i64, b: i64) -> i64 { if a > b { return a; } else { return b; } }";
+    let (m, _) = build(src);
+    assert_eq!(invoke(&m, 0, &[Val::I64(3), Val::I64(9)], 100).unwrap(), Some(Val::I64(9)));
+    assert_eq!(invoke(&m, 0, &[Val::I64(9), Val::I64(3)], 100).unwrap(), Some(Val::I64(9)));
+    // no else: the false branch must land PAST the frame, not inside it.
+    let src = "fn clamp(x: i64) -> i64 { if x > 10 { x = 10; } return x; }";
+    let (m, _) = build(src);
+    assert_eq!(invoke(&m, 0, &[Val::I64(50)], 100).unwrap(), Some(Val::I64(10)));
+    assert_eq!(invoke(&m, 0, &[Val::I64(4)], 100).unwrap(), Some(Val::I64(4)));
+}
+
+#[test]
+fn else_if_chains_route_every_case() {
+    let src = r#"
+        fn sign(x: i64) -> i64 {
+            if x < 0 { return -1; } else if x == 0 { return 0; } else { return 1; }
+        }
+    "#;
+    let (m, _) = build(src);
+    for (input, want) in [(-7, -1), (0, 0), (12, 1)] {
+        assert_eq!(
+            invoke(&m, 0, &[Val::I64(input)], 100).unwrap(),
+            Some(Val::I64(want)),
+            "sign({input})"
+        );
+    }
+    // an if inside a loop, both arms mutating a local: falling out of the
+    // then-arm must SKIP the else-arm (the synthesized Br at `else`).
+    let src = r#"
+        fn f(n: i64) -> i64 {
+            let evens: i64 = 0;
+            let odds: i64 = 0;
+            while n > 0 {
+                if n % 2 == 0 { evens = evens + 1; } else { odds = odds + 1; }
+                n = n - 1;
+            }
+            return evens * 100 + odds;
+        }
+    "#;
+    let (m, _) = build(src);
+    assert_eq!(invoke(&m, 0, &[Val::I64(7)], 10_000).unwrap(), Some(Val::I64(304)));
+}
+
+#[test]
+fn recursion_computes_now_that_if_exists() {
+    let src = r#"
+        fn fib(n: i64) -> i64 {
+            if n < 2 { return n; }
+            return fib(n - 1) + fib(n - 2);
+        }
+    "#;
+    let (m, _) = build(src);
+    assert_eq!(invoke(&m, 0, &[Val::I64(10)], 1_000_000).unwrap(), Some(Val::I64(55)));
+    assert_eq!(invoke(&m, 0, &[Val::I64(1)], 100).unwrap(), Some(Val::I64(1)));
+}
+
+#[test]
+fn unbounded_recursion_traps_on_call_depth_not_the_native_stack() {
+    // no base case: frames pile up until the cap, then a NAMED trap. fuel
+    // is deliberately generous so depth is what ends it.
+    let src = "fn down(n: i64) -> i64 { return down(n - 1) + 1; }";
+    let (m, _) = build(src);
+    let err = invoke(&m, 0, &[Val::I64(0)], 100_000_000).unwrap_err();
+    assert_eq!(err, Trap::CallDepthExceeded(MAX_CALL_DEPTH));
+}
+
+// ---- memory and packing intrinsics ---------------------------------------------
+
+#[test]
+fn memory_intrinsics_read_back_what_they_wrote() {
+    let src = r#"
+        fn f() -> i32 {
+            store_i32(100, 305419896);
+            store_u8(200, 511);
+            return load_i32(100) + load_u8(200) + load_u8(101);
+        }
+    "#;
+    // 305419896 = 0x12345678; byte at 101 is 0x56 (little-endian); store_u8
+    // keeps only the low byte of 511 (= 0xff = 255).
+    let (m, _) = build(src);
+    let want = 305_419_896 + 255 + 0x56;
+    assert_eq!(invoke(&m, 0, &[], 100).unwrap(), Some(Val::I32(want)));
+    // a fresh invoke gets a fresh zeroed memory: nothing persists across
+    // bare invokes (the lifecycle owns persistence).
+    let src = "fn g() -> i32 { return load_i32(100); }";
+    let (m, _) = build(src);
+    assert_eq!(invoke(&m, 0, &[], 100).unwrap(), Some(Val::I32(0)));
+}
+
+#[test]
+fn memory_out_of_bounds_traps_named() {
+    let (m, _) = build("fn f() -> i32 { return load_i32(2000000000); }");
+    let err = invoke(&m, 0, &[], 100).unwrap_err();
+    assert!(matches!(err, Trap::MemoryOutOfBounds(_)), "{err:?}");
+    // the LAST byte of memory is readable as u8, but not as a 4-byte i32:
+    // the width check must include the access size, not just the address.
+    let pages = vanish::cartridges::abi::GUEST_MEMORY_PAGES as i32;
+    let last = pages * 65536 - 1;
+    let src = format!("fn f() -> i32 {{ return load_u8({last}); }}");
+    let (m, _) = build(&src);
+    assert_eq!(invoke(&m, 0, &[], 100).unwrap(), Some(Val::I32(0)));
+    let src = format!("fn f() -> i32 {{ return load_i32({last}); }}");
+    let (m, _) = build(&src);
+    assert!(matches!(invoke(&m, 0, &[], 100).unwrap_err(), Trap::MemoryOutOfBounds(_)));
+    // negative addresses are huge unsigned ones, never a wraparound read.
+    let (m, _) = build("fn f() -> i32 { return load_u8(-1); }");
+    assert!(matches!(invoke(&m, 0, &[], 100).unwrap_err(), Trap::MemoryOutOfBounds(_)));
+}
+
+#[test]
+fn memory_size_reports_the_fixed_page_count() {
+    let (m, _) = build("fn f() -> i32 { return memory_size(); }");
+    assert_eq!(
+        invoke(&m, 0, &[], 100).unwrap(),
+        Some(Val::I32(vanish::cartridges::abi::GUEST_MEMORY_PAGES as i32))
+    );
+}
+
+#[test]
+fn pack_and_unpack_round_trip_through_the_guest() {
+    let src = r#"
+        fn p(a: i32, b: i32) -> i64 { return pack(a, b); }
+        fn hi(v: i64) -> i32 { return unpack_ptr(v); }
+        fn lo(v: i64) -> i32 { return unpack_len(v); }
+    "#;
+    let (m, _) = build(src);
+    let packed = invoke(&m, 0, &[Val::I32(0x1234), Val::I32(77)], 100).unwrap();
+    assert_eq!(packed, Some(Val::I64(vanish::cartridges::pack(0x1234, 77))));
+    let Some(v) = packed else { panic!() };
+    assert_eq!(invoke(&m, 1, &[v], 100).unwrap(), Some(Val::I32(0x1234)));
+    assert_eq!(invoke(&m, 2, &[v], 100).unwrap(), Some(Val::I32(77)));
+    // the guest's pack agrees with the host's pack for large values too
+    // (the extend is UNSIGNED: a high-bit pointer must not sign-smear).
+    let big = invoke(&m, 0, &[Val::I32(-1), Val::I32(-1)], 100).unwrap();
+    assert_eq!(big, Some(Val::I64(vanish::cartridges::pack(u32::MAX, u32::MAX))));
+    assert_eq!(vanish::cartridges::unpack(vanish::cartridges::pack(u32::MAX, 5)), (u32::MAX, 5));
+    assert_eq!(vanish::cartridges::pack(0, 0), 0, "0 is the miss sentinel");
+}
+
+// ---- imports without a host --------------------------------------------------------
+
+#[test]
+fn an_import_call_without_a_host_traps_host_error() {
+    // bare invoke has no host by construction; a module that reaches for
+    // one gets a named trap pointing at the lifecycle, never a panic.
+    let src = "extern \"C\" { fn now_ms() -> i64; } fn t() -> i64 { return now_ms(); }";
+    let (m, _) = build(src);
+    let err = invoke(&m, 0, &[], 100).unwrap_err();
+    assert!(
+        matches!(err, Trap::HostError(ref msg) if msg.contains("no host")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn unknown_sections_are_refused_but_custom_sections_are_skipped() {
+    // a data segment (id 11) would initialize memory we do not implement:
+    // refusing is the D4-correct answer, not silently loading a module
+    // whose bytes mean something else.
+    let mut bytes = compile("fn f() -> i32 { return 1; }");
+    bytes.extend_from_slice(&[11, 1, 0]); // data section, 1 byte payload
+    let e = decode(&bytes).unwrap_err();
+    assert!(e.msg.contains("data"), "{e:?}");
+    // a custom section (id 0) carries names/producers and changes nothing.
+    let mut bytes = compile("fn f() -> i32 { return 1; }");
+    bytes.extend_from_slice(&[0, 3, 1, b'x', 7]);
+    let m = decode(&bytes).expect("custom section skipped");
+    assert_eq!(invoke(&m, 0, &[], 100).unwrap(), Some(Val::I32(1)));
 }
 
 // ---- decode refusals -----------------------------------------------------------
@@ -323,13 +513,21 @@ fn fuzz_decode_and_invoke_survive_every_corruption() {
     }
 }
 
-/// fuzz a few structurally interesting sources too (loops, calls, floats).
+/// fuzz a few structurally interesting sources too (loops, calls, floats,
+/// if/else, recursion, memory, imports, exports).
 #[test]
 fn fuzz_richer_modules_also_survive() {
     let sources = [
         "fn a(n: i64) -> i64 { let s: i64 = 0; let i: i64 = 0; while i < n { s = s + i; i = i + 1; } return s; }",
         "fn c() -> i64 { return d(3); } fn d(x: i64) -> i64 { return x * x; }",
         "fn e(p: f64, q: f64) -> bool { return p < q && q != 0.0; }",
+        "fn s(x: i64) -> i64 { if x < 0 { return -1; } else if x == 0 { return 0; } else { return 1; } }",
+        "fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }",
+        "fn m(a: i32) -> i64 { store_i32(a, 5); store_u8(a + 4, 9); return pack(load_i32(a), load_u8(a + 4)); }",
+        "extern \"C\" { fn now_ms() -> i64; fn log(l: i32, p: i32, n: i32); } \
+         pub fn cart_alloc(size: i32) -> i32 { return 8; } \
+         pub fn cart_init(p: i32, n: i32) -> i32 { log(1, p, n); return 0; } \
+         pub fn cart_handle(p: i32, n: i32) -> i64 { let t: i64 = now_ms(); return pack(p, n); }",
     ];
     for src in sources {
         let bytes = compile(src);

@@ -7,6 +7,97 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (cartridge item 5: lifecycle over L3 — agent/cartridge-lifecycle)
+
+owner said "keep going" (on a 90-minute loop). taskboard read: PR #15 had
+landed item 4 but the board still said "item 4 NEXT" — the memory edit
+was made at pr-open time, one item behind (same stranding class as PR
+#12's lesson). item 5 was the real next item. this run was done from the
+LOCAL checkout via cargo, not the browser agent — the local tree was 54
+commits behind origin and was fast-forwarded first (memory rule honored).
+
+what landed, in layer order:
+
+- **abi.rs (new)**: ONE table for the L1 surface. `HostFn` {log, now_ms,
+  store_get, store_set, emit} and `GuestFn` {cart_init, cart_handle,
+  cart_alloc} each carry their signature in rustlite types AND as
+  valtypes; `pack`/`unpack` define the `ptr<<32|len` result encoding;
+  the `Host` trait takes BYTES only. the compiler checks externs and
+  lifecycle exports against this table, the runtime resolves imports by
+  it, the lifecycle wires exports by it — one definition, no drift.
+- **rustlite**: `extern "C" { fn …; }` (only "C"; string tokens exist for
+  this one purpose and are refused as expressions with the workaround
+  named), `pub fn` = export (no attributes in v1), `if / else / else if`
+  (else-if desugars to a nested If — checker and emitter see two forms,
+  never three), eight intrinsics that parse as calls and lower inline
+  (rustlite has no pointers, casts, or shifts by design; these cover
+  exactly what the ABI needs). `Program {externs, fns}` replaces the bare
+  fn list. every-path-returns is now a CHECKER rule with the fix named.
+- **wasm.rs**: import (2) / memory (5, min==max==16 pages) / export (7)
+  sections, spec-ordered; function index space = imports then defined,
+  the same rule the runtime applies. `check_program` = module-level
+  contract (unique names, intrinsic names reserved, extern vs ABI,
+  lifecycle export vs ABI, lifecycle must be pub).
+- **runtime.rs**: decodes the new sections (custom sections still
+  skipped; every OTHER unknown section now REFUSED — silently dropping a
+  data segment would be the D4 failure in binary form), `if`/`else`
+  through the same unresolved-site patching as blocks/loops, memory ops
+  with u64 effective-address math, `Trap::{MemoryOutOfBounds,
+  CallDepthExceeded, Unreachable}`, MAX_CALL_DEPTH 1024, host dispatch
+  that COPIES every (ptr,len) before the host sees it, `guest_alloc` =
+  the host→guest hop for store_get, bounded at MAX_HOST_REENTRY 4.
+- **lifecycle.rs (new)**: `Cartridge::load` refuses at the door —
+  manifest, unknown import, import shape, missing/mis-shaped lifecycle
+  export, no exported memory — each naming the fix; `init` (nonzero
+  status = `Refused(code)`, verbatim); `handle` (packed answer bounds-
+  checked, bytes COPIED out). store_set refusal = status 1 to the guest;
+  emit failure = trap (no status channel to lose it in).
+- **tests/cartridge_lifecycle.rs (new, 14)**: an echo cartridge in
+  rustlite with a bump allocator, run through parse → emit → decode →
+  load → init → handle against a recording FakeHost: every host fn
+  observed through guest memory both ways, store_get round-trip via the
+  allocator, handle-before-init, refused init, fuel, emit failure, hostile
+  packed pointers, hostile allocator (positive and negative), re-entry
+  bomb, unknown import (hand-patched bytes), missing export, no memory
+  export, manifest gate, and the corruption fuzz across the host boundary.
+  runtime_evals +12 (if/else, else-if in loops, fib, depth cap, memory
+  intrinsics + last-byte width check, negative address, pack/unpack incl.
+  unsigned extend, no-host trap, section refusal), rustlite_emit +7
+  (cartridge validates under wasmparser, section order, ABI checks,
+  reserved names, if shapes, void statements), rustlite_front +3.
+
+three real bugs found by the new evals, all fixed before the first commit:
+1. **void calls were unwritable**: `check_expr` refused any void callee
+   ("returns nothing but is used as a value") even in statement position,
+   so `log(…);` could not exist. `check_call` now serves both positions;
+   the refusal survives only where a value is actually used.
+2. **item 4's decoder panicked on a SHORT body**: `r.pos - body_end`
+   underflowed when a corrupted size byte made the body end early. the
+   runtime fuzz never produced that shape from a pure module; the
+   cartridge-shaped fuzz did on its first run. same class as the section-
+   overshoot fix PR #15 recorded — the lesson generalizes: every unsigned
+   difference in an error path is a fuzz target.
+3. **every-path-returns bodies failed wasmparser**: after `if a>b {return
+   a;} else {return b;}` the validator sees an empty stack at the
+   function's `end` — it cannot know both arms returned. a trailing
+   `unreachable` (stack-polymorphic) closes it; the runtime turns it into
+   `Trap::Unreachable`, and a compiled test proves it never executes.
+
+local red→green cycles (native, not ci): E0499 twice on `dyn Host` — the
+trait object's lifetime is pinned to the reference's and `&mut T` is
+invariant, so a reborrow could not be shorter than the loop; `(dyn Host +
+'_)` gives it its own lifetime. `Cartridge` needed a manual Debug for
+`unwrap_err`. Cargo.lock had been stale since PR #14 added wasmparser
+(the browser agent cannot run cargo); refreshed and committed.
+
+verification: 93 cartridge-suite tests green natively; full shared gate
+(ci/run_tests.sh: lib + all suites + clippy -D warnings) and the wasm32
+`cargo check --lib --bins` run before push — result recorded in the pr.
+
+next: item 6 (L4 ports/requires wiring + cycle detection, pure graph
+first). language gap to schedule before item 8: string literals + data
+segments so a cartridge can name a topic or a key.
+
 ## landed this run (cartridge L1+L2 front-end — PR #13 merged 1fcd65c)
 
 owner said "send it!" twice. CARTRIDGE_PLAN §11 items 1–2 landed on

@@ -3,10 +3,16 @@
 //! the whole bet (CARTRIDGE_PLAN §5): full rustc-on-wasm fails on the
 //! LINKER; a language small enough to emit final wasm bytes directly has no
 //! linking step at all. this module is the front half — lexer + Pratt
-//! parser + typed AST. emission is `wasm.rs`, which does not exist yet; the
-//! AST below is designed so every construct maps 1:1 to a wasm instruction
-//! or control frame. anything that cannot so map is refused HERE, at parse
-//! time, with the reason — not discovered mid-emission.
+//! parser + typed AST. emission is `wasm.rs`; the AST below is designed so
+//! every construct maps 1:1 to a wasm instruction or control frame.
+//! anything that cannot so map is refused HERE, at parse time, with the
+//! reason — not discovered mid-emission.
+//!
+//! host access: `extern "C" { fn … ; }` declares imports from the L1 ABI
+//! (`abi.rs`); `pub fn` exports a function by name. memory and packed-
+//! result handling go through the intrinsics in `wasm.rs` (load_u8,
+//! store_u8, load_i32, store_i32, memory_size, pack, unpack_ptr,
+//! unpack_len) — they parse as ordinary calls and lower inline.
 
 /// the closed type set. deliberately tiny: each variant maps to exactly one
 /// wasm valtype, which is what makes type checking trivial and codegen
@@ -42,6 +48,19 @@ impl Ty {
             Ty::Bool => "bool",
         }
     }
+
+    /// the wasm valtype byte this type lowers to. bools are i32 on the wire;
+    /// the distinction lives in the checker only. ONE mapping shared by the
+    /// emitter (writing signatures) and the ABI table (checking them), so a
+    /// declared import cannot lower to a different shape than the host expects.
+    pub fn valtype(self) -> u8 {
+        match self {
+            Ty::I32 | Ty::Bool => 0x7f,
+            Ty::I64 => 0x7e,
+            Ty::F32 => 0x7d,
+            Ty::F64 => 0x7c,
+        }
+    }
 }
 
 // ---- tokens ----------------------------------------------------------------
@@ -52,6 +71,10 @@ pub enum Tok {
     /// integer literal (i64-valued; small enough for any cartridge constant)
     Int(i64),
     Float(f64),
+    /// string literal. v1 accepts these in exactly ONE position — the ABI
+    /// name of an `extern "C"` block. as an expression they are refused by
+    /// the parser: rustlite has no string type and no data segments yet.
+    Str(String),
     Kw(&'static str),
     // punctuation / operators
     LParen,
@@ -79,7 +102,7 @@ pub enum Tok {
 }
 
 const KEYWORDS: &[&str] = &[
-    "fn", "let", "if", "else", "while", "return", "true", "false", "struct",
+    "fn", "let", "if", "else", "while", "return", "true", "false", "struct", "pub", "extern",
 ];
 
 /// one lex error, with byte offset for editor-grade reporting later.
@@ -147,6 +170,33 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
             });
             continue;
         }
+        // string literal: bytes up to the closing quote, no escapes in v1
+        // (an escape would need a decoder on both the lexer and the future
+        // data-segment emitter; refusing keeps them from drifting apart).
+        if c == '"' {
+            let start = i;
+            i += 1;
+            let body_start = i;
+            while i < b.len() && b[i] != b'"' {
+                if b[i] == b'\\' {
+                    return Err(LexError {
+                        pos: i,
+                        msg: "escape sequences in string literals are not supported in v1"
+                            .to_string(),
+                    });
+                }
+                i += 1;
+            }
+            if i >= b.len() {
+                return Err(LexError {
+                    pos: start,
+                    msg: "unterminated string literal".to_string(),
+                });
+            }
+            out.push(Tok::Str(src[body_start..i].to_string()));
+            i += 1; // closing quote
+            continue;
+        }
         // multi-char operators first, then singles.
         let two = if i + 1 < b.len() { &src[i..i + 2] } else { "" };
         let (tok, len) = match two {
@@ -177,7 +227,7 @@ pub fn lex(src: &str) -> Result<Vec<Tok>, LexError> {
                     return Err(LexError {
                         pos: i,
                         msg: format!("unexpected character '{other}' — rustlite v1 \
-                                      has no strings, chars, or attributes yet"),
+                                      has no chars, attributes, or paths yet"),
                     })
                 }
             },
@@ -201,6 +251,21 @@ pub struct FnSig {
 pub struct FnDecl {
     pub sig: FnSig,
     pub body: Block,
+    /// `pub fn` = exported from the module under its own name. that is the
+    /// whole visibility story in v1: no attributes, no `#[no_mangle]` — the
+    /// L1 lifecycle exports (cart_init/cart_handle/cart_alloc) are simply
+    /// `pub fn`s with the ABI's signatures, which the checker verifies.
+    pub is_pub: bool,
+}
+
+/// one translation unit. `externs` are host imports declared in
+/// `extern "C" { … }` blocks — every one must name a function in the L1 ABI
+/// table (checked at compile time, and again by the runtime at load, so a
+/// cartridge can never reach a host function the host does not have).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Program {
+    pub externs: Vec<FnSig>,
+    pub fns: Vec<FnDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,6 +284,11 @@ pub enum Stmt {
     /// a checker error, not a parse error (parsing stays scope-blind).
     Assign { name: String, value: Expr },
     While { cond: Expr, body: Block },
+    /// `if cond { … } [else { … }]`. `else if` parses as an else block
+    /// holding a single nested If, exactly the desugaring rust uses. maps
+    /// to wasm's if/else/end control frame (void blocktype — arms are
+    /// statements, never values).
+    If { cond: Expr, then: Block, els: Option<Block> },
     Return(Option<Expr>),
     Expr(Expr),
 }
@@ -281,22 +351,29 @@ struct Parser {
     pos: usize,
 }
 
-/// parse a whole translation unit: a sequence of function declarations.
-pub fn parse(src: &str) -> Result<Vec<FnDecl>, ParseError> {
+/// parse a whole translation unit: `extern "C"` blocks and function
+/// declarations in any order.
+pub fn parse(src: &str) -> Result<Program, ParseError> {
     let toks = lex(src).map_err(|e| ParseError {
         msg: format!("lex error at byte {}: {}", e.pos, e.msg),
     })?;
     let mut p = Parser { toks, pos: 0 };
-    let mut fns = Vec::new();
+    let mut program = Program::default();
     while !p.at_end() {
-        fns.push(p.parse_fn()?);
+        match p.peek() {
+            Some(Tok::Kw("extern")) => p.parse_extern_block(&mut program.externs)?,
+            _ => {
+                let f = p.parse_fn()?;
+                program.fns.push(f);
+            }
+        }
     }
-    if fns.is_empty() {
+    if program.fns.is_empty() {
         return Err(ParseError {
             msg: "source contains no functions".to_string(),
         });
     }
-    Ok(fns)
+    Ok(program)
 }
 
 impl Parser {
@@ -366,7 +443,45 @@ impl Parser {
         }
     }
 
-    fn parse_fn(&mut self) -> Result<FnDecl, ParseError> {
+    /// `extern "C" { fn name(params) [-> ty]; … }`. only the ABI name "C"
+    /// exists — it is the calling convention the L1 host surface speaks —
+    /// so anything else is refused with the reason rather than accepted and
+    /// then silently linked against nothing.
+    fn parse_extern_block(&mut self, externs: &mut Vec<FnSig>) -> Result<(), ParseError> {
+        self.expect_kw("extern")?;
+        match self.next() {
+            Some(Tok::Str(abi)) if abi == "C" => {}
+            Some(Tok::Str(abi)) => {
+                return Err(ParseError {
+                    msg: format!("extern \"{abi}\" is not supported — only extern \"C\" exists"),
+                })
+            }
+            other => {
+                return Err(ParseError {
+                    msg: format!("expected \"C\" after extern, found {other:?}"),
+                })
+            }
+        }
+        self.expect(&Tok::LBrace)?;
+        loop {
+            if matches!(self.peek(), Some(Tok::RBrace)) {
+                self.next();
+                return Ok(());
+            }
+            if self.at_end() {
+                return Err(ParseError {
+                    msg: "extern block never closed — '}' missing".to_string(),
+                });
+            }
+            let sig = self.parse_sig()?;
+            self.expect(&Tok::Semi)?;
+            externs.push(sig);
+        }
+    }
+
+    /// `fn name(params) [-> ty]` — the head shared by declarations and
+    /// extern prototypes.
+    fn parse_sig(&mut self) -> Result<FnSig, ParseError> {
         self.expect_kw("fn")?;
         let name = self.ident()?;
         self.expect(&Tok::LParen)?;
@@ -396,11 +511,19 @@ impl Parser {
         } else {
             None
         };
+        Ok(FnSig { name, params, ret })
+    }
+
+    fn parse_fn(&mut self) -> Result<FnDecl, ParseError> {
+        let is_pub = if matches!(self.peek(), Some(Tok::Kw("pub"))) {
+            self.next();
+            true
+        } else {
+            false
+        };
+        let sig = self.parse_sig()?;
         let body = self.parse_block()?;
-        Ok(FnDecl {
-            sig: FnSig { name, params, ret },
-            body,
-        })
+        Ok(FnDecl { sig, body, is_pub })
     }
 
     fn parse_block(&mut self) -> Result<Block, ParseError> {
@@ -440,6 +563,10 @@ impl Parser {
                 let body = self.parse_block()?;
                 Ok(Stmt::While { cond, body })
             }
+            Some(Tok::Kw("if")) => {
+                self.next();
+                self.parse_if_tail()
+            }
             Some(Tok::Kw("return")) => {
                 self.next();
                 // `return;` vs `return expr;` — decided by the semicolon.
@@ -464,6 +591,29 @@ impl Parser {
                 Ok(Stmt::Expr(e))
             }
         }
+    }
+
+    /// the part after `if`: condition, then-block, optional else. `else if`
+    /// nests: the else block holds exactly one If statement, so the checker
+    /// and emitter never see a special form.
+    fn parse_if_tail(&mut self) -> Result<Stmt, ParseError> {
+        let cond = self.parse_expr(0)?;
+        let then = self.parse_block()?;
+        let els = if matches!(self.peek(), Some(Tok::Kw("else"))) {
+            self.next();
+            if matches!(self.peek(), Some(Tok::Kw("if"))) {
+                self.next();
+                let nested = self.parse_if_tail()?;
+                Some(Block {
+                    stmts: vec![nested],
+                })
+            } else {
+                Some(self.parse_block()?)
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::If { cond, then, els })
     }
 
     /// disambiguates `x = ...;` (assignment) from an expression statement.
@@ -558,6 +708,13 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 Ok(e)
             }
+            Some(Tok::Str(s)) => Err(ParseError {
+                msg: format!(
+                    "string literal \"{s}\" is not an expression — rustlite v1 has no \
+                     string type; strings appear only as the extern \"C\" ABI name. \
+                     pass text through guest memory (store_u8) until data segments land"
+                ),
+            }),
             other => Err(ParseError {
                 msg: format!("expected an expression, found {other:?}"),
             }),

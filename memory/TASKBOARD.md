@@ -136,17 +136,46 @@ taskboard) asked for four things. all four are resolved:
             META-LESSON PROVEN: the gate cannot catch self-consistent
             wrongness in tests verifying their own implementation — quote
             the spec in the comment, make code match words, not intent.
-      - [ ] item 4 NEXT: L3 runtime — fuel-bounded stack-machine interpreter
-            over exactly the dialect rustlite emits (plan §6 option 2/3:
-            we only interpret OUR frozen subset; WAMR swap-in later if
-            third-party cartridges ever need it). needs: module DEcoder
-            (sections/types/code), fuel metering on every instruction,
-            trap taxonomy (FuelExhausted, DivByZero, Unreachable, BadType),
-            host-import surface per §4 (log/now_ms/store_get/store_set/emit)
-            as a trait so native tests inject a fake host, cart_init/
-            cart_handle/cart_alloc lifecycle wiring (item 5 rides on this).
-      - [ ] items 5–10 per plan §11 (lifecycle → ports → orchestrator →
-            cognitive cartridge → corpus capture → opcode-model experiment).
+      - [x] item 4 DONE (PR #15, ee5c8bd): L3 runtime — decoder with
+            branch targets resolved to absolute ips at decode time, fuel
+            per instruction, frame-per-activation calls, named trap
+            taxonomy, THE FUZZ (every truncation + single-byte corruption
+            through decode+invoke, no panic permitted).
+      - [x] item 5 DONE (agent/cartridge-lifecycle, 2026-08-25): L1 wired
+            over L3. src/cartridges/abi.rs = the ONE ABI table (HostFn ×5,
+            GuestFn ×3, pack/unpack, `Host` trait) read by compiler,
+            runtime, and lifecycle alike. rustlite grew `extern "C" {}`
+            imports, `pub fn` exports, `if/else`, and eight inline
+            intrinsics (load_u8/store_u8/load_i32/store_i32/memory_size/
+            pack/unpack_ptr/unpack_len). emitter writes import/memory/
+            export sections (fixed 1 MiB memory, exported as "memory").
+            runtime decodes them, dispatches import calls to the Host with
+            bounds-checked COPIES (a host never sees a pointer), bounds
+            host→guest re-entry (store_get → cart_alloc) at 4, caps call
+            depth at 1024, refuses non-custom unknown sections instead of
+            skipping them. src/cartridges/lifecycle.rs: Cartridge::load
+            (manifest + imports + exports + memory all verified at the
+            door) → init → handle. tests/cartridge_lifecycle.rs: an echo
+            cartridge in rustlite through the REAL pipeline against a
+            recording fake host, every host fn exercised, every refusal
+            named, plus the corruption fuzz across the host boundary.
+            three real bugs the new evals caught: void calls were
+            unwritable as statements (`log(…);` refused by the checker);
+            item 4's decoder underflowed `r.pos - body_end` on a short
+            body (the lifecycle fuzz found it; the pure-shape fuzz never
+            could); every-path-returns bodies failed wasmparser (fixed by
+            a trailing `unreachable`, now a named trap).
+            NOT YET in the language: string literals / data segments —
+            a cartridge cannot name a topic or key except byte-by-byte
+            via store_u8. needed before item 8 (a cognitive module must
+            name its ports); do it as its own item.
+      - [ ] item 6 NEXT: L4 ports — manifest `requires`/`provides` wiring
+            across a SET of loaded cartridges, cycle detection at wire
+            time, missing-provider refusal naming the port (D4). pure
+            graph logic first (testable without a runtime), then the
+            loader that composes Cartridge instances by it.
+      - [ ] items 7–10 per plan §11 (orchestrator → cognitive cartridge →
+            corpus capture → opcode-model experiment).
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).

@@ -222,12 +222,16 @@ to train on.
 
 ## 11. build order (each item independently verifiable)
 
-1. [ ] L1 ABI: manifest struct + validation (pure, testable now)
-2. [ ] L2 rustlite: lexer + parser + typed AST + golden tests
-3. [ ] L2 rustlite: wasm emission + wasmparser round-trip in ci
-4. [ ] L3 runtime: stack-machine interpreter over rustlite's dialect,
-       fuel-bounded; trap taxonomy
-5. [ ] L1+L3 wired: cart_init/cart_handle lifecycle over the interpreter
+1. [x] L1 ABI: manifest struct + validation (pure, testable now) — PR #13
+2. [x] L2 rustlite: lexer + parser + typed AST + golden tests — PR #13
+3. [x] L2 rustlite: wasm emission + wasmparser round-trip in ci — PR #14
+4. [x] L3 runtime: stack-machine interpreter over rustlite's dialect,
+       fuel-bounded; trap taxonomy — PR #15
+5. [x] L1+L3 wired: cart_init/cart_handle lifecycle over the interpreter
+       — abi.rs (the one table), extern/pub/if/intrinsics in rustlite,
+       import/memory/export emission, host dispatch + bounded re-entry,
+       lifecycle.rs. language gap noted: string literals / data segments
+       (needed before 8)
 6. [ ] L4 ports/requires wiring + cycle detection
 7. [ ] L5 mailboxes + supervision + hot-swap (kv-backed state)
 8. [ ] cognitive orchestrator: first hot-swappable reasoning module
