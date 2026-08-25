@@ -104,6 +104,16 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [ ] **PRs #3 and #5 are stale memory-only branches** (self-perception
+      roadmap + PR #2 promotion notes). both report mergeable=None after
+      the day's merges; their unique content is preserved below, so either
+      close them or re-apply onto a fresh branch. still-valid items from
+      PR #5 that exist nowhere else on this board:
+      1. runtime error capture → opfs diagnostics ring buffer readable by
+         read_file (the agent cannot see its own panics today);
+      2. structured ui snapshot-as-text tool over pixel screenshots (the
+         ui renders its own dom; text beats pixels for self-inspection);
+      3. boot reconcile retry for transient removeEntry failures.
 - [x] **pr_wait LANDED (PR #6 merged, squash ff1ad44)** — pr_status polling
       loops (8–10 identical calls per merge) flooded conversations; the user
       called it out explicitly. NEVER poll pr_status in a loop again: call
