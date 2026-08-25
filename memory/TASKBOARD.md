@@ -104,6 +104,18 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **pr_wait LANDED (PR #6 merged, squash ff1ad44)** — pr_status polling
+      loops (8–10 identical calls per merge) flooded conversations; the user
+      called it out explicitly. NEVER poll pr_status in a loop again: call
+      `pr_wait` ONCE — it sleeps inside a single tool call (10s interval,
+      300s budget) and returns one settled answer. merge_pr still gates on
+      settled green. pacing pinned by tests in tests/branch_policy.rs.
+- [ ] check_deployment bug found this run: with no sha argument it checked
+      MAIN's head instead of the session branch's new commit, and counted a
+      CANCELLED duplicate workflow run as "failure" while its own build log
+      showed every suite passing. two fixes wanted: default to the session's
+      synced_head/branch (not main), and treat cancelled checks as
+      non-verdicts rather than failures.
 - [x] **PROMOTION BLOCKED ON TOKEN SCOPE #3 — RESOLVED (PR #2 merged)**.
       open_pr had returned http 403 because the fine-grained PAT lacked
       "Pull requests: read and write". COMPLETE fine-grained token scope

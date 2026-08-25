@@ -7,6 +7,36 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (pr_wait — the polling spam is dead; PR #6 merged, squash ff1ad44)
+
+the user flagged pr_status-in-a-loop as horrendous (8–10 identical calls
+per merge flooding the conversation) and asked for a callback instead.
+
+- what landed: a `pr_wait` tool that sleeps INSIDE one tool call — same
+  pattern check_deployment already had — returning a single settled answer.
+  pacing is two pure functions in tools.rs (`wait_step_ms`: 10s while
+  pending, 0 otherwise; `should_keep_waiting`: pending && budget remains,
+  300s default) pinned by new tests in tests/branch_policy.rs (now 7→9).
+  open_pr's guidance and pr_status's description now point to pr_wait.
+- RULE FOR FUTURE RUNS: never poll pr_status in a loop again. call
+  pr_wait once, then merge_pr.
+- honest architecture note recorded: true push callbacks are impossible
+  for OTA because there is no server — vercel serves static files, so a
+  browser tab can only learn the world changed by asking. the OTA poll
+  was ALSO already reworked upstream (update.rs now compares the SERVED
+  /build.json manifest against the running build id, not the github head;
+  failed deploys leave the old manifest → no reload loop). remaining
+  poll-hatred targets are on TASKBOARD: check_deployment defaulted to
+  MAIN's head when no sha given (checked the wrong commit this run) and
+  counted a CANCELLED workflow run as "failure" against a log full of
+  passing suites.
+- also this run: self-perception work items written to TASKBOARD after
+  the user asked whether the agent runs blind (it partially does): (1)
+  runtime error capture → opfs diagnostics ring buffer readable by
+  read_file, (2) structured ui snapshot-as-text tool over pixel
+  screenshots, (3) boot reconcile retry. PR #5 open for those memory
+  edits (memory-only; superseded-safe if conflicted — re-apply).
+
 ## landed this run (the stranded promotion finally landed — PR #2 merged)
 
 the token-scope wall came down and the nine-commit branch went home:
