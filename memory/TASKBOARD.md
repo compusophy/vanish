@@ -188,13 +188,35 @@ taskboard) asked for four things. all four are resolved:
             a cartridge cannot name a topic or key except byte-by-byte
             via store_u8. needed before item 8 (a cognitive module must
             name its ports); do it as its own item.
-      - [ ] item 6 NEXT: L4 ports — manifest `requires`/`provides` wiring
-            across a SET of loaded cartridges, cycle detection at wire
-            time, missing-provider refusal naming the port (D4). pure
-            graph logic first (testable without a runtime), then the
-            loader that composes Cartridge instances by it.
-      - [ ] items 7–10 per plan §11 (orchestrator → cognitive cartridge →
-            corpus capture → opcode-model experiment).
+      - [x] item 6 DONE (agent/cartridge-ports, 2026-08-25): L4 ports.
+            src/cartridges/ports.rs = pure `wire(&[manifest])` → Wiring
+            {providers, edges, order} or a named WireError (bad manifest,
+            duplicate slug, ambiguous provider, missing provider WITH
+            every requirer, cycle WITH the loop written out); order is
+            providers-first and deterministic (kahn + sorted ready set,
+            so manifest order never leaks into boot order).
+            src/cartridges/composition.rs = Composition<H>: wire FIRST,
+            then load each Cartridge (a mis-wired set never instantiates
+            a memory); init_all in wiring order, stopping at the first
+            refusal naming its slug; handle(slug) and handle_port(port) —
+            the primitive item 8 routes prompts through. tests/
+            cartridge_ports.rs (11) + tests/common/mod.rs (shared fake
+            host + rustlite fixtures; a SUBDIRECTORY so the gate's
+            tests/*.rs discovery does not mistake it for a suite).
+            NOT in item 6 (deliberately): the guest-side `call(slug, msg)`
+            import — it is an ABI v2 bump and needs item 7's mailbox to
+            mediate; composition today is host-side routing by port.
+      - [ ] item 7 NEXT: L5 orchestrator — mailboxes (topic + bytes,
+            at-most-once with the ack packed in cart_handle's result),
+            supervision (restart a trapped cartridge with backoff up to a
+            budget, then mark it failed LOUDLY), hot-swap (drain the
+            current message, swap the module, state lives in kv so
+            nothing replays). rides on Composition. then the `call`
+            import (ABI v2) becomes an orchestrator-mediated send.
+      - [ ] items 8–10 per plan §11 (cognitive cartridge → corpus capture
+            → opcode-model experiment). BEFORE item 8: string literals +
+            data segments in rustlite (a cognitive module must name its
+            ports and topics).
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).

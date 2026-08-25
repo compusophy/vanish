@@ -7,6 +7,41 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (cartridge item 6: L4 ports + composition — agent/cartridge-ports)
+
+second "keep going" of the 90-minute loop. taskboard read: item 6 next.
+what landed:
+
+- **ports.rs (new, pure)**: `wire(&[CartridgeManifest]) -> Result<Wiring,
+  WireError>`. checks in reader order: each manifest validates → slugs
+  unique → exactly ONE provider per port (two is refused, never resolved
+  by luck; names match exactly) → every requirement satisfied, else the
+  first missing port BY NAME with every requirer listed → acyclic, else
+  the loop written out (`a → b → a`). order = kahn over requirer→provider
+  with a sorted ready set: providers first, ties by slug, so the same
+  set boots identically regardless of manifest order (pinned).
+- **composition.rs (new)**: `Composition<H>::load(entries, host_for)`
+  wires FIRST, then loads — a mis-wired set is refused before any memory
+  exists (pinned: garbage bytes + a cycle → the cycle is the refusal).
+  `init_all` boots in wiring order and stops at the first refusal naming
+  the slug (earlier members stay up; later ones never boot — pinned).
+  `handle(slug)` / `handle_port(port)`: callers name a capability, never
+  a module — item 8's cognitive orchestrator is `handle_port("reasoning")`.
+- **tests/common/mod.rs**: the fake host + rustlite fixtures shared by
+  the lifecycle and ports suites (a subdirectory so the gate's tests/*.rs
+  discovery does not mistake it for a suite). lifecycle suite refactored
+  onto it, assertions untouched.
+- deliberately NOT here: the guest-side `call(slug, msg)` import from
+  plan §7. it is an ABI v2 bump AND needs a mediator (item 7's mailbox)
+  — landing it as a direct host-side call would be exactly the "never
+  direct instantiation" rule broken on day one.
+
+green on the first native run (11 + 14). gate + wasm32 check before push.
+
+next: item 7 (L5 orchestrator: mailboxes, supervision, hot-swap over
+Composition), then `call` as an orchestrator-mediated send. before item
+8: string literals + data segments.
+
 ## landed this run (cartridge item 5: lifecycle over L3 — agent/cartridge-lifecycle)
 
 owner said "keep going" (on a 90-minute loop). taskboard read: PR #15 had

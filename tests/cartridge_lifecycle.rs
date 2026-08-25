@@ -3,136 +3,17 @@
 //! recording fake host through the L1 ABI — load → init → handle, every
 //! host function exercised through guest memory, every refusal at the door
 //! named. no layer is mocked; the fake host is the only test double, and it
-//! is the same trait the browser implements.
+//! is the same trait the browser implements. fixtures live in
+//! tests/common/mod.rs, shared with the L4 suite.
 
-use std::collections::BTreeMap;
+mod common;
 
+use common::{compile, echo_src, kv_src, manifest, FakeHost, ALLOC};
 use vanish::cartridges::runtime::{Trap, MAX_HOST_REENTRY};
-use vanish::cartridges::{
-    rustlite::parse, wasm::emit_module, CallError, Cartridge, CartridgeKind, CartridgeManifest,
-    Host, ABI_VERSION,
-};
-
-// ---- the fake host -------------------------------------------------------------
-
-#[derive(Default)]
-struct FakeHost {
-    logs: Vec<(i32, Vec<u8>)>,
-    kv: BTreeMap<Vec<u8>, Vec<u8>>,
-    emitted: Vec<(Vec<u8>, Vec<u8>)>,
-    now: i64,
-    now_calls: u32,
-    refuse_set: bool,
-    fail_emit: bool,
-    /// answer EVERY store_get with this value (for the re-entry bomb).
-    always_get: Option<Vec<u8>>,
-}
-
-impl Host for FakeHost {
-    fn log(&mut self, level: i32, msg: &[u8]) {
-        self.logs.push((level, msg.to_vec()));
-    }
-    fn now_ms(&mut self) -> i64 {
-        self.now_calls += 1;
-        self.now
-    }
-    fn store_get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        if let Some(v) = &self.always_get {
-            return Ok(Some(v.clone()));
-        }
-        Ok(self.kv.get(key).cloned())
-    }
-    fn store_set(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
-        if self.refuse_set {
-            return Err("quota exceeded".into());
-        }
-        self.kv.insert(key.to_vec(), value.to_vec());
-        Ok(())
-    }
-    fn emit(&mut self, topic: &[u8], payload: &[u8]) -> Result<(), String> {
-        if self.fail_emit {
-            return Err("bus down".into());
-        }
-        self.emitted.push((topic.to_vec(), payload.to_vec()));
-        Ok(())
-    }
-}
-
-fn manifest() -> CartridgeManifest {
-    CartridgeManifest {
-        slug: "echo".to_string(),
-        kind: CartridgeKind::Backend,
-        version: "0.1.0".to_string(),
-        abi_version: ABI_VERSION,
-        provides: vec![],
-        requires: vec![],
-    }
-}
-
-fn compile(src: &str) -> Vec<u8> {
-    let program = parse(src).expect("parse");
-    emit_module(&program).expect("emit")
-}
+use vanish::cartridges::{CallError, Cartridge, ABI_VERSION};
 
 fn load(src: &str, host: FakeHost) -> Cartridge<FakeHost> {
-    Cartridge::load(manifest(), &compile(src), host).expect("load")
-}
-
-/// the bump allocator every test cartridge shares: the heap pointer lives
-/// at address 0 (zero on a fresh memory), the heap starts at 8.
-const ALLOC: &str = r#"
-    pub fn cart_alloc(size: i32) -> i32 {
-        let hp: i32 = load_i32(0);
-        if hp == 0 { hp = 8; }
-        store_i32(0, hp + size);
-        return hp;
-    }
-"#;
-
-/// echo: init logs its config and stores config → config; handle copies
-/// the message into a fresh buffer with every byte + 1, emits (msg → out),
-/// reads the clock, logs the answer, and returns it packed.
-fn echo_src() -> String {
-    format!(
-        r#"
-        extern "C" {{
-            fn log(level: i32, ptr: i32, len: i32);
-            fn now_ms() -> i64;
-            fn store_get(k_ptr: i32, k_len: i32) -> i64;
-            fn store_set(k_ptr: i32, k_len: i32, v_ptr: i32, v_len: i32) -> i32;
-            fn emit(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32);
-        }}
-        {ALLOC}
-        pub fn cart_init(cfg_ptr: i32, cfg_len: i32) -> i32 {{
-            log(1, cfg_ptr, cfg_len);
-            return store_set(cfg_ptr, cfg_len, cfg_ptr, cfg_len);
-        }}
-        pub fn cart_handle(msg_ptr: i32, msg_len: i32) -> i64 {{
-            let out: i32 = cart_alloc(msg_len);
-            let i: i32 = 0;
-            while i < msg_len {{
-                store_u8(out + i, load_u8(msg_ptr + i) + 1);
-                i = i + 1;
-            }}
-            emit(msg_ptr, msg_len, out, msg_len);
-            let t: i64 = now_ms();
-            log(0, out, msg_len);
-            return pack(out, msg_len);
-        }}
-    "#
-    )
-}
-
-/// kv: handle answers with whatever the store holds under key = message.
-fn kv_src() -> String {
-    format!(
-        r#"
-        extern "C" {{ fn store_get(k_ptr: i32, k_len: i32) -> i64; }}
-        {ALLOC}
-        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}
-        pub fn cart_handle(p: i32, n: i32) -> i64 {{ return store_get(p, n); }}
-    "#
-    )
+    Cartridge::load(manifest("echo"), &compile(src), host).expect("load")
 }
 
 // ---- the happy path ---------------------------------------------------------------
@@ -294,7 +175,7 @@ fn an_import_outside_the_abi_is_refused_at_load() {
         .position(|w| w == b"now_ms")
         .expect("import name present once");
     bytes[pos..pos + 6].copy_from_slice(b"now_xs");
-    let err = Cartridge::load(manifest(), &bytes, FakeHost::default()).unwrap_err();
+    let err = Cartridge::load(manifest("echo"), &bytes, FakeHost::default()).unwrap_err();
     assert!(err.0.contains("now_xs") && err.0.contains("now_ms"), "{err}");
 }
 
@@ -304,10 +185,10 @@ fn a_missing_lifecycle_export_is_refused_at_load_naming_it() {
         "extern \"C\" {{ fn now_ms() -> i64; }} {ALLOC} \
          pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}"
     );
-    let err = Cartridge::load(manifest(), &compile(&src), FakeHost::default()).unwrap_err();
+    let err = Cartridge::load(manifest("echo"), &compile(&src), FakeHost::default()).unwrap_err();
     assert!(err.0.contains("cart_handle") && err.0.contains("fn(i32, i32) -> i64"), "{err}");
     // a pure module is not a cartridge at all.
-    let err = Cartridge::load(manifest(), &compile("fn f() -> i32 { return 0; }"), FakeHost::default())
+    let err = Cartridge::load(manifest("echo"), &compile("fn f() -> i32 { return 0; }"), FakeHost::default())
         .unwrap_err();
     assert!(err.0.contains("cart_init"), "{err}");
 }
@@ -320,17 +201,17 @@ fn a_module_without_an_exported_memory_is_refused_at_load() {
         .position(|w| w == b"memory")
         .expect("memory export present");
     bytes[pos..pos + 6].copy_from_slice(b"memorx");
-    let err = Cartridge::load(manifest(), &bytes, FakeHost::default()).unwrap_err();
+    let err = Cartridge::load(manifest("echo"), &bytes, FakeHost::default()).unwrap_err();
     assert!(err.0.contains("memory"), "{err}");
 }
 
 #[test]
 fn the_manifest_abi_gate_applies_at_load() {
-    let mut m = manifest();
+    let mut m = manifest("echo");
     m.abi_version = ABI_VERSION + 1;
     let err = Cartridge::load(m, &compile(&echo_src()), FakeHost::default()).unwrap_err();
     assert!(err.0.contains("manifest") && err.0.contains("newer"), "{err}");
-    let err = Cartridge::load(manifest(), b"not wasm", FakeHost::default()).unwrap_err();
+    let err = Cartridge::load(manifest("echo"), b"not wasm", FakeHost::default()).unwrap_err();
     assert!(err.0.contains("decode") && err.0.contains("magic"), "{err}");
 }
 
@@ -347,7 +228,7 @@ fn every_single_byte_corruption_of_a_cartridge_loads_or_refuses_without_panic() 
             let mut mutated = bytes.clone();
             mutated[pos] = mutated[pos].wrapping_add(delta);
             let host = FakeHost { always_get: Some(b"v".to_vec()), ..Default::default() };
-            if let Ok(mut cart) = Cartridge::load(manifest(), &mutated, host) {
+            if let Ok(mut cart) = Cartridge::load(manifest("echo"), &mutated, host) {
                 if cart.init(b"cfg", 5_000).is_ok() {
                     let _ = cart.handle(b"abc", 5_000);
                     let _ = cart.handle(b"", 5_000);
