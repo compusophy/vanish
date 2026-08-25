@@ -121,3 +121,73 @@ fn the_wasm_check_never_builds_test_crates() {
          for wasm; leave the tests to the native gate."
     );
 }
+
+// ---- e2e / preview gate (STACKED_PRS_PLAN §4 item 4) -----------------------
+//
+// compile-green is not booted-green: a commit that compiles yet blanks the
+// page ships straight to users, because every pre-merge check until now was
+// compile-level. .github/workflows/e2e.yml drives playwright against the
+// vercel PREVIEW deployment of a pr's head; its check lands on that head,
+// where Github::deployment_state already reads it — so merge_pr refuses
+// until the app demonstrably boots. same skip-loudly semantics as
+// workflow_source() above: the file may legitimately be absent in checkouts
+// made before this lands, but once present these assertions are load-bearing.
+
+fn e2e_workflow_source() -> Option<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/e2e.yml");
+    std::fs::read_to_string(path).ok()
+}
+
+#[test]
+fn e2e_gate_waits_for_the_preview_and_smokes_the_real_app() {
+    let Some(wf) = e2e_workflow_source() else {
+        eprintln!(
+            "SKIP: .github/workflows/e2e.yml not present in this checkout — \
+             the preview gate is NOT enforcing anything yet."
+        );
+        return;
+    };
+    // it must trigger on pull_request (that is what makes main
+    // promote-on-green rather than push-and-hope).
+    assert!(
+        wf.contains("pull_request"),
+        "e2e workflow must run on pull_request; gating only pushes would \
+         leave merged-to-main commits as untested as before."
+    );
+    // it must wait for THIS pr's head sha — testing some other deployment's
+    // url is theater (the misattributed-verdict class of bug, D4).
+    assert!(
+        wf.contains("head.sha"),
+        "e2e workflow does not resolve the preview by the PR head sha — it \
+         may be smoking a stale or unrelated deployment."
+    );
+    // and the smoke must be the behavioral one, not just an HTTP 200 ping:
+    // an auth interstitial also returns 200.
+    assert!(
+        wf.contains("ci/e2e.mjs"),
+        "e2e workflow must drive ci/e2e.mjs; a curl-based gate cannot tell \
+         a booted app from a protection interstitial."
+    );
+}
+
+#[test]
+fn the_e2e_smoke_asserts_boot_not_mere_reachability() {
+    let script = source("ci/e2e.mjs");
+    // #status starts as literally "booting…" in web/index.html and only
+    // changes when the worker announces itself — asserting it moved is the
+    // observable proof of Event::Ready.
+    assert!(
+        script.contains("#status") && script.contains("booting"),
+        "ci/e2e.mjs no longer asserts the boot signal (#status leaving \
+         'booting…'). reachability alone proves nothing about a wasm app."
+    );
+    // deployment protection produces a 200 page that is NOT the app; the
+    // smoke must name that failure mode distinctly instead of reporting a
+    // confusing boot failure.
+    assert!(
+        script.to_lowercase().contains("protection"),
+        "ci/e2e.mjs dropped the deployment-protection diagnosis — when the \
+         preview walls itself behind auth, the report must say THAT, not a \
+         misleading 'worker never announced ready'."
+    );
+}
