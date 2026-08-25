@@ -117,6 +117,34 @@ taskboard) asked for four things. all four are resolved:
       OPERATIONAL: open_pr REFUSES while the session sits on main —
       git_checkout the agent/ branch first (a page reload resets the
       session branch to main; reconcile then checkout).
+- [ ] **SELF-PERCEPTION / OBSERVABILITY — the agent runs partially blind**
+      (identified 2026-08-25 run). the agent compiles code and reads CI
+      verdicts, but cannot perceive RUNTIME behavior of the live app: a
+      panic in the worker, a failed fetch, an OPFS quota error, a broken
+      feed render — all invisible unless the user happens to paste them.
+      the boot reconcile warning (removeEntry / modifications-not-allowed,
+      self-healed on retry) was only ever known because the USER saw it.
+      three increments, in value-per-effort order:
+      1. RUNTIME ERROR CAPTURE (build first): window.onerror +
+         unhandledrejection on main thread, onerror inside the worker,
+         console.error interception — all appended to an opfs diagnostics
+         ring buffer (e.g. vanish-config/diagnostics.log, cap ~200 entries)
+         that read_file already reaches. zero new infra; turns "user saw a
+         flash of red" into a durable artifact the next run can read.
+      2. STRUCTURED UI SNAPSHOT AS TEXT (not pixels): the ui is rust
+         rendering its own dom, so a screenshot is the wrong medium —
+         a tool that serializes live ui state (dock/run button state,
+         last ~15 feed entries with their css classes, sidebar thread
+         badges, any visible error notes) into a text tool result beats
+         pixels: cheaper, greppable, diffable across runs. this answers
+         "is the app actually rendering correctly" which no green build
+         can answer.
+      3. BOOT RECONCILE RETRY: the transient removeEntry failure at boot
+         suggests opfs handles race page load; add a short backoff/retry
+         inside boot reconciliation so the warning stops appearing at all.
+      principle behind all three (extends D4): a failure only the human
+      can observe is a failure the loop cannot learn from. instrument
+      until the agent's own next run can see what went wrong.
 - [ ] live verification owed: ∞ loop restart after failure/step-limit;
       stop mid-restart keeps it down; browser close+reopen within 12h
       resumes; restart budget saturates at 6/hour with the pause note;
