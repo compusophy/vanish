@@ -7,6 +7,44 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (cartridge L1+L2 front-end — PR #13 merged 1fcd65c)
+
+owner said "send it!" twice. CARTRIDGE_PLAN §11 items 1–2 landed on
+agent/cartridge-l1-l2:
+
+- **L1 manifest** (src/cartridges/manifest.rs, tests/cartridges_manifest.rs):
+  CartridgeManifest parse+validate, pure. slug rules exact ([a-z0-9-], no
+  `--`, 64 cap), future ABI refused loudly at the door while older majors
+  still load, duplicate provides refused, self-cycles refused with guidance,
+  corrupt json names its reason. CartridgeKind = backend | cognitive (the
+  consumers that exist today; interactive/frontend arrive with their
+  runtimes).
+- **rustlite front-end** (src/cartridges/rustlite.rs,
+  tests/rustlite_front.rs): lexer + Pratt parser + typed AST. closed type
+  set {i32,i64,f32,f64,bool} → one wasm valtype each, so emission is
+  mechanical. precedence ladder || < && < cmp < add < mul, left-assoc,
+  pinned by tree-shape goldens. required type annotations keep checking a
+  one-pass walk. everything outside v1 refused at parse time WITH the reason.
+
+two red→green cycles this landing, both caught by the gate not by me:
+1. cd31117 red: test bug — lex("f(x)->i32") indexed [3] for Arrow but
+   RParen sits at [3]; fixed 702f498.
+2. 702f498 red again: REAL language gap — `i = i + 1;` had no statement
+   form and died "expected Colon, found Assign". the diagnostics branch
+   log pinpointed it in one read. fixed properly in 443afa5: Assign stmt
+   added (emission will map to local.set), disambiguated by one-token
+   lookahead; parser stays scope-blind so undeclared-name assignment is a
+   CHECKER error.
+
+process incident recovered: PR #12's memory commit (67e8516) was made to
+agent/cartridge-foundation-and-e2e AFTER its pr was opened → stranded by
+the squash merge; main's taskboard still showed e2e as open. re-applied
+onto this branch. RULE: commit memory before open_pr, or re-apply after.
+
+next: item 3 — wasm emission. design notes already in TASKBOARD (indexed
+locals, i64 consts, bool-as-i32-at-runtime). round-trip validate with
+wasmparser + golden hex tests.
+
 ## landed this run (path-claim registry — STACKED_PRS_PLAN §4 item 3, C1)
 
 user said "keep going". taskboard read: §4 items 1–2 of the stacked-prs

@@ -104,6 +104,44 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **e2e/preview gate LANDED (PR #12 merged, da6111d)** — STACKED_PRS_PLAN
+      §4 items 4–5 done. .github/workflows/e2e.yml resolves vercel's preview
+      of the PR head sha and ci/e2e.mjs asserts the app BOOTS (#status leaves
+      "booting…" = Event::Ready); check lands where deployment_state reads,
+      so merge_pr refuses until booted-green. check_deployment surfaces
+      preview_url; system prompt documents green-means-booted; guards in
+      tests/ci_gate.rs. LIVE VERIFICATION OWED: a deliberately-broken pr has
+      not yet been watched going red — record here when the refusal fires.
+      LESSON from this landing: memory edits committed to an agent/ branch
+      AFTER its pr is opened are stranded when the branch is squash-merged
+      (commit 67e8516 never reached main). commit memory BEFORE open_pr, or
+      re-apply onto the next branch.
+- [ ] **cartridge substrate** — docs/CARTRIDGE_PLAN.md §11 build order:
+      - [x] item 1 DONE (PR #13, 1fcd65c): L1 manifest — parse+validate,
+            slug/ABI/port rules pinned both directions in
+            tests/cartridges_manifest.rs.
+      - [x] item 2 DONE (same pr): rustlite lexer + Pratt parser + typed
+            AST, goldens/negatives in tests/rustlite_front.rs. closed type
+            set {i32,i64,f32,f64,bool}; REQUIRED type annotations (checking
+            stays a one-pass walk); precedence pinned by tree-shape goldens;
+            Assign stmt added after the gate caught its absence; parser is
+            scope-blind by design (undeclared-name assignment = CHECKER
+            error for the next pass).
+      - [ ] item 3 NEXT: wasm emission — typed AST → raw .wasm bytes with
+            NO linking step (the whole in-browser bet). needs a type-check
+            pass FIRST over parsed fns (scope walk: params then lets in
+            order) since emission assumes well-typed input; wasm locals are
+            INDEXED so the scope walk builds the name→index map (params
+            first, then lets); i64 consts emit as i64.const even in i32
+            range or checker and emitter disagree; bool maps to i32 at
+            runtime but stays bool in the checker; round-trip validate
+            output with wasmparser in ci; golden hex tests source→bytes.
+      - [ ] items 4–10 per plan §11 (runtime → lifecycle → ports →
+            orchestrator → cognitive cartridge → corpus capture →
+            opcode-model experiment).
+      strategic context: owner wants composable hot-swappable cognitive
+      modules (actor model), NOT a localharness clone; opcode-model horizon
+      gated on corpus capture (plan §9).
 - [x] **path-claim registry LANDED (agent/path-claim-registry)** —
       STACKED_PRS_PLAN §4 item 3 (§2 C1): pure ClaimRegistry in
       src/agent/claims.rs (ttl 30min, saturating expiry), thread_local
@@ -121,13 +159,7 @@ taskboard) asked for four things. all four are resolved:
       warning; git strategy (per-conversation agent/* branches) already
       landed via branch_for_conversation. re-read docs/MULTIAGENT_PLAN.md
       phases 2–3 before building.
-- [ ] **e2e workflow + preview deploys (STACKED_PRS_PLAN §4 items 4–5 /
-      §3 P1–P3)**: .github/workflows/e2e.yml driving playwright against a
-      vercel PREVIEW deployment (caveat: deployment protection may wall
-      previews behind auth — relax for previews or use a bypass token,
-      else nothing can test against them); e2e as required check on main;
-      system-prompt documentation of the merge discipline AFTER the tools.
-      this is what turns "deploy to production" into "promote-on-green".
+- [x] **e2e workflow + preview deploys — DONE, PR #12 (see open work top)**.
 - [x] **pr_wait LANDED (PR #6 merged, squash ff1ad44)** — pr_status polling
       loops (8–10 identical calls per merge) flooded conversations; the user
       called it out explicitly. NEVER poll pr_status in a loop again: call
