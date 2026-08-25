@@ -7,6 +7,30 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (rustlite string literals + data segments — agent/rustlite-strings)
+
+fourth "keep going". the board's first item: the language gap that made a
+cognitive module unwritable (topics spelled byte by byte). design choice,
+the smallest honest one: a string literal is an **i64 expression** whose
+value is its packed (ptr, len) — the ABI already represents strings and
+results that way, and pack/unpack_* already exist, so no string type, no
+two-slot locals, no new intrinsics except `data_end()` (where a guest
+allocator's heap may start). `Layout::of` interns literals sorted into one
+active segment at DATA_BASE=16; a literal lowers to ONE `i64.const`.
+the runtime decodes section 11 (active mode only; `i32.const N; end`
+offsets; bounds against the declared memory checked at decode, not at
+instantiation) and re-applies segments in `initial_memory()`, so every
+restart/swap starts with its literals intact — pinned by an eval that
+overwrites a literal and gets it back on the next invoke. the emitter
+refuses a literal blob that would not fit guest memory at compile time.
+"data segments" moved from the decoder's refusal list to its dialect.
+
+two test slips (both mine, fixed before commit): a module with a memory
+always exports it (section list is [1,3,5,7,10,11], not without 7), and
+the data section's payload is 8 bytes, not 7. src unchanged for either.
+
+next: `call` as ABI v2 over the orchestrator's mailbox, then item 8.
+
 ## landed this run (cartridge item 7: L5 orchestrator — agent/cartridge-orchestrator)
 
 third "keep going" of the loop. item 7 per plan §8, built as a

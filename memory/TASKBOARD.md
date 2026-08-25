@@ -232,12 +232,24 @@ taskboard) asked for four things. all four are resolved:
             5 restarts, crash-count reset, boot refusal isolation, swap
             keeping host state + pending mail and reviving Failed, swap
             refusals leaving nothing changed.
-      - [ ] NEXT (L2 follow-up, before 8): rustlite string literals +
-            data segments — `"inc"` as an expression → (ptr, len) into a
-            data section the runtime initializes at instantiate. today a
-            cartridge names a port byte-by-byte (see emitter_src in
-            tests/common), which is absurd for a cognitive module.
-      - [ ] then: `call(slug_or_port, msg) -> packed` as ABI v2 — a
+      - [x] string literals + data segments DONE (agent/rustlite-strings,
+            2026-08-25): a literal is an i64 EXPRESSION — its packed
+            (ptr, len), the ABI's own string representation — so
+            `unpack_ptr("inc")` / `unpack_len("inc")` feed any host call,
+            and `return "static answer";` is a valid cart_handle result.
+            no string type, one AST node (Expr::StrLit), one new
+            intrinsic `data_end()`. wasm.rs `Layout::of` interns every
+            literal SORTED (deterministic) into one active data segment
+            at DATA_BASE=16; the blob must fit guest memory (compile-time
+            refusal naming the size). runtime decodes section 11 (active
+            mode only, `i32.const N; end` offsets, bounds checked against
+            the declared memory AT DECODE — the spec would trap at
+            instantiation) and `initial_memory()` re-applies segments on
+            every instantiation, so restarts/swaps get their literals
+            back (pinned). tests/common ALLOC now starts its heap at
+            data_end(); emitter_src spells topics as literals. +7 evals
+            across front/emit/runtime/lifecycle.
+      - [ ] NEXT: `call(slug_or_port, msg) -> packed` as ABI v2 — a
             synchronous request/response mediated by the orchestrator
             (host import → route to provider → handle → response written
             back via cart_alloc); manifest abi_version 2; v1 cartridges

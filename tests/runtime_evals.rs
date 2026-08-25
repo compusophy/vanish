@@ -383,6 +383,96 @@ fn pack_and_unpack_round_trip_through_the_guest() {
     assert_eq!(vanish::cartridges::pack(0, 0), 0, "0 is the miss sentinel");
 }
 
+// ---- string literals and the data segment ------------------------------------------
+
+#[test]
+fn string_literals_live_in_the_data_segment_and_pack_their_address() {
+    let src = r#"
+        fn first() -> i32 { return load_u8(unpack_ptr("hi")); }
+        fn len() -> i32 { return unpack_len("hi"); }
+        fn same() -> bool { return "abc" == "abc"; }
+        fn differ() -> bool { return "abc" == "abd"; }
+        fn end() -> i32 { return data_end(); }
+    "#;
+    let (m, _) = build(src);
+    assert_eq!(invoke(&m, 0, &[], 100).unwrap(), Some(Val::I32(i32::from(b'h'))));
+    assert_eq!(invoke(&m, 1, &[], 100).unwrap(), Some(Val::I32(2)));
+    assert_eq!(
+        invoke(&m, 2, &[], 100).unwrap(),
+        Some(Val::I32(1)),
+        "interned: one copy, one address, so equal literals pack equal"
+    );
+    assert_eq!(invoke(&m, 3, &[], 100).unwrap(), Some(Val::I32(0)));
+    // layout is sorted: "abc" 16..19, "abd" 19..22, "hi" 22..24 → end 24.
+    assert_eq!(invoke(&m, 4, &[], 100).unwrap(), Some(Val::I32(24)));
+    // with no literals, data_end() is DATA_BASE and no data section exists.
+    let (m, _) = build("fn end() -> i32 { return data_end(); }");
+    assert_eq!(
+        invoke(&m, 0, &[], 100).unwrap(),
+        Some(Val::I32(vanish::cartridges::wasm::DATA_BASE as i32))
+    );
+    assert!(m.data.is_empty());
+}
+
+#[test]
+fn every_instantiation_gets_its_literals_back() {
+    // the guest overwrites its literal; the NEXT invoke starts from a
+    // fresh memory with the segment re-applied — which is what makes a
+    // supervisor's restart safe for code that reads its own strings.
+    let src = r#"
+        fn f() -> i32 {
+            let p: i32 = unpack_ptr("x");
+            let before: i32 = load_u8(p);
+            store_u8(p, 0);
+            return before;
+        }
+    "#;
+    let (m, _) = build(src);
+    for _ in 0..3 {
+        assert_eq!(invoke(&m, 0, &[], 100).unwrap(), Some(Val::I32(i32::from(b'x'))));
+    }
+}
+
+#[test]
+fn data_segments_that_do_not_fit_or_are_not_active_are_refused_at_decode() {
+    let bytes = compile("fn f() -> i32 { return unpack_len(\"hi\"); }");
+    assert!(decode(&bytes).is_ok());
+
+    // shrink the memory to 0 pages: the segment at 16 no longer fits.
+    // memory section payload: count 1, flags 1 (min+max), min 16, max 16.
+    let mut shrunk = bytes.clone();
+    let pos = shrunk
+        .windows(6)
+        .position(|w| w == [5, 4, 1, 1, 16, 16])
+        .expect("memory section as emitted");
+    shrunk[pos + 4] = 0;
+    shrunk[pos + 5] = 0;
+    let e = decode(&shrunk).unwrap_err();
+    assert!(e.msg.contains("does not fit"), "{e:?}");
+
+    // a passive segment (mode 1) is outside the dialect. the section's
+    // payload is count(1) mode(0) i32.const(0x41) 16 end(0x0b) len(2) "hi"
+    // = 8 bytes.
+    let mut passive = bytes.clone();
+    let pos = passive
+        .windows(4)
+        .position(|w| w == [11, 8, 1, 0])
+        .expect("data section header as emitted");
+    passive[pos + 3] = 1;
+    let e = decode(&passive).unwrap_err();
+    assert!(e.msg.contains("mode"), "{e:?}");
+
+    // a negative offset is not an address.
+    let mut negative = bytes;
+    let pos = negative
+        .windows(3)
+        .position(|w| w == [0x41, 16, 0x0b])
+        .expect("offset expression as emitted");
+    negative[pos + 1] = 0x7f; // sleb −1
+    let e = decode(&negative).unwrap_err();
+    assert!(e.msg.contains("not a valid address"), "{e:?}");
+}
+
 // ---- imports without a host --------------------------------------------------------
 
 #[test]
@@ -400,13 +490,13 @@ fn an_import_call_without_a_host_traps_host_error() {
 
 #[test]
 fn unknown_sections_are_refused_but_custom_sections_are_skipped() {
-    // a data segment (id 11) would initialize memory we do not implement:
+    // a global section (id 6) would add state we do not implement:
     // refusing is the D4-correct answer, not silently loading a module
     // whose bytes mean something else.
     let mut bytes = compile("fn f() -> i32 { return 1; }");
-    bytes.extend_from_slice(&[11, 1, 0]); // data section, 1 byte payload
+    bytes.extend_from_slice(&[6, 1, 0]); // global section, 1 byte payload
     let e = decode(&bytes).unwrap_err();
-    assert!(e.msg.contains("data"), "{e:?}");
+    assert!(e.msg.contains("outside the dialect") && e.msg.contains("globals"), "{e:?}");
     // a custom section (id 0) carries names/producers and changes nothing.
     let mut bytes = compile("fn f() -> i32 { return 1; }");
     bytes.extend_from_slice(&[0, 3, 1, b'x', 7]);
@@ -524,6 +614,7 @@ fn fuzz_richer_modules_also_survive() {
         "fn s(x: i64) -> i64 { if x < 0 { return -1; } else if x == 0 { return 0; } else { return 1; } }",
         "fn fib(n: i64) -> i64 { if n < 2 { return n; } return fib(n - 1) + fib(n - 2); }",
         "fn m(a: i32) -> i64 { store_i32(a, 5); store_u8(a + 4, 9); return pack(load_i32(a), load_u8(a + 4)); }",
+        "fn s() -> i32 { return load_u8(unpack_ptr(\"hey\")) + unpack_len(\"hey\") + data_end(); }",
         "extern \"C\" { fn now_ms() -> i64; fn log(l: i32, p: i32, n: i32); } \
          pub fn cart_alloc(size: i32) -> i32 { return 8; } \
          pub fn cart_init(p: i32, n: i32) -> i32 { log(1, p, n); return 0; } \
