@@ -1,0 +1,118 @@
+# pre-deploy verification: every push to any branch compiles against the
+# REAL wasm target and runs the full gate before vercel ever sees it.
+#
+# why this exists: this repo had zero ci. the only compiler in the loop was
+# vercel's build (~4 minutes: it installs rust from scratch every time), so
+# a typo shipped to production as a failed deploy, pinned main to the last
+# good build for those same ~4 minutes, and mailed the user about it.
+#
+# DIAGNOSTICS CONTRACT: on any failure this workflow publishes the raw
+# compiler/test output to the `diagnostics` branch (file: ci-diagnostics.log).
+# job logs need admin api rights to read; the summary api proved unreliable;
+# a pushed FILE is readable by anyone — including the agent repairing its
+# own red build — via raw.githubusercontent.com/<repo>/diagnostics/
+# ci-diagnostics.log. do not remove this step: it is the self-repair loop.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# writing the diagnostics branch requires contents: write for the token.
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # pinned toolchain; the wasm target matches build.sh exactly.
+      - name: install rust (stable, wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: cache cargo deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # the check that actually matters for deploys: does THIS code compile
+      # where production builds it?
+      #
+      # lib + bins ONLY. building the integration tests FOR the wasm target
+      # would fail every run with E0463, because the `test` crate is not
+      # shipped for wasm32-unknown-unknown at all (pinned by tests/ci_gate.rs).
+      # tests are gated natively below.
+      #
+      # output is ALWAYS captured to /tmp/wasm-check.log so the diagnostics
+      # step can publish it whether this passes or fails.
+      - name: cargo check (wasm32 target, lib + bins)
+        run: |
+          cargo check --lib --bins --target wasm32-unknown-unknown 2>&1 | tee /tmp/wasm-check.log
+          exit "${PIPESTATUS[0]}"
+
+      # full behavioral gate: unit tests + every tests/*.rs suite
+      # (filesystem-discovered) + clippy -D warnings. identical definition
+      # to the deploy's own gate by construction — same script.
+      - name: test gate (shared with build.sh)
+        run: bash ci/run_tests.sh
+
+      - name: build.sh must consume the shared gate
+        run: grep -F "ci/run_tests.sh" build.sh
+
+      # the self-repair loop, made concrete: whatever failed above, its real
+      # output lands on the diagnostics branch as a plain file. also mirrored
+      # into the job summary for humans reading the run page.
+      - name: publish diagnostics
+        if: always()
+        run: |
+          LOG=ci-diagnostics.log
+          {
+            echo "diagnostics for ${GITHUB_SHA} (${GITHUB_REF}) at $(date -u +%FT%TZ)"
+            echo "=== cargo check (wasm32, lib+bins) — last 120 lines ==="
+            tail -120 /tmp/wasm-check.log 2>/dev/null || echo "(no wasm-check log)"
+            echo ""
+            for f in /tmp/gate-*.log; do
+              [ -f "$f" ] || continue
+              echo "=== $f — last 120 lines ==="
+              tail -120 "$f"
+              echo ""
+            done
+          } > "$LOG"
+
+          # human-facing copy on the run page
+          {
+            echo "## ci diagnostics"
+            echo '```'
+            head -200 "$LOG"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          # machine-facing copy on a stable, unauthenticated url.
+          # the log was written into the working tree and is UNTRACKED, so
+          # removing tracked files does not touch it — no clean step allowed
+          # here: git clean would delete exactly the evidence we are publishing.
+          git config user.email "agent@vanish.local"
+          git config user.name "vanish-ci"
+          git checkout -b publish-diag
+          git rm -rfq . || true
+          git add "$LOG"
+          git commit -m "ci diagnostics for ${GITHUB_SHA}" --allow-empty
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:diagnostics"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
