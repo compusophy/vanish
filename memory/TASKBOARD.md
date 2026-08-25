@@ -141,6 +141,26 @@ taskboard) asked for four things. all four are resolved:
       ci/run_tests.sh for the same gate id (done); next structural item
       is verifying committed bytes vs local for EVERY file in an atomic
       changeset (spot-check rule written into status.md this run).
+- [x] **boot reconcile error ROOT-CAUSED AND FIXED (agent/reconcile-double-fire)**.
+      the recurring "reconcile error ... removeEntry ...
+      NoModificationAllowedError" after every completion was NOT random
+      browser flakiness: TWO Configure commands arrive at every boot (the
+      worker self-configures from the opfs config mirror AND the ui sends its
+      own on Ready), and the auto-reconcile latch closed only AFTER the first
+      pass finished — check-then-set across an await — so both tasks passed
+      the gate and ran concurrent reconciles over the same cache files;
+      chrome refuses removeEntry while another task holds the file open.
+      worse, reconcile propagated the error with `?`, aborting the whole D10
+      arming pass on ONE locked file. fixed three ways, pinned by new suite
+      tests/boot_reconcile.rs: (1) atomic claim gate (checked+set in one
+      STATE.with, through should_auto_reconcile so the shared gate stays
+      load-bearing); (2) opfs::delete retries locked files on a real timer
+      (50ms x10) instead of failing — D7-compliant, no resolved-promise
+      awaits; (3) per-file delete failures collected into
+      ReconcileReport.failed instead of aborting, surfaced in both the boot
+      note and sync_repo output; a failed PASS still releases the claim so
+      the next Configure retries. LIVE VERIFICATION OWED: reload the app,
+      expect exactly ONE "⇅ tree reconciled" note and NO red reconcile error.
 
 - [x] **UNBLOCK ALL COMMITS — superseded by agent/fix-red-landing-and-self-config**.
       the earlier landing on agent/ci-gate-and-loop-survival (0582489) went

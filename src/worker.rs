@@ -1141,11 +1141,27 @@ fn handle(command: Command) {
                 // only arrive here — but this is still before any read or edit
                 // a run could make. a failure surfaces as an Error event, not
                 // a silent skip (D4); the next Configure retries.
-                let auto_reconciled_now = crate::agent::tools::should_auto_reconcile(
-                    github_ok,
-                    STATE.with(|s| s.borrow().auto_reconciled),
-                );
-                if auto_reconciled_now {
+                //
+                // the claim is taken BEFORE verification starts and atomically,
+                // because TWO Configures arrive at every boot: the worker
+                // self-configures from the opfs mirror, then the ui sends its
+                // own. checking-then-setting after the await would let both
+                // tasks pass the gate while the first was still verifying and
+                // run two concurrent reconciles over the same cache files —
+                // their colliding removeEntry calls are exactly the recurring
+                // "reconcile error ... NoModificationAllowedError". claiming
+                // first means the loser skips cleanly instead of racing.
+                let claimed_reconcile = github_ok && STATE.with(|s| {
+                    let already = s.borrow().auto_reconciled;
+                    // should_auto_reconcile stays the single definition of the
+                    // gate; this call site adds only the atomic set.
+                    if !crate::agent::tools::should_auto_reconcile(true, already) {
+                        return false;
+                    }
+                    s.borrow_mut().auto_reconciled = true;
+                    true
+                });
+                if claimed_reconcile {
                     let gh = crate::agent::github::Github::new(
                         &config.github_token,
                         &config.repo,
@@ -1154,12 +1170,11 @@ fn handle(command: Command) {
                     let mut ws = crate::agent::tools::Workspace::new(gh).await;
                     match ws.reconcile_against_branch().await {
                         Ok(report) => {
-                            STATE.with(|s| s.borrow_mut().auto_reconciled = true);
                             RECONCILED_HEAD.with(|h| *h.borrow_mut() = Some(report.head.clone()));
                             emit(Event::Note {
                                 thread: conv(),
                                 text: format!(
-                                    "⇅ tree reconciled against {} at boot: {} file(s) on branch{}, {} uncommitted locally",
+                                    "⇅ tree reconciled against {} at boot: {} file(s) on branch{}, {} uncommitted locally{}",
                                     report.head.chars().take(7).collect::<String>(),
                                     report.files_on_branch,
                                     if report.refreshed.is_empty() {
@@ -1171,6 +1186,15 @@ fn handle(command: Command) {
                                         )
                                     },
                                     report.uncommitted.len(),
+                                    if report.failed.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(
+                                            "; {} cache file(s) were locked by another task and will refresh on a later read: {:?}",
+                                            report.failed.len(),
+                                            report.failed
+                                        )
+                                    },
                                 ),
                             });
                             if !report.refreshed.is_empty() {
@@ -1178,6 +1202,11 @@ fn handle(command: Command) {
                             }
                         }
                         Err(e) => {
+                            // the claim is released so the next Configure
+                            // retries — but only after this failure has been
+                            // surfaced (D4). a failure that permanently
+                            // disarmed reconcile would be worse than the bug.
+                            STATE.with(|s| s.borrow_mut().auto_reconciled = false);
                             emit(Event::Error {
                                 thread: conv(),
                                 scope: "reconcile".to_string(),
