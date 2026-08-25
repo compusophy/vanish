@@ -224,6 +224,10 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
         stack: Vec<i64>,
         locals: Vec<i64>,
     }
+    // control frames: (opcode kind, unused, loop-header ip). mirrors what a
+    // real interpreter keeps — which is exactly why this harness can now
+    // catch inverted branch semantics instead of rubber-stamping them.
+    let mut frames: Vec<(u8, usize, usize)> = Vec::new();
     let (start, len) = func_bodies[entry];
     // skip the local declarations: read their total then advance
     let mut vm = Vm {
@@ -326,41 +330,34 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push((a == 0) as i64);
             }
-            // br_if (exit when cond false) and br (restart). our emitted
-            // loops are flat — depth is always 0 — so both branches resolve
-            // by scanning for the enclosing loop's markers. nested blocks
-            // would need a real control stack; that is L3's job, not this
-            // harness's.
-            0x0d | 0x0c => {
-                let _depth = vm.code[vm.ip];
+            // real label semantics now: depth 0 = innermost frame (loop),
+            // depth 1 = its enclosing block. br N restarts/exits by walking
+            // an explicit control stack — the same frames a real interpreter
+            // keeps. this is what makes the behavioral tests MEAN something:
+            // they would hang on the old emitter's inverted branch.
+            0x02 | 0x03 => {
+                // block/loop: push a frame {kind, branch target ip}
+                let kind = op;
+                let _blocktype = vm.code[vm.ip]; // always void 0x40 for us
                 vm.ip += 1;
-                if op == 0x0c {
-                    // unconditional: restart at the loop opener just behind us
-                    let mut q = vm.ip;
-                    let mut nesting = 0usize;
-                    loop {
-                        q -= 1;
-                        match vm.code[q] {
-                            0x03 => {
-                                if nesting == 0 {
-                                    break;
-                                }
-                                nesting -= 1;
-                            }
-                            0x0b => nesting += 1,
-                            _ => {}
-                        }
-                    }
-                    vm.ip = q + 1; // skip the loop opcode itself
-                } else {
-                    let taken = vm.stack.pop().unwrap() != 0;
-                    if taken {
-                        // exit: jump past this loop's matching end
+                frames.push((kind, vm.code.len(), vm.ip));
+            }
+            0x0d => {
+                let depth = vm.code[vm.ip] as usize;
+                vm.ip += 1;
+                let taken = vm.stack.pop().unwrap() != 0;
+                if taken {
+                    let n = frames.len() - 1 - depth;
+                    let (kind, _, header) = frames[n];
+                    if kind == 0x03 {
+                        vm.ip = header; // loop: RESTART
+                    } else {
+                        // block: exit → jump past its matching end
                         let mut q = vm.ip;
                         let mut nesting = 0usize;
                         while q < vm.code.len() {
                             match vm.code[q] {
-                                0x03 => nesting += 1,
+                                0x02 | 0x03 => nesting += 1,
                                 0x0b => {
                                     if nesting == 0 {
                                         break;
@@ -371,11 +368,46 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                             }
                             q += 1;
                         }
-                        vm.ip = q + 1; // past `end`
+                        vm.ip = q + 1;
+                        frames.truncate(n);
                     }
                 }
             }
-            0x0b | 0x0f => {
+            0x0c => {
+                let depth = vm.code[vm.ip] as usize;
+                vm.ip += 1;
+                let n = frames.len() - 1 - depth;
+                let (kind, _, header) = frames[n];
+                if kind == 0x03 {
+                    vm.ip = header; // loop: continue
+                } else {
+                    let mut q = vm.ip;
+                    let mut nesting = 0usize;
+                    while q < vm.code.len() {
+                        match vm.code[q] {
+                            0x02 | 0x03 => nesting += 1,
+                            0x0b => {
+                                if nesting == 0 {
+                                    break;
+                                }
+                                nesting -= 1;
+                            }
+                            _ => {}
+                        }
+                        q += 1;
+                    }
+                    vm.ip = q + 1;
+                    frames.truncate(n);
+                }
+            }
+            0x0b => {
+                frames.pop();
+                // the function's own end leaves no frames: we're done.
+                if frames.is_empty() {
+                    return *vm.stack.last().unwrap_or(&0);
+                }
+            }
+            0x0f => {
                 return *vm.stack.last().unwrap_or(&0);
             }
             other => panic!("vm: unhandled opcode {other:#04x}"),

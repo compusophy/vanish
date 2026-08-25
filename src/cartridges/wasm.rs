@@ -449,21 +449,27 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
             }
         }
         Stmt::While { cond, body } => {
-            out.push(0x03); // loop
-            out.push(0x40); // void blocktype
+            // wasm label semantics: branching TO a loop label RESTARTS it;
+            // exiting requires targeting an enclosing BLOCK. so a while is
+            // block $exit { loop $cont { cond; eqz; br_if $exit; body;
+            // br $cont } }. getting this backwards validates cleanly and
+            // hangs at runtime — the worst kind of wrong, caught here by
+            // writing the spec down instead of trusting the intent.
+            out.push(0x02); // block $exit
+            out.push(0x40);
+            out.push(0x03); // loop $cont
+            out.push(0x40);
             emit_expr(cond, scope, fns, out);
             out.push(0x45); // i32.eqz — bools are i32 at runtime
-            out.push(0x0d); // br_if 0 → exits when cond is false... 
-            out.push(0x00);
-            // br_if branches OUT of depth 0 (the loop) when taken; we need
-            // the opposite: continue while true. so instead: eqz gives
-            // "not cond"; br_if exits on not-cond. that is exactly right.
+            out.push(0x0d);
+            out.push(0x01); // br_if 1 → leaves the BLOCK when cond is false
             for st in &body.stmts {
                 emit_stmt(st, scope, fns, out);
             }
-            out.push(0x0c); // br 0 → jump back to loop start
-            out.push(0x00);
-            out.push(0x0b); // end (loop)
+            out.push(0x0c);
+            out.push(0x00); // br 0 → back to loop header (continue)
+            out.push(0x0b); // end loop
+            out.push(0x0b); // end block
         }
         Stmt::Return(e) => {
             if let Some(e) = e {
