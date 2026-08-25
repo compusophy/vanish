@@ -232,7 +232,9 @@ to train on.
        import/memory/export emission, host dispatch + bounded re-entry,
        lifecycle.rs. language gap noted: string literals / data segments
        (needed before 8)
-6. [ ] L4 ports/requires wiring + cycle detection
+6. [x] L4 ports/requires wiring + cycle detection — ports.rs (pure wire)
+       + composition.rs (wire-then-load, providers-first init, route by
+       port). the guest `call` import waits for 7's mediator (ABI v2)
 7. [ ] L5 mailboxes + supervision + hot-swap (kv-backed state)
 8. [ ] cognitive orchestrator: first hot-swappable reasoning module
 9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
