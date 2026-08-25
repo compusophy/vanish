@@ -41,6 +41,15 @@ deliberately deferred, in order: rustlite string literals + data segments
 (a cognitive module cannot spell its ports byte-by-byte), then `call` as
 ABI v2 riding this mailbox, then item 8.
 
+ONE RED BUILD on this landing (f07a13b): every suite passed on ci, then
+clippy refused `outbox.drain(..).collect()` (clippy::drain_collect →
+`mem::take`). the local gate had passed — local clippy is rustc 1.96's,
+ci installs an unpinned `stable` that is newer and warns on it. lesson:
+**the gate's verdict depends on the toolchain, and ci's is the one that
+counts.** keep the local toolchain at current stable (`rustup update`)
+before trusting a local green, and read the diagnostics branch first
+when local and ci disagree — it named the line in one read.
+
 ## landed this run (cartridge item 6: L4 ports + composition — agent/cartridge-ports)
 
 second "keep going" of the 90-minute loop. taskboard read: item 6 next.

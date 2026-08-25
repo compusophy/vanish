@@ -433,7 +433,7 @@ impl<H: Host> Orchestrator<H> {
     /// `requires`; otherwise a Denied event, never a delivery.
     fn route_outbox(&mut self, slug: &str) {
         let out: Vec<(Vec<u8>, Vec<u8>)> = match self.comp.get_mut(slug) {
-            Some(c) => c.host_mut().outbox.drain(..).collect(),
+            Some(c) => std::mem::take(&mut c.host_mut().outbox),
             None => return,
         };
         if out.is_empty() {
