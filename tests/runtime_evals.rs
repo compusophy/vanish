@@ -181,7 +181,10 @@ fn type_confusion_on_the_stack_traps_named() {
         vanish::cartridges::runtime::Instr::FunctionEnd,
     ];
     let err = invoke(&m, 0, &[], 1000).unwrap_err();
-    assert!(matches!(err, Trap::InvalidStack(msg) if msg.contains("i32")), "{err:?}");
+    assert!(
+        matches!(err, Trap::InvalidStack(ref msg) if msg.contains("i32")),
+        "{err:?}"
+    );
 }
 
 #[test]
