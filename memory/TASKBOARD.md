@@ -104,14 +104,20 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
-- [ ] **PROMOTION BLOCKED ON TOKEN SCOPE #3: pull_requests write missing**.
-      open_pr from agent/fix-red-landing-and-self-config → main returned
-      http 403 "Resource not accessible by personal access token" — the
-      fine-grained PAT has contents+workflows but NOT pull requests:
-      read and write. everything else is DONE AND GREEN at head 19c92af
-      (bba0104 = code, 19c92af = memory): both gates pass, all suites
-      green. USER ACTION: add "Pull requests: Read and write" to the
-      token, then open_pr + pr_status until green + merge_pr.
+- [x] **PROMOTION BLOCKED ON TOKEN SCOPE #3 — RESOLVED (this run)**.
+      open_pr had returned http 403 because the fine-grained PAT lacked
+      "Pull requests: read and write". COMPLETE fine-grained token scope
+      set for vanish (recorded so the next wall is diagnosed in one step):
+      Contents rw · Workflows rw · Pull requests rw · Metadata read
+      (auto-set); Checks read + Actions read recommended for reading CI
+      results. Workflows alone was NEVER enough — the earlier taskboard
+      note asking only for Workflows was incomplete and cost a session.
+      PR #2 (agent/fix-red-landing-and-self-config → main) is open,
+      mergeable=true, strictly ahead of main by 9 commits (behind_by 0,
+      compare api verified — nothing on main can be reverted).
+      OPERATIONAL: open_pr REFUSES while the session sits on main —
+      git_checkout the agent/ branch first (a page reload resets the
+      session branch to main; reconcile then checkout).
 - [ ] live verification owed: ∞ loop restart after failure/step-limit;
       stop mid-restart keeps it down; browser close+reopen within 12h
       resumes; restart budget saturates at 6/hour with the pause note;
@@ -121,14 +127,16 @@ taskboard) asked for four things. all four are resolved:
       is verifying committed bytes vs local for EVERY file in an atomic
       changeset (spot-check rule written into status.md this run).
 
-- [x] **UNBLOCK ALL COMMITS — RESOLVED (agent/ci-gate-and-loop-survival)**.
-      user added Workflows rw to the token; sync_repo confirmed the tree at
-      dd3734e with all ten dirty files intact, work moved to
-      agent/ci-gate-and-loop-survival (git_create_branch carries dirty
-      files; git_checkout refuses them) and landed in one atomic commit,
-      then promoted through a green-checked pr. docs/ci-workflow.yml is a
-      retired pointer stub now that .github/workflows/ci.yml is live —
-      do not re-copy it; tests/ci_gate.rs enforces the live file.
+- [x] **UNBLOCK ALL COMMITS — superseded by agent/fix-red-landing-and-self-config**.
+      the earlier landing on agent/ci-gate-and-loop-survival (0582489) went
+      RED on both gates and was NEVER merged — an old taskboard entry here
+      falsely claimed a green-checked promotion; corrected this run after
+      finding main still missing ci/run_tests.sh entirely. what survived:
+      docs/ci-workflow.yml is a retired pointer stub (do not re-copy it;
+      tests/ci_gate.rs enforces the live .github/workflows/ci.yml). the
+      red landing's diagnosed causes are all fixed on the superseding
+      branch: wasm check --lib --bins only, stale partial control.rs
+      restored, build.sh back to delegation, diagnostics branch loop.
 
 ## landed (overnight-loop survival + ci gate, agent/ci-gate-and-loop-survival)
 
