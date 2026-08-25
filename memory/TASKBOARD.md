@@ -110,12 +110,16 @@ taskboard) asked for four things. all four are resolved:
       `pr_wait` ONCE — it sleeps inside a single tool call (10s interval,
       300s budget) and returns one settled answer. merge_pr still gates on
       settled green. pacing pinned by tests in tests/branch_policy.rs.
-- [ ] check_deployment bug found this run: with no sha argument it checked
-      MAIN's head instead of the session branch's new commit, and counted a
-      CANCELLED duplicate workflow run as "failure" while its own build log
-      showed every suite passing. two fixes wanted: default to the session's
-      synced_head/branch (not main), and treat cancelled checks as
-      non-verdicts rather than failures.
+- [x] **check_deployment bug RESOLVED (PR #8 merged, squash 3772afb)** —
+      with no sha argument it used to check MAIN's head instead of the
+      session branch's new commit, and counted a CANCELLED duplicate
+      workflow run as "failure" while its own build log showed every suite
+      passing. both fixed: `default_deploy_target(synced_head, live_head)`
+      prefers the session's synced head (2 tests in branch_policy.rs), and
+      cancelled checks are dropped BEFORE aggregation as non-verdicts (3
+      negative-control tests in loop_nervous_system.rs). verified live
+      during a health check: check_deployment with no sha reported the
+      session's own head with verdict success, not main's.
 - [x] **PROMOTION BLOCKED ON TOKEN SCOPE #3 — RESOLVED (PR #2 merged)**.
       open_pr had returned http 403 because the fine-grained PAT lacked
       "Pull requests: read and write". COMPLETE fine-grained token scope
