@@ -6,6 +6,9 @@
 //! means bytes on disk that differ from the last synced github blob — a fact
 //! that outlives the run, the tab, and the browser.
 
+use crate::agent::claims::{
+    contest_warning, registry_claim, registry_entries, registry_expire, registry_release_paths,
+};
 use crate::agent::github::{FileChange, Github};
 use crate::agent::http;
 use crate::platform::opfs::{self, Index, IndexEntry};
@@ -16,6 +19,10 @@ pub struct Workspace {
     /// verdict but not a cause.
     pub vercel: Option<crate::agent::vercel::Vercel>,
     pub index: Index,
+    /// which conversation this workspace's writes belong to. empty when the
+    /// caller did not say (single-worker today); the registry treats an
+    /// unknown owner as its own conversation either way.
+    pub claim_owner: String,
     /// branch head as this session last saw it (sync_repo / git_commit).
     ///
     /// D10: git_commit refuses when the live head differs from this, because
@@ -295,7 +302,7 @@ pub fn definitions() -> serde_json::Value {
         "type": "function",
         "function": {
           "name": "write_file",
-          "description": "create or overwrite a file in the working tree. the write is durable immediately; it survives the end of this run.",
+          "description": "create or overwrite a file in the working tree. the write is durable immediately; it survives the end of this run. if another conversation holds a claim on this path, the result carries a 'warning' naming it.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -337,7 +344,7 @@ pub fn definitions() -> serde_json::Value {
         "type": "function",
         "function": {
           "name": "git_status",
-          "description": "list every file whose local content differs from the last synced github blob.",
+          "description": "list every file whose local content differs from the last synced github blob. also reports the live path-claim registry (who is editing what) so concurrent conversations can coordinate.",
           "parameters": { "type": "object", "properties": {} }
         }
       },
@@ -563,8 +570,31 @@ impl Workspace {
             github,
             vercel,
             index,
+            claim_owner: String::new(),
             synced_head: String::new(),
             completed: None,
+        }
+    }
+
+    /// stamp who these writes belong to. agent::run sets this once per run
+    /// with its conversation id, so claims are attributed correctly when a
+    /// second worker exists (multiagent phase 2). kept pub for symmetry with
+    /// the other seeded fields; the field itself is pub, so direct assignment
+    /// is equally valid.
+    pub fn set_claim_owner(&mut self, conversation_id: &str) {
+        self.claim_owner = conversation_id.to_string();
+    }
+
+    /// consult-and-record a session-level claim on `path` for this
+    /// workspace's owner. returns the warning text to append to a tool
+    /// result when ANOTHER conversation holds the path; None means clear.
+    fn claim_path(&self, path: &str) -> Option<String> {
+        let verdict = registry_claim(path, &self.claim_owner, now_epoch_ms());
+        match verdict {
+            crate::agent::claims::ClaimVerdict::Contested { holder } => {
+                Some(contest_warning(path, &holder))
+            }
+            _ => None,
         }
     }
 
@@ -692,12 +722,16 @@ impl Workspace {
             "write_file" => {
                 let path = arg(&args, "path").ok_or("write_file requires 'path'")?;
                 let content = arg(&args, "content").ok_or("write_file requires 'content'")?;
+                // claim BEFORE writing so the collision is reported even if
+                // the opfs write itself fails; advisory either way.
+                let warning = self.claim_path(path);
                 opfs::write(path, content).await?;
                 self.mark_dirty(path, content.len()).await?;
                 Ok(serde_json::json!({
                     "success": true,
                     "path": path,
                     "bytes": content.len(),
+                    "warning": warning,
                     "note": "written to the working tree and durable. call git_commit to publish."
                 })
                 .to_string())
@@ -724,11 +758,15 @@ impl Workspace {
                     ));
                 }
                 let updated = content.replacen(target, replacement, 1);
+                // claim after the content check so an edit that REFUSES on
+                // ambiguity does not record a claim for work not done.
+                let warning = self.claim_path(path);
                 opfs::write(path, &updated).await?;
                 self.mark_dirty(path, updated.len()).await?;
                 Ok(serde_json::json!({
                     "success": true,
                     "path": path,
+                    "warning": warning,
                     "note": "edit applied to the working tree."
                 })
                 .to_string())
@@ -754,11 +792,16 @@ impl Workspace {
 
             "git_status" => {
                 let dirty = self.dirty();
+                // expired claims are garbage; sweep them here so the
+                // registry self-cleans during any status check.
+                let expired = registry_expire(now_epoch_ms());
                 Ok(serde_json::json!({
                     "branch": self.github.branch,
                     "repo": self.github.repo,
                     "modified": dirty,
                     "clean": dirty.is_empty(),
+                    "path_claims": registry_entries(),
+                    "claims_expired": expired,
                 })
                 .to_string())
             }
@@ -814,6 +857,11 @@ impl Workspace {
                 }
 
                 let (sha, short) = self.github.commit(message, &changes).await?;
+
+                // committed content supersedes any claim made against
+                // pre-commit state — drop them so post-commit writes by the
+                // same or another conversation are not warned about ghosts.
+                registry_release_paths(&dirty);
 
                 // only clear dirty flags once github has confirmed the commit.
                 for path in &dirty {
