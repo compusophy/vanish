@@ -115,17 +115,15 @@ pub fn check_fn(
     fns: &[FnDecl],
 ) -> Result<(String, Vec<Ty>, u32), TypeError> {
     let sig_tys = |name: &str| -> Option<(Vec<Ty>, Option<Ty>)> {
-        fns.iter()
-            .find(|g| g.sig.name == name)
-            .map(|g| {
-                (
-                    g.sig.params.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
-                    g.sig.ret,
-                )
-            })
+        fns.iter().find(|g| g.sig.name == name).map(|g| {
+            (
+                g.sig.params.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
+                g.sig.ret,
+            )
+        })
     };
 
-    let mut err = |msg: String| TypeError {
+    let err = |msg: String| TypeError {
         fn_name: f.sig.name.clone(),
         msg,
     };
@@ -199,7 +197,7 @@ pub fn check_fn(
                         return Err(err(format!(
                             "return yields {:?} but the signature says {:?}",
                             rt.map(|t| t.name()),
-                            f.sig.ret.map(|t| t.name())
+                            f.sig.ret.as_ref().map(|t| t.name())
                         )));
                     }
                 }
@@ -324,6 +322,7 @@ pub fn emit_module(fns: &[FnDecl]) -> Result<Vec<u8>, TypeError> {
     // section 1: types
     let mut s = Vec::new();
     uleb(types.len() as u64, &mut s);
+    #[allow(clippy::cast_possible_truncation)] // section item counts are small
     for (params, results) in &types {
         s.push(0x60); // functype
         uleb(params.len() as u64, &mut s);
@@ -337,7 +336,7 @@ pub fn emit_module(fns: &[FnDecl]) -> Result<Vec<u8>, TypeError> {
     let mut s = Vec::new();
     uleb(fns.len() as u64, &mut s);
     for idx in &fn_type_idx {
-        uleb(*idx as u64, &mut s);
+        uleb(u64::from(*idx), &mut s);
     }
     write_section(&mut m, 3, &s);
 
@@ -348,7 +347,7 @@ pub fn emit_module(fns: &[FnDecl]) -> Result<Vec<u8>, TypeError> {
     let mut s = Vec::new();
     uleb(fns.len() as u64, &mut s);
     for f in fns {
-        let body = emit_function(f);
+        let body = emit_function(f, fns);
         uleb(body.len() as u64, &mut s);
         s.extend_from_slice(&body);
     }
@@ -363,58 +362,55 @@ fn write_section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-fn emit_function(f: &FnDecl) -> Vec<u8> {
+fn emit_function<'a>(f: &FnDecl, fns: &'a [FnDecl]) -> Vec<u8> {
     // rebuild the same scope walk the checker did — deterministic, so the
     // indices match exactly.
     let mut scope = FnScope::new(&f.sig.params);
     let mut body = Vec::new();
+
+    // pre-walk statements to register lets in source order BEFORE emitting
+    // any code, because wasm locals are function-scoped even though rustlite
+    // lets read block-scoped. declaring up front preserves the checker's
+    // indexing while keeping get/set correct anywhere in the body.
+    fn predeclare(scope: &mut FnScope, b: &Block) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { name, ty, .. } => {
+                    let _ = scope.declare(name, *ty);
+                }
+                Stmt::While { body, .. } => predeclare(scope, body),
+                _ => {}
+            }
+        }
+    }
+    predeclare(&mut scope, &f.body);
 
     // local declaration groups: only NON-param locals go here, compressed
     // into runs of the same type.
     let mut local_decls: Vec<(u32, u8)> = Vec::new();
     let mut pending_count: u32 = 0;
     let mut pending_ty: Option<u8> = None;
-    let flush = |decls: &mut Vec<(u32, u8)>, count: &mut u32, ty: &mut Option<u8>| {
-        if let Some(t) = ty.take() {
-            decls.push((*count, t));
-            *count = 0;
-        }
-    };
-
-    // pre-walk statements to register lets in source order BEFORE emitting
-    // any code, because wasm locals are function-scoped even though rustlite
-    // lets read block-scoped. declaring up front preserves the checker's
-    // indexing while keeping get/set correct anywhere in the body.
-    fn predeclare(scope: &mut FnScope, b: &Block, flush: &mut impl FnMut()) {
-        for s in &b.stmts {
-            match s {
-                Stmt::Let { name, ty, .. } => {
-                    let _ = scope.declare(name, *ty);
-                }
-                Stmt::While { body, .. } => predeclare(scope, body, flush),
-                _ => {}
-            }
-        }
-    }
-    predeclare(&mut scope, &f.body, &mut || {});
-
-    // now build declaration runs from scope.types[n_params..]
     for ty in &scope.types[scope.n_params as usize..] {
         let v = valty(*ty);
         match pending_ty {
             Some(t) if t == v => pending_count += 1,
             _ => {
-                flush(&mut local_decls, &mut pending_count, &mut pending_ty);
+                if let Some(t) = pending_ty.take() {
+                    local_decls.push((pending_count, t));
+                    pending_count = 0;
+                }
                 pending_ty = Some(v);
                 pending_count = 1;
             }
         }
     }
-    flush(&mut local_decls, &mut pending_count, &mut pending_ty);
+    if let Some(t) = pending_ty.take() {
+        local_decls.push((pending_count, t));
+    }
 
     uleb(local_decls.len() as u64, &mut body);
     for (count, ty) in &local_decls {
-        uleb(*count as u64, &mut body);
+        uleb(u64::from(*count), &mut body);
         body.push(*ty);
     }
 
@@ -427,27 +423,21 @@ fn emit_function(f: &FnDecl) -> Vec<u8> {
 
 fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
     match s {
-        Stmt::Let { init, .. } => {
+        Stmt::Let { name, init, .. } => {
             emit_expr(init, scope, fns, out);
-            // store into the just-declared local, then DROP the value:
-            // local.set consumes it, leaving the stack balanced for siblings.
-            let idx = scope.indexes.values().copied().max().unwrap_or(0);
-            // NB: the let's own index is the highest registered at parse
-            // position, but scope here is fully pre-declared; recover the
-            // exact index from the initializer's target name instead.
-            if let Stmt::Let { name, .. } = s {
-                if let Some(&i) = scope.indexes.get(name) {
-                    out.push(0x21); // local.set
-                    uleb(i as u64, out);
-                }
+            // local.set consumes the value: the stack stays balanced for
+            // sibling statements. locals were pre-declared in source order,
+            // so the name lookup is exact.
+            if let Some(&i) = scope.indexes.get(name) {
+                out.push(0x21); // local.set
+                uleb(u64::from(i), out);
             }
-            let _ = idx;
         }
         Stmt::Assign { name, value } => {
             emit_expr(value, scope, fns, out);
             if let Some(&i) = scope.indexes.get(name) {
                 out.push(0x21); // local.set
-                uleb(i as u64, out);
+                uleb(u64::from(i), out);
             }
         }
         Stmt::While { cond, body } => {
@@ -503,14 +493,15 @@ fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
         Expr::Var(name) => {
             if let Some(&i) = scope.indexes.get(name) {
                 out.push(0x20); // local.get
-                uleb(i as u64, out);
+                uleb(u64::from(i), out);
             }
         }
         Expr::Unary(UnOp::Neg, inner) => {
             emit_expr(inner, scope, fns, out);
-            // negation on i64/f64: const 0 <swap> sub, or multiply by -1.
-            // simplest correct form per type:
-            match infer_expr_ty(inner, scope) {
+            // negation as multiply-by-minus-one: correct on both i64 and
+            // f64 (no overflow hazard beyond what the language already has,
+            // and no stack gymnastics).
+            match infer_expr_ty(inner, scope, fns) {
                 Ty::I64 => {
                     // 0 - x : push i64.const 0 under x? stack order forbids.
                     // instead: x already pushed; use i64.const -1 * mul.
@@ -530,7 +521,7 @@ fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
         Expr::Binary(op, l, r) => {
             emit_expr(l, scope, fns, out);
             emit_expr(r, scope, fns, out);
-            let ty = infer_expr_ty(l, scope);
+            let ty = infer_expr_ty(l, scope, fns);
             emit_binop(*op, ty, out);
         }
         Expr::Call { callee, args } => {
@@ -539,7 +530,7 @@ fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
             }
             if let Some(idx) = fns.iter().position(|g| g.sig.name == *callee) {
                 out.push(0x10); // call
-                uleb(idx as u64, out);
+                uleb(u64::from(idx as u32), out);
             }
         }
     }
@@ -547,17 +538,21 @@ fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
 
 /// re-derive an expression's type during emission. the checker already
 /// proved consistency; this only picks instruction variants.
-fn infer_expr_ty(e: &Expr, scope: &FnScope) -> Ty {
+fn infer_expr_ty(e: &Expr, scope: &FnScope, fns: &[FnDecl]) -> Ty {
     match e {
         Expr::IntLit(_) => Ty::I64,
         Expr::FloatLit(_) => Ty::F64,
         Expr::BoolLit(_) => Ty::Bool,
         Expr::Var(n) => scope.ty_of(n).unwrap_or(Ty::I64),
-        Expr::Unary(_, inner) => infer_expr_ty(inner, scope),
-        Expr::Binary(op, l, _) => infer_expr_ty(l, scope)
-            .result_ty(infer_expr_ty(l, scope))
-            .map(|_| infer_expr_ty(l, scope))
-            .unwrap_or(Ty::Bool),
+        Expr::Unary(_, inner) => infer_expr_ty(inner, scope, fns),
+        // arithmetic preserves the operand type (checker proved it); a
+        // comparison yields bool. result_ty is total over our op set, so
+        // the unwrap_or only fires for logic ops whose operand type IS
+        // already bool — same answer either way.
+        Expr::Binary(op, l, _) => {
+            let lt = infer_expr_ty(l, scope, fns);
+            op.result_ty(lt).unwrap_or(Ty::Bool)
+        }
         Expr::Call { callee, .. } => fns
             .iter()
             .find(|g| g.sig.name == *callee)

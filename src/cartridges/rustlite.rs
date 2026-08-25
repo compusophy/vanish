@@ -11,7 +11,7 @@
 /// the closed type set. deliberately tiny: each variant maps to exactly one
 /// wasm valtype, which is what makes type checking trivial and codegen
 /// mechanical. no generics, no traits, no references-as-types.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
     I32,
     I64,
