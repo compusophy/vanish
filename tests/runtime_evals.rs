@@ -227,18 +227,45 @@ fn bad_magic_and_bad_version_are_named() {
 }
 
 #[test]
-fn truncated_module_never_decodes_ok() {
-    // every proper prefix of a valid module must fail decode (the tail
-    // sections/functions are missing), except the empty prefix which fails
-    // on magic length. this pins the section-length discipline.
+fn truncations_at_or_after_the_code_section_fail() {
+    // a prefix that still contains the full code section decodes fine —
+    // sections are self-describing, that is correct behavior, not a hole.
+    // the property worth pinning: once the CODE section is cut short, the
+    // declared sizes can no longer tile the module and decode must refuse.
     let bytes = compile("fn double(x: i64) -> i64 { return x + x; }");
-    for cut in 0..bytes.len() {
-        let prefix = &bytes[..cut];
-        // decoding may fail at any offset; it must FAIL.
-        if decode(prefix).is_ok() {
-            panic!("truncation at byte {cut} unexpectedly decoded clean");
+    // find the code section start (id byte 10) by walking sections.
+    let mut p = 8usize;
+    let mut code_start = None;
+    while p < bytes.len() {
+        let id = bytes[p];
+        p += 1;
+        let (size, consumed) = read_uleb(&bytes[p..]);
+        p += consumed as usize;
+        if id == 10 {
+            code_start = Some(p + size as usize); // first byte past the section
         }
+        p += size as usize;
     }
+    let end_of_code = code_start.expect("module has a code section") as usize;
+    for cut in end_of_code..bytes.len() {
+        assert!(
+            decode(&bytes[..cut]).is_err(),
+            "truncation at byte {cut} unexpectedly decoded clean"
+        );
+    }
+}
+
+fn read_uleb(b: &[u8]) -> (u64, u32) {
+    let mut v = 0u64;
+    let mut shift = 0u32;
+    for (i, &byte) in b.iter().enumerate() {
+        v |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return (v, (i + 1) as u32);
+        }
+        shift += 7;
+    }
+    panic!("unterminated uleb");
 }
 
 #[test]

@@ -412,7 +412,12 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
         }
     }
 
-    // stitch signatures to bodies; validate local counts cover params.
+    // stitch signatures to bodies. PARAMS ARE NOT LOCALS: our emitter writes
+    // only the non-param lets into the local-declaration groups (params live
+    // in the signature per spec §C), so execution prepends the signature's
+    // param types when materializing a frame. validate that every local
+    // INDEX referenced by the code exists in params+declared — after this
+    // check, local.get/set bounds errors are genuinely runtime anomalies.
     if type_indices.len() != m.funcs.len() {
         return r.err(format!(
             "{} function signatures but {} bodies",
@@ -425,16 +430,29 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             offset: 0,
             msg: format!("function {i} references type {ti}, which does not exist"),
         })?;
-        if m.funcs[i].locals.len() < ft.params.len() {
+        let n_params = ft.params.len();
+        let max_local = max_local_index(&m.funcs[i].code);
+        if max_local >= (n_params + m.funcs[i].locals.len()) as u32 {
             return r.err(format!(
-                "function {i} declares {} locals but its signature needs {} params",
-                m.funcs[i].locals.len(),
-                ft.params.len()
+                "function {i} references local {max_local} but has only \
+                 {n_params} params + {} declared locals",
+                m.funcs[i].locals.len()
             ));
         }
         m.funcs[i].type_idx = ti;
     }
     Ok(m)
+}
+
+/// highest local index any instruction references; 0 when none do.
+fn max_local_index(code: &[Instr]) -> u32 {
+    code.iter()
+        .filter_map(|i| match i {
+            Instr::LocalGet(n) | Instr::LocalSet(n) => Some(*n),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// decode ONE function body's instruction stream, resolving branch targets.
@@ -777,17 +795,17 @@ fn make_frame(
             )));
         }
     }
-    let mut locals = Vec::with_capacity(body.locals.len());
-    for (i, &vt) in body.locals.iter().enumerate() {
-        // params take the caller's values; non-param locals start zero.
-        let v = if i < args.len() {
-            args[i]
-        } else {
-            Val::zero(vt).ok_or_else(|| {
-                Trap::BadControl(format!("unknown valtype {vt:#04x} in locals"))
-            })?
-        };
-        locals.push(v);
+    // locals layout: PARAMS FIRST (indices 0..n_params — the signature is
+    // their declaration site per spec), then the declared groups zeroed.
+    let mut locals =
+        Vec::with_capacity(ft.params.len() + body.locals.len());
+    for a in args {
+        locals.push(*a);
+    }
+    for &vt in &body.locals {
+        locals.push(Val::zero(vt).ok_or_else(|| {
+            Trap::BadControl(format!("unknown valtype {vt:#04x} in locals"))
+        })?);
     }
     Ok(Frame {
         func_idx,
