@@ -12,6 +12,7 @@
 //! and the working tree lives in opfs, so neither failure mode exists here.
 
 pub mod agent;
+pub mod cartridges;
 pub mod platform;
 pub mod protocol;
 pub mod ui;
