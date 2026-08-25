@@ -622,6 +622,12 @@ fn emit_binop(op: BinOp, ty: Ty, out: &mut Vec<u8>) {
         // emission lands properly — pure predicates are unaffected.
         (BinOp::And, _) => 0x71, // i32.and (bools are i32)
         (BinOp::Or, _) => 0x72,  // i32.or
+
+        // the checker refuses % on floats before emission ever sees it;
+        // this arm exists so the type system can prove emission total.
+        (BinOp::Rem, Ty::F32) | (BinOp::Rem, Ty::F64) => {
+            unreachable!("checker rejects float remainder before emit_binop")
+        }
     };
     out.push(code);
 }
