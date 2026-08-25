@@ -191,7 +191,7 @@ impl<'a> Reader<'a> {
     fn valtype(&mut self) -> Result<u8, DecodeError> {
         let b = self.byte()?;
         match b {
-            0x7f | 0x7e | 0x7d | 0x7c => Ok(b),
+            0x7c..=0x7f => Ok(b),
             other => self.err(format!("unknown valtype {other:#04x}")),
         }
     }

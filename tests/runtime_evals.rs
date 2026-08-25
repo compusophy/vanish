@@ -184,7 +184,7 @@ fn type_confusion_on_the_stack_traps_named() {
     // hand-built module could do it. build the module struct directly,
     // run it, get InvalidStack naming BOTH types — never a panic or a
     // silently wrong answer. this is the §9 verifier property at runtime.
-    let mut m = Module_shim();
+    let mut m = module_shim();
     m.funcs[0].code = vec![
         vanish::cartridges::runtime::Instr::I64Const(5),
         vanish::cartridges::runtime::Instr::I32Eqz,
@@ -200,7 +200,7 @@ fn type_confusion_on_the_stack_traps_named() {
 #[test]
 fn branch_target_out_of_bounds_traps_named() {
     // hostile module: Br past the end of the code vector.
-    let mut m = Module_shim();
+    let mut m = module_shim();
     m.funcs[0].code = vec![
         vanish::cartridges::runtime::Instr::Br(999),
         vanish::cartridges::runtime::Instr::FunctionEnd,
@@ -209,7 +209,7 @@ fn branch_target_out_of_bounds_traps_named() {
     assert!(matches!(err, Trap::BadControl(_)), "{err:?}");
 }
 
-fn Module_shim() -> vanish::cartridges::runtime::Module {
+fn module_shim() -> vanish::cartridges::runtime::Module {
     use vanish::cartridges::runtime::{FuncBody, FuncType, Instr, Module};
     Module {
         types: vec![FuncType {
