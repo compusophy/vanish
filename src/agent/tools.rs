@@ -142,6 +142,23 @@ pub fn pr_gate(status: &crate::agent::github::PrStatus) -> Result<(), String> {
     }
 }
 
+/// how long pr_wait should sleep before looking again, given the current
+/// verdict. 0 means settled — stop waiting. pure so tests pin the pacing:
+/// polls are real github api calls and rate limits are real, so the interval
+/// is deliberately coarse (builds take ~1 minute; 10s granularity is plenty).
+pub fn wait_step_ms(verdict: &str) -> u64 {
+    match verdict {
+        "pending" => 10_000,
+        _ => 0,
+    }
+}
+
+/// whether a pr is worth waiting on: only an unsettled build is, and even
+/// then only while the wait budget lasts. pure; pinned by tests.
+pub fn should_keep_waiting(verdict: &str, waited_ms: u64, budget_ms: u64) -> bool {
+    verdict == "pending" && waited_ms < budget_ms
+}
+
 /// the current wall-clock time in milliseconds since the unix epoch.
 /// wasm asks the browser (`js_sys::Date`); the native test build falls back
 /// to `std::time`. no network request is involved either way.
@@ -352,10 +369,25 @@ pub fn definitions() -> serde_json::Value {
         "type": "function",
         "function": {
           "name": "pr_status",
-          "description": "read a pull request's mergeability and ci verdicts. call before merging; the build must be settled green.",
+          "description": "read a pull request's mergeability and ci verdicts as an instant snapshot. if the build is still pending, prefer pr_wait — it blocks until checks settle in one call instead of you polling this repeatedly.",
           "parameters": {
             "type": "object",
             "properties": { "number": { "type": "integer" } },
+            "required": ["number"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "pr_wait",
+          "description": "wait for a pull request's build checks to settle, inside ONE tool call. returns only when checks are green or red (or the ~5 minute budget expires). use this instead of repeatedly calling pr_status — it does not spam the conversation with identical results.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "number": { "type": "integer" },
+              "budget_seconds": { "type": "integer", "description": "optional max total wait; default 300" }
+            },
             "required": ["number"]
           }
         }
@@ -833,7 +865,7 @@ impl Workspace {
                     "url": url,
                     "head": head,
                     "base": PROTECTED_BRANCH,
-                    "note": "pr opened. call pr_status until checks settle green, then merge_pr.",
+                    "note": "pr opened. call pr_wait (one call, blocks until checks settle), then merge_pr.",
                 })
                 .to_string())
             }
@@ -851,6 +883,46 @@ impl Workspace {
                     "mergeable": s.mergeable,
                     "deploy_verdict": s.deploy_verdict,
                     "gate": match &gate { Ok(()) => "OPEN — merge permitted".to_string(), Err(e) => e.clone() },
+                })
+                .to_string())
+            }
+
+            "pr_wait" => {
+                let number = args
+                    .get("number")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("pr_wait requires 'number'")?;
+                let budget_ms = args
+                    .get("budget_seconds")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(300)
+                    .saturating_mul(1_000);
+
+                // one tool call does the whole wait: sleep through the pending
+                // window and return a single settled answer. this exists
+                // because pr_status-in-a-loop flooded conversations with N
+                // identical calls; there is no run deadline (D1), so waiting
+                // inside the tool is free.
+                let mut waited_ms: u64 = 0;
+                let mut status = self.github.pr_status(number).await?;
+                while should_keep_waiting(&status.deploy_verdict, waited_ms, budget_ms) {
+                    let step = wait_step_ms(&status.deploy_verdict);
+                    crate::agent::http::sleep_ms(step as i32).await;
+                    waited_ms += step;
+                    status = self.github.pr_status(number).await?;
+                }
+
+                let gate = pr_gate(&status);
+                let settled = !should_keep_waiting(&status.deploy_verdict, 0, u64::MAX);
+                Ok(serde_json::json!({
+                    "number": status.number,
+                    "head_sha": &status.head_sha[..7.min(status.head_sha.len())],
+                    "mergeable": status.mergeable,
+                    "deploy_verdict": status.deploy_verdict,
+                    "waited_seconds": waited_ms / 1_000,
+                    "settled": settled,
+                    "gate": match &gate { Ok(()) => "OPEN — merge permitted".to_string(), Err(e) => e.clone() },
+                    "note": if settled { "checks have settled." } else { "budget expired while still pending — call pr_wait again to extend." },
                 })
                 .to_string())
             }
