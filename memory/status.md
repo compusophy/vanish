@@ -7,6 +7,45 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (the recurring boot reconcile error — root cause + fix)
+
+user: "it seems like this reconcile error happens a lot after completion".
+they were right, and it was not browser flakiness. evidence in their own
+paste: "✓ credentials verified" appears TWICE at boot. two Configures
+arrive on every boot (worker self-config from the opfs mirror + the ui's
+bootstrap_worker send on Ready); the auto_reconciled latch closed only
+AFTER the first reconcile finished (check-then-set across an await), so
+both spawn_local tasks passed should_auto_reconcile and ran concurrent
+reconcile_against_branch passes over the same cache files. chrome refuses
+removeEntry with NoModificationAllowedError while another task holds a
+file open for writing; reconcile propagated that error with `?`, so ONE
+locked file aborted the entire D10 arming pass — which is why it also
+RETRIED on every boot (the latch never armed) and why the error always
+named memory/TASKBOARD.md (a file both passes wanted to drop).
+
+- fix 1 (worker.rs): atomic claim gate — checked and set inside one
+  STATE.with before any await, routed through should_auto_reconcile so
+  the shared pure gate stays load-bearing (it had become dead code under
+  an inline rewrite; the fatal-clippy gate would have caught that).
+  loser skips cleanly instead of racing.
+- fix 2 (opfs.rs): delete() retries locked files — recognizes
+  NoModificationAllowedError/InvalidStateError by exception NAME and
+  retries up to 10 times on a REAL timer (sleep_ms(50)), D7-compliant;
+  exhaustion reports the retry count instead of a bare DOM message.
+- fix 3 (tools.rs): ReconcileReport gained `failed` (derive Default);
+  a per-file delete failure no longer aborts the pass — collected,
+  surfaced in both the boot note and sync_repo's output ("cache_failed"),
+  index entry KEPT so the next pass retries it (dropping the record while
+  the bytes stay on disk would turn stale content into trusted content —
+  the 37-file class again). a failed PASS releases the claim so the next
+  Configure retries.
+- new suite tests/boot_reconcile.rs: behavioral pins over ReconcileReport
+  plus source-level grep guards against reintroducing check-then-set
+  across awaits, the `?` propagation, and a non-timer retry sleep.
+
+honest limits: no local compiler here, so compile-proof arrives with the
+deploy; live verification owed (reload → exactly one ⇅ note, no error).
+
 ## landed this run (pr_wait — the polling spam is dead; PR #6 merged, squash ff1ad44)
 
 the user flagged pr_status-in-a-loop as horrendous (8–10 identical calls

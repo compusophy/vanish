@@ -241,19 +241,38 @@ pub async fn write(path: &str, content: &str) -> Result<(), String> {
 /// says "A requested file or directory could not be found", which contains
 /// none of the tokens you would naively grep for.
 fn is_not_found(e: &JsValue) -> bool {
+    exception_name(e).map(|n| n == "NotFoundError").unwrap_or(false)
+}
+
+/// chrome refuses `removeEntry` with NoModificationAllowedError ("An attempt
+/// was made to modify an object where modifications are not allowed") while
+/// another task still holds the file open for writing — even though the
+/// write has long since completed. this fires at every boot today because
+/// TWO reconcile passes run concurrently (the worker self-configures from
+/// the opfs mirror AND the ui sends its own Configure; the latch that should
+/// make the second one skip only closes after the first one finishes, so
+/// both pass the gate and race over the same stale cache files).
+///
+/// the correct response is to retry on a real timer, not to fail: the file
+/// WILL become deletable once the other writer's stream is collected. the
+/// delay must be a timer (sleep_ms) — awaiting an already-resolved promise
+/// drains only microtasks and starves the event loop outright (D7), and
+/// these retries fire inside boot tasks that must keep answering messages.
+const REMOVE_RETRY_MS: i32 = 50;
+const MAX_REMOVE_RETRIES: usize = 10;
+
+fn exception_name(e: &JsValue) -> Option<String> {
     Reflect::get(e, &JsValue::from_str("name"))
         .ok()
         .and_then(|n| n.as_string())
-        .map(|n| n == "NotFoundError")
+}
+
+fn is_not_modifiable(e: &JsValue) -> bool {
+    exception_name(e)
+        .map(|n| n == "NoModificationAllowedError" || n == "InvalidStateError")
         .unwrap_or(false)
 }
 
-/// delete is idempotent: removing something that is already gone is success.
-///
-/// callers delete records that may never have been written — a conversation
-/// closed before it was ever run has no messages file — and forcing every one
-/// of them to distinguish "missing" from "broken" just spreads the same
-/// mistake around.
 pub async fn delete(path: &str) -> Result<(), String> {
     let parts = normalize(path)?;
 
@@ -264,16 +283,32 @@ pub async fn delete(path: &str) -> Result<(), String> {
     };
 
     let f = method(&dir, "removeEntry")?;
-    let p = as_promise(
-        f.call1(&dir, &JsValue::from_str(parts.last().unwrap()))
-            .map_err(|e| err("removeEntry threw", e))?,
-        "removeEntry",
-    )?;
+    let mut attempt = 0usize;
+    loop {
+        let p = as_promise(
+            f.call1(&dir, &JsValue::from_str(parts.last().unwrap()))
+                .map_err(|e| err("removeEntry threw", e))?,
+            "removeEntry",
+        )?;
 
-    match JsFuture::from(p).await {
-        Ok(_) => Ok(()),
-        Err(e) if is_not_found(&e) => Ok(()),
-        Err(e) => Err(err(&format!("deleting {path}"), e)),
+        match JsFuture::from(p).await {
+            Ok(_) => return Ok(()),
+            Err(e) if is_not_found(&e) => return Ok(()),
+            Err(e) if is_not_modifiable(&e) && attempt < MAX_REMOVE_RETRIES => {
+                attempt += 1;
+                crate::agent::http::sleep_ms(REMOVE_RETRY_MS).await;
+            }
+            Err(e) => {
+                let hint = if attempt >= MAX_REMOVE_RETRIES {
+                    format!(" (still locked after {} retries over ~{}ms)", 
+                        MAX_REMOVE_RETRIES,
+                        MAX_REMOVE_RETRIES * REMOVE_RETRY_MS as usize)
+                } else {
+                    String::new()
+                };
+                return Err(err(&format!("deleting {path}{hint}"), e));
+            }
+        }
     }
 }
 

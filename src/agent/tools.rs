@@ -59,7 +59,7 @@ pub fn reconcile_entry(dirty: bool, base_sha: &str, remote_sha: Option<&str>) ->
 /// what one reconciliation pass found. returned by
 /// `Workspace::reconcile_against_branch` and rendered by both consumers
 /// (the sync_repo tool and the worker's boot-time auto-reconcile).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReconcileReport {
     pub head: String,
     pub files_on_branch: usize,
@@ -67,6 +67,13 @@ pub struct ReconcileReport {
     pub refreshed: Vec<String>,
     /// files whose local bytes differ from github — never dropped.
     pub uncommitted: Vec<String>,
+    /// cache entries that could not be dropped this pass (another task held
+    /// them open, or the delete failed for any other reason). a partial
+    /// reconcile is still a useful one: every file NOT listed here was
+    /// reconciled or confirmed clean, and a failed entry simply stays in the
+    /// read-through cache until the next pass. one locked file must not be
+    /// able to abort the whole D10 arming.
+    pub failed: Vec<String>,
 }
 
 /// whether the session-level auto-reconcile should run. pure so the test
@@ -582,6 +589,7 @@ impl Workspace {
         let head = self.github.head_sha().await?;
 
         let mut refreshed: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
         for item in items.iter().filter(|i| i.kind == "blob") {
             let decision = reconcile_entry(
                 self.index.get(&item.path).map(|e| e.dirty).unwrap_or(false),
@@ -592,8 +600,19 @@ impl Workspace {
                 item.sha.as_deref(),
             );
             if decision == Reconcile::Refresh && opfs::read(&item.path).await.is_ok() {
-                opfs::delete(&item.path).await?;
-                refreshed.push(item.path.clone());
+                match opfs::delete(&item.path).await {
+                    Ok(()) => refreshed.push(item.path.clone()),
+                    // one locked file must not abort the pass (D9 for
+                    // reconciliation): everything else still gets reconciled,
+                    // the head is still recorded, and this entry stays cached
+                    // until a later pass or read-through refreshes it. the
+                    // index entry is deliberately KEPT: the file is still on
+                    // disk, so dropping its record would leave stale bytes
+                    // that read_through then serves as trusted local content.
+                    Err(_) => {
+                        failed.push(item.path.clone());
+                    }
+                }
             }
         }
 
@@ -605,6 +624,7 @@ impl Workspace {
             files_on_branch: items.iter().filter(|i| i.kind == "blob").count(),
             refreshed,
             uncommitted,
+            failed,
         })
     }
 
@@ -990,10 +1010,17 @@ impl Workspace {
                     "synced_head": report.head,
                     "cache_refreshed": refreshed,
                     "uncommitted_local_files": report.uncommitted,
-                    "note": if refreshed.is_empty() {
-                        "tree reconciled: every cached file matches the branch."
+                    "cache_failed": report.failed,
+                    "note": if !report.failed.is_empty() {
+                        format!(
+                            "tree reconciled, but {} cache file(s) could not be dropped this pass (another task held them open): {:?}. they will refresh on a later read or the next reconcile.",
+                            report.failed.len(),
+                            report.failed
+                        )
+                    } else if refreshed.is_empty() {
+                        "tree reconciled: every cached file matches the branch.".to_string()
                     } else {
-                        "tree reconciled: stale cached files were dropped and will re-fetch from github on next read. dirty files were never touched."
+                        "tree reconciled: stale cached files were dropped and will re-fetch from github on next read. dirty files were never touched.".to_string()
                     },
                 })
                 .to_string())
