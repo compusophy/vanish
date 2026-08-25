@@ -24,16 +24,42 @@ if (!BASE) {
   process.exit(2);
 }
 
+// vercel's sso wall shows up two ways: a 302 to vercel.com/sso-api (which
+// lands on the "Login – Vercel" page), or an interstitial. both are the
+// SAME problem and must be named as such — pr #16's run reported "app html
+// did not mount" against the login page, a misdiagnosis that hid the real
+// cause on five prs in a row (#12–#16 were all red for exactly this).
 const PROTECTION_MARKERS = [
   "deployment protection",
   "vercel security checkpoint",
   "confirm you are human",
+  "log in to vercel",
+  "login – vercel",
+  "authentication required",
 ];
+
+// protection bypass for automation: vercel → project → settings →
+// deployment protection → "protection bypass for automation" → generate,
+// then store it as the github secret VERCEL_AUTOMATION_BYPASS_SECRET. the
+// header rides on EVERY request from this context (index.html, worker.js,
+// the wasm), and x-vercel-set-bypass-cookie makes it stick for the page's
+// own follow-up fetches.
+const BYPASS = process.env.VERCEL_AUTOMATION_BYPASS_SECRET ?? "";
 
 mkdirSync("evidence", { recursive: true });
 
 const browser = await chromium.launch();
-const page = await browser.newPage();
+const context = await browser.newContext(
+  BYPASS
+    ? {
+        extraHTTPHeaders: {
+          "x-vercel-protection-bypass": BYPASS,
+          "x-vercel-set-bypass-cookie": "true",
+        },
+      }
+    : {}
+);
+const page = await context.newPage();
 
 const pageErrors = [];
 page.on("pageerror", (err) => pageErrors.push(String(err)));
@@ -45,14 +71,29 @@ let verdict;
 try {
   await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
-  // protection interstitial check FIRST, so the diagnosis is honest.
+  // protection check FIRST, so the diagnosis is honest: either the browser
+  // was redirected off the preview host onto vercel.com, or an interstitial
+  // says so in its text. only THEN may a missing selector mean "the app".
+  const landed = page.url();
+  const redirected = landed.startsWith("https://vercel.com/");
   const bodyText = (await page.textContent("body")) ?? "";
-  const blocked = PROTECTION_MARKERS.find((m) => bodyText.toLowerCase().includes(m));
+  const blocked =
+    (redirected && `redirected to ${landed.split("?")[0]}`) ||
+    PROTECTION_MARKERS.map((m) => (bodyText.toLowerCase().includes(m) ? `matched "${m}"` : null))
+      .find(Boolean);
   if (blocked) {
     console.error(
       `EVIDENT-CAUSE FAILURE: the preview is behind vercel deployment protection ` +
-        `(matched "${blocked}"). nothing can test against this — relax protection ` +
-        `for preview deployments or supply a bypass token (STACKED_PRS_PLAN §3 P1).`
+        `(${blocked}). the app was never served, so NOTHING about this commit is ` +
+        `known — do not read this as a boot failure. fix: vercel → project → ` +
+        `settings → deployment protection → "protection bypass for automation" → ` +
+        `generate, then add it as the github secret VERCEL_AUTOMATION_BYPASS_SECRET ` +
+        `(this script sends it as x-vercel-protection-bypass on every request). ` +
+        `or relax protection for preview deployments. ` +
+        (BYPASS
+          ? `a bypass secret WAS supplied and did not open the door — regenerate it. `
+          : `no bypass secret was supplied. `) +
+        `(STACKED_PRS_PLAN §3 P1)`
     );
     await page.screenshot({ path: "evidence/protection-interstitial.png" }).catch(() => {});
     process.exit(3);

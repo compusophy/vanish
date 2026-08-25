@@ -98,6 +98,23 @@ next: item 6 (L4 ports/requires wiring + cycle detection, pure graph
 first). language gap to schedule before item 8: string literals + data
 segments so a cartridge can name a topic or a key.
 
+POSTSCRIPT — PR #16 merged (55fa83d) with `verify` green on both triggers
+and the Vercel deployment succeeded, but `smoke-preview` red. digging in:
+the e2e gate has been red on EVERY pr since it landed (#12–#16), because
+previews are behind Vercel Deployment Protection (302 → vercel.com/sso-
+api) and the smoke's markers did not recognize the "Login – Vercel" page
+— it misreported "app html did not mount", the exact D4 misdiagnosis the
+script's own header says it exists to avoid. main is not branch-
+protected, so the red check never blocked a merge; the "merge_pr refuses
+until booted-green" line on the board was never true in practice. #16's
+boot was verified LIVE instead: preview opened in a Vercel-authenticated
+browser, #status "ready", /build.json = the branch head. follow-up pr
+(agent/e2e-sso-diagnosis) makes the smoke name the wall and honor a
+bypass secret; the secret itself is an owner action (taskboard).
+lesson: **a gate nobody has ever seen pass is not a gate** — the first
+thing to verify about a new check is one green AND one red, both
+witnessed. article vii, applied to the harness.
+
 ## landed this run (cartridge L1+L2 front-end — PR #13 merged 1fcd65c)
 
 owner said "send it!" twice. CARTRIDGE_PLAN §11 items 1–2 landed on
