@@ -13,7 +13,8 @@ user said "keep going". taskboard read: §4 items 1–2 of the stacked-prs
 plan (github.rs primitives, PR tooling) were already landed and pinned;
 item 3 — the opfs path-claim registry (plan §2 C1) — was the next
 buildable piece, and it is the prerequisite for the multiworker pool
-(phase 2). what landed on agent/path-claim-registry:
+(phase 2). what landed on agent/path-claim-registry, PROMOTED as PR #11
+(squash 899e2f5, both gates green at merge time, deploy verified live):
 
 - **src/agent/claims.rs (new)**: pure `ClaimRegistry` core — `check` /
   `claim` / `release_conversation` / `release_paths` / `expire`, all
@@ -51,6 +52,14 @@ charter article i ("capabilities shipped before they are needed are waste"
 live verification owed once a second worker exists: two conversations
 editing the same path → each sees the other's ⚠ warning; run ends →
 release note appears; git_status shows path_claims draining to empty.
+
+how the red build went (the loop working as designed): first commit ca60fab
+failed both gates; diagnostics branch log named BOTH causes in one read —
+E0596 (`released.sort()` without `let mut`) and an unused `registry_expire`
+import under -D warnings — in my own new test file, exactly where the log
+said. fix landed as e06a09c; green on both gates; pr_wait returned settled
+in one call (0s waited); merged; post-merge deploy on main verified live.
+no theory-spinning anywhere in the chain.
 
 ## landed this run (the recurring boot reconcile error — root cause + fix)
 

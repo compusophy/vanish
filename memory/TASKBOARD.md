@@ -104,17 +104,18 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
-- [x] **path-claim registry LANDED (agent/path-claim-registry)** —
+- [x] **path-claim registry LANDED + PROMOTED (PR #11, squash 899e2f5)** —
       STACKED_PRS_PLAN §4 item 3 (§2 C1): pure ClaimRegistry in
       src/agent/claims.rs (ttl 30min, saturating expiry), thread_local
       session accessors, wired into write_file/edit_file (advisory ⚠
       warning naming the holder), git_commit (release committed paths),
       git_status (`path_claims` + `claims_expired`), worker run teardown
       (release on end). 13 evals in tests/path_claims.rs with negative
-      controls. DORMANT until the phase-2 worker pool exists — single
-      worker means nothing can contest. live verification owed then:
-      two conversations edit one path → mutual ⚠; run ends → release
-      note; git_status drains to empty.
+      controls; both gates green at merge; post-merge deploy verified.
+      DORMANT until the phase-2 worker pool exists — single worker means
+      nothing can contest. live verification owed then: two conversations
+      edit one path → mutual ⚠; run ends → release note; git_status
+      drains to empty.
 - [ ] **worker pool / multiagent phase 2** — now unblocked by the claim
       registry: HashMap<conversation, WorkerHandle> in ui/mod.rs, lazy
       spawn, cap 3–4. claims give concurrent conversations their early
