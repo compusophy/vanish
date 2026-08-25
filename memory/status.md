@@ -7,6 +7,37 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (the stranded promotion finally landed — PR #2 merged)
+
+the token-scope wall came down and the nine-commit branch went home:
+
+- user added "Pull requests: read and write" to the fine-grained PAT
+  (after an angry correction — an earlier taskboard note had asked only
+  for Workflows rw, which was incomplete). COMPLETE scope list now on
+  the token: Contents rw · Workflows rw · Pull requests rw · Metadata
+  read (auto) · Checks read + Actions read. with that exact set, every
+  harness operation works: commits, branches, prs, merge, checks.
+- verification before opening: compare api main...branch showed
+  ahead_by 9 / behind_by 0 with merge_base == main head — strictly
+  ahead, so no stale-revert risk (incident-class check done FIRST).
+- two refusals taught the operational shape: open_pr refuses while the
+  session sits on main (git_checkout the agent/ branch first), and a
+  page reload resets the session branch to main (reconcile → checkout
+  → retry is the full recovery, ~3 calls).
+- PR #2: both gates green at 4ee87bc, merged as squash e48e4ee. main
+  now carries: .github/workflows/ci.yml + ci/run_tests.sh (shared gate,
+  diagnostics branch loop for red-build readability), restored
+  control.rs loop-survival section + tests/loop_nervous_system.rs,
+  delegated build.sh, worker self-config from opfs, tests/ci_gate.rs,
+  CHARTER.md.
+- found while auditing: TASKBOARD claimed this promotion already
+  happened in a prior session ("promoted through a green-checked pr")
+  — FALSE; that landing was 0582489, which went red on both gates and
+  was never merged. corrected in the same changeset. lesson: memory
+  claims of success need the same raw-blob skepticism as source files;
+  a claim that contradicts observable repo state (404 on
+  ci/run_tests.sh from main) is wrong by definition.
+
 ## landed this run (the charter)
 
 user asked "shouldn't we have a mission/constitution? we are trying to
