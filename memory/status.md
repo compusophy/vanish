@@ -7,6 +7,30 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (health check — all green, one stale board item closed)
+
+asked: "do a health check". verdict, with evidence:
+
+- **main green and live**: head 3772afb (PR #8, check_deployment fixes),
+  signed, both gates success — verify (actions run 32799290132) + vercel
+  (deployment Ftiqxrho). /build.json serves build "3772afb", so the
+  deployed site matches main's head exactly. no red builds anywhere in
+  recent history; the only cancelled run was a superseded duplicate on an
+  agent branch, which is expected behavior.
+- **local tree clean** at session start, no dirty files, no drift.
+- **stale memory found and fixed**: TASKBOARD still listed the
+  check_deployment bug as open although PR #8 landed it. verified live
+  first (check_deployment with no sha → session head, verdict success,
+  cancelled run correctly ignored), then closed the item via PR #9
+  (merged green, squash a25f052).
+- **two stale open PRs remain (#3, #5)** — memory-only branches whose
+  content was already preserved to main by e2bfa3c ("preserve still-valid
+  items from stale memory-only PRs"). they report mergeable=None after
+  the day's merges. recommendation recorded on the taskboard: close them;
+  nothing unique is lost.
+
+no source changed this run; no new verification owed from it.
+
 ## landed this run (pr_wait — the polling spam is dead; PR #6 merged, squash ff1ad44)
 
 the user flagged pr_status-in-a-loop as horrendous (8–10 identical calls

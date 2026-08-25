@@ -137,6 +137,10 @@ taskboard) asked for four things. all four are resolved:
       stop mid-restart keeps it down; browser close+reopen within 12h
       resumes; restart budget saturates at 6/hour with the pause note;
       ⚙ self-config note appears in feed on boot after mirror is seeded.
+- [ ] housekeeping: close stale memory-only PRs #3 and #5 (their unique
+      content was preserved to main by e2bfa3c; both report
+      mergeable=None after the day's merges — they are dead weight on the
+      pr list, not pending work).
 - [ ] consider: a guard test that pins build.sh's delegation AND reads
       ci/run_tests.sh for the same gate id (done); next structural item
       is verifying committed bytes vs local for EVERY file in an atomic
