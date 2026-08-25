@@ -138,11 +138,14 @@ fn valty(ty: Ty) -> u8 {
     }
 }
 
+/// callee signatures by name, shared by the checker walks.
+type SigTys<'a> = &'a dyn Fn(&str) -> Option<(Vec<Ty>, Option<Ty>)>;
+
 /// type-check one function body. returns (name, local types, n_params).
 /// `fns` supplies callee signatures; resolution is order-free (forward
 /// references are natural in cartridges).
 pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), TypeError> {
-    let sig_tys = |name: &str| -> Option<(Vec<Ty>, Option<Ty>)> {
+    let sig_tys: SigTys = &|name: &str| {
         fns.iter().find(|g| g.sig.name == name).map(|g| {
             (
                 g.sig.params.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
@@ -169,14 +172,13 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
         b: &Block,
         scope: &mut FnScope,
         f: &FnDecl,
-        fns: &[FnDecl],
-        sig_tys: &dyn Fn(&str) -> Option<(Vec<Ty>, Option<Ty>)>,
+        sig_tys: SigTys,
         err: &dyn Fn(String) -> TypeError,
     ) -> Result<(), TypeError> {
         for s in &b.stmts {
             match s {
                 Stmt::Let { name, ty, init } => {
-                    let it = check_expr(init, scope, f, fns, sig_tys, err, *ty)?;
+                    let it = check_expr(init, scope, sig_tys, err, *ty)?;
                     if it != *ty {
                         return Err(err(format!(
                             "let '{name}' declares {}, but its initializer yields {}",
@@ -184,7 +186,7 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
                             it.name()
                         )));
                     }
-                    scope.declare(name, *ty).map_err(|e| err(e))?;
+                    scope.declare(name, *ty).map_err(err)?;
                 }
                 Stmt::Assign { name, value } => {
                     // assignment to an undeclared name dies HERE, not at
@@ -195,7 +197,7 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
                              add a `let {name}: <type> = …` first"
                         )));
                     };
-                    let vt = check_expr(value, scope, f, fns, sig_tys, err, target)?;
+                    let vt = check_expr(value, scope, sig_tys, err, target)?;
                     if vt != target {
                         return Err(err(format!(
                             "cannot assign {} to '{}' (declared {})",
@@ -206,14 +208,14 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
                     }
                 }
                 Stmt::While { cond, body } => {
-                    let ct = check_expr(cond, scope, f, fns, sig_tys, err, Ty::Bool)?;
+                    let ct = check_expr(cond, scope, sig_tys, err, Ty::Bool)?;
                     if ct != Ty::Bool {
                         return Err(err(format!(
                             "while condition must be bool, got {}",
                             ct.name()
                         )));
                     }
-                    check_block(body, scope, f, fns, sig_tys, err)?;
+                    check_block(body, scope, f, sig_tys, err)?;
                 }
                 Stmt::Return(e) => {
                     let rt = match e {
@@ -221,8 +223,6 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
                         Some(e) => Some(check_expr(
                             e,
                             scope,
-                            f,
-                            fns,
                             sig_tys,
                             err,
                             f.sig.ret.unwrap_or(Ty::I64),
@@ -237,14 +237,14 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
                     }
                 }
                 Stmt::Expr(e) => {
-                    check_expr(e, scope, f, fns, sig_tys, err, Ty::I64)?;
+                    check_expr(e, scope, sig_tys, err, Ty::I64)?;
                 }
             }
         }
         Ok(())
     }
 
-    check_block(&f.body, &mut scope, f, fns, &sig_tys, &err)?;
+    check_block(&f.body, &mut scope, f, sig_tys, &err)?;
 
     let n_params = scope.n_params;
     Ok((f.sig.name.clone(), scope.types, n_params))
@@ -253,14 +253,13 @@ pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), Ty
 /// the type of `e` under context hint. THE single source of truth — the
 /// emitter calls this same function to decide instruction variants, so a
 /// disagreement between the walks is structurally impossible rather than
-/// merely tested-against.
-#[allow(clippy::too_many_arguments)]
+/// merely tested-against. (the emitter's expr_ty mirrors this walk without
+/// the error channel because checked input cannot reach it in a failing
+/// state.)
 fn check_expr(
     e: &Expr,
     scope: &mut FnScope,
-    f: &FnDecl,
-    fns: &[FnDecl],
-    sig_tys: &dyn Fn(&str) -> Option<(Vec<Ty>, Option<Ty>)>,
+    sig_tys: SigTys,
     err: &dyn Fn(String) -> TypeError,
     hint: Ty,
 ) -> Result<Ty, TypeError> {
@@ -272,7 +271,7 @@ fn check_expr(
             .ty_of(name)
             .ok_or_else(|| err(format!("use of undeclared '{name}'"))),
         Expr::Unary(op, inner) => {
-            let t = check_expr(inner, scope, f, fns, sig_tys, err, hint)?;
+            let t = check_expr(inner, scope, sig_tys, err, hint)?;
             match op {
                 UnOp::Neg => match t {
                     Ty::I32 | Ty::I64 | Ty::F32 | Ty::F64 => Ok(t),
@@ -286,12 +285,12 @@ fn check_expr(
         Expr::Binary(op, l, r) => {
             // literals adapt to their partner; non-literals must match.
             let lt = if is_numeric_literal(l) && !is_numeric_literal(r) {
-                check_expr(r, scope, f, fns, sig_tys, err, hint)?
+                check_expr(r, scope, sig_tys, err, hint)?
             } else {
-                check_expr(l, scope, f, fns, sig_tys, err, hint)?
+                check_expr(l, scope, sig_tys, err, hint)?
             };
             let rt = if is_numeric_literal(r) {
-                check_expr(r, scope, f, fns, sig_tys, err, lt)?
+                check_expr(r, scope, sig_tys, err, lt)?
             } else {
                 lt
             };
@@ -305,12 +304,13 @@ fn check_expr(
             // % on floats has no wasm instruction (the spec has no frem);
             // refusing here keeps emission total over checked input.
             if *op == BinOp::Rem && matches!(lt, Ty::F32 | Ty::F64) {
-                return Err(err(format!(
+                return Err(err(
                     "% is integer-only in rustlite — floats have no remainder \
                      instruction in wasm; restructure the math or keep it integral"
-                )));
+                        .to_string(),
+                ));
             }
-            op.result_ty(lt).map_err(|e| err(e))
+            op.result_ty(lt).map_err(err)
         }
         Expr::Call { callee, args } => {
             let Some((param_tys, ret)) = sig_tys(callee) else {
@@ -324,7 +324,7 @@ fn check_expr(
                 )));
             }
             for (i, (a, pt)) in args.iter().zip(param_tys.iter()).enumerate() {
-                let at = check_expr(a, scope, f, fns, sig_tys, err, *pt)?;
+                let at = check_expr(a, scope, sig_tys, err, *pt)?;
                 if at != *pt {
                     return Err(err(format!(
                         "'{callee}' argument {}: expected {}, got {}",
