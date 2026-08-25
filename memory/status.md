@@ -7,6 +7,40 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (check_deployment judged the wrong commit and misread cancellations — PR #8 merged, squash 3772afb)
+
+asked "what is next"; the taskboard's only open code-level item was the
+check_deployment bug found during PR #6's merge (verdict "failure" against
+a log where every suite passed). both halves fixed in one changeset:
+
+1. **wrong default target**: no-sha check_deployment read the LIVE branch
+   head, which by check time is usually NOT the commit just pushed (later
+   push, merge itself). fix: pure `default_deploy_target(synced_head,
+   live_head)` — the session's own last synced/committed sha wins; live
+   head only when the session never synced.
+2. **cancelled ≠ failure**: `DeployState::from` had "cancelled" in its
+   failed set. github cancels superseded duplicate workflow runs on
+   concurrency — cancellation says "skipped", never "broken". cancelled
+   checks are now dropped BEFORE aggregation; nothing decisive left →
+   honest "none" (unsettled), not a fabricated verdict.
+
+- tests: 2 pins for the target choice in tests/branch_policy.rs; 2
+  negative-control tests in tests/loop_nervous_system.rs — one drives the
+  EXACT input that used to misfire (("verify","cancelled") must read
+  "none" and not settle), one proves cancellation masks neither success,
+  failure, nor pending. NOTE: the old matrix test pinned the buggy
+  behavior ("cancelled"→failure); correcting a test that asserts the bug
+  is part of the fix, not evidence against it.
+- self-demonstrating verification: calling check_deployment right after
+  git_commit returned a verdict for main's head 03884ee instead of my new
+  sha — because the DEPLOYED binary still ran the old code. the bug
+  reproduced itself one final time mid-run; re-calling with the sha named
+  explicitly showed 5483201 green (ci verify incl. the new tests + vercel).
+- process note: one edit_file call was issued with target/replacement
+  swapped (tried to ADD the old buggy line back into the matrix). read the
+  file after every structural edit; the mistake was caught before it could
+  compile anywhere.
+
 ## landed this run (pr_wait — the polling spam is dead; PR #6 merged, squash ff1ad44)
 
 the user flagged pr_status-in-a-loop as horrendous (8–10 identical calls
