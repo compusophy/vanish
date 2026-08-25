@@ -24,8 +24,6 @@
 //  truncate the stack to the frame's base, push the result. no resume
 //! bookkeeping exists anywhere — the simplest correct design.
 
-use super::wasm::uleb;
-
 // ---- values ------------------------------------------------------------------
 
 /// a runtime value. bools do not exist here: they are i32 at the wire level,
@@ -570,7 +568,8 @@ fn decode_code(r: &mut Reader) -> Result<Vec<Instr>, DecodeError> {
                         code.len() as u32 // past this end
                     };
                     for site in frame.unresolved {
-                        code[site] = resolve_branch(code[site], target);
+                        let patched = resolve_branch(code[site].clone(), target);
+                        code[site] = patched;
                     }
                     continue; // ends are consumed; they exist only as targets
                 }
@@ -602,6 +601,10 @@ fn resolve_branch(existing: Instr, target: u32) -> Instr {
 struct Frame {
     func_idx: usize,
     type_idx: u32,
+    /// index of this function's body in module.funcs — the code slice is
+    /// re-borrowed from there on every fetch (avoids holding a &Module
+    /// inside the frame while frames mutate).
+    code_idx: usize,
     ip: usize,
     locals: Vec<Val>,
     /// stack height at entry (args already popped off); unwound on return.
@@ -623,17 +626,15 @@ pub fn invoke(m: &Module, func_idx: usize, args: &[Val], fuel: u64) -> Result<Op
         }
         fuel_left -= 1;
 
-        // fetch + advance under the frame borrow, then dispatch owning the
-        // whole frame stack. Instr is small; the clone is cheaper than the
-        // borrow gymnastics and cannot observe anything.
+        // fetch + advance: borrow the code slice through the module (the
+        // frame carries its function's INDEX, not a reference — frames must
+        // stay mutable while code is read). Instr is small; cloning beats
+        // fighting the aliasing.
         let instr: Instr = {
-            let f = frames.last_mut().expect("invoke keeps one frame alive");
-            match f.code.get(f.ip) {
-                Some(i) => {
-                    let c = i.clone();
-                    f.ip += 1;
-                    c
-                }
+            let f = frames.last().expect("invoke keeps one frame alive");
+            let body_code: &[Instr] = &m.funcs[f.code_idx].code;
+            match body_code.get(f.ip) {
+                Some(i) => i.clone(),
                 None => {
                     return Err(Trap::BadControl(format!(
                         "instruction pointer escaped function {}'s body",
@@ -642,6 +643,7 @@ pub fn invoke(m: &Module, func_idx: usize, args: &[Val], fuel: u64) -> Result<Op
                 }
             }
         };
+        frames.last_mut().expect("frame alive").ip += 1;
 
         match instr {
             Instr::I32Const(v) => stack.push(Val::I32(v)),
@@ -790,6 +792,7 @@ fn make_frame(
     Ok(Frame {
         func_idx,
         type_idx: body.type_idx,
+        code_idx: func_idx,
         ip: 0,
         locals,
         stack_base: stack_after_args_popped.len(),
