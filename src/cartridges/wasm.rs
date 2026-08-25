@@ -259,6 +259,15 @@ fn check_expr<'a>(
                     rt.name()
                 )));
             }
+            // % on floats has no wasm instruction (the spec has no frem);
+            // refusing here keeps emission total over checked input.
+            if *op == BinOp::Rem && matches!(lt, Ty::F32 | Ty::F64) {
+                return Err(err(format!(
+                    "%% is integer-only in rustlite — floats have no remainder \
+                     instruction in wasm; write it as x - (x / y).floor() * y once \
+                     floor() lands, or keep the math in integers"
+                )));
+            }
             op.result_ty(lt).map_err(|e| err(e))
         }
         Expr::Call { callee, args } => {
@@ -397,7 +406,6 @@ fn emit_function<'a>(f: &FnDecl, fns: &'a [FnDecl]) -> Vec<u8> {
             _ => {
                 if let Some(t) = pending_ty.take() {
                     local_decls.push((pending_count, t));
-                    pending_count = 0;
                 }
                 pending_ty = Some(v);
                 pending_count = 1;
