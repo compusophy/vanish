@@ -283,12 +283,17 @@ fn check_expr(
             }
         }
         Expr::Binary(op, l, r) => {
-            // literals adapt to their partner; non-literals must match.
-            let lt = if is_numeric_literal(l) && !is_numeric_literal(r) {
+            // resolve the operand type EXACTLY the way emit_expr's
+            // binary_operand_type does (l-first; a literal borrows its
+            // partner), THEN check both sides under that type as their
+            // hint. checking r first with the ambient hint would let `2.0`
+            // become f64 while l resolved i32 — a false mismatch.
+            let ty = if is_numeric_literal(l) && !is_numeric_literal(r) {
                 check_expr(r, scope, sig_tys, err, hint)?
             } else {
                 check_expr(l, scope, sig_tys, err, hint)?
             };
+            let lt = ty;
             let rt = if is_numeric_literal(r) {
                 check_expr(r, scope, sig_tys, err, lt)?
             } else {

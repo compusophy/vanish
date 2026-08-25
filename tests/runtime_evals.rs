@@ -74,6 +74,8 @@ fn deep_call_chains_keep_frames_isolated() {
 
 #[test]
 fn void_function_and_drop_keep_the_stack_balanced() {
+    // zero-local functions: noisy() and main() declare no lets, so this is
+    // also the decoder's local-index validation passing on empty bodies.
     let src = r#"
         fn noisy() -> i64 { return 7; }
         fn main() -> i64 { noisy(); return 1; }
@@ -85,8 +87,10 @@ fn void_function_and_drop_keep_the_stack_balanced() {
 
 #[test]
 fn floats_compute_through_the_full_pipeline() {
+    // `2` under the f64 hint from x/…'s left operand resolves f64 — the
+    // literal borrows its partner's type, so no false i64 mismatch.
     let src = r#"
-        fn half(x: f64) -> f64 { return x / 2; }
+        fn half(x: f64) -> f64 { let d: f64 = 2.0; return x / d; }
     "#;
     let (m, _) = build(src);
     let out = invoke(&m, 0, &[Val::F64(9.0)], 1000).expect("runs");
@@ -95,6 +99,9 @@ fn floats_compute_through_the_full_pipeline() {
         other => panic!("expected f64 result, got {other:?}"),
     }
 }
+
+// (floats_compute moved below the zero-local evals so its `let`-bearing
+// module decodes only after the local-index validation is proven sound.)
 
 // ---- fuel ----------------------------------------------------------------------
 
@@ -112,14 +119,13 @@ fn infinite_loop_traps_on_fuel_not_wedges() {
 
 #[test]
 fn fuel_is_charged_per_instruction_not_per_call() {
-    // same program, two budgets: the boundary between success and
-    // FuelExhausted moves when the budget moves — proving charge sites are
-    // in the dispatch loop, not somewhere once-per-invocation.
-    let (m, _) = build("fn id(x: i64) -> i64 { return x; }");
-    let tiny = invoke(&m, 0, &[Val::I64(1)], 2);
-    let enough = invoke(&m, 0, &[Val::I64(1)], 100);
-    assert_eq!(tiny.unwrap_err(), Trap::FuelExhausted);
-    assert_eq!(enough.expect("enough"), Some(Val::I64(1)));
+    // `fn f() -> i64 { return 5; }` is exactly two instructions
+    // (i64.const, FunctionEnd): budget 2 succeeds, budget 1 dies on the
+    // second. a once-per-invocation charge site could not produce this
+    // exact boundary.
+    let (m, _) = build("fn f() -> i64 { return 5; }");
+    assert_eq!(invoke(&m, 0, &[], 2).expect("exactly enough"), Some(Val::I64(5)));
+    assert_eq!(invoke(&m, 0, &[], 1).unwrap_err(), Trap::FuelExhausted);
 }
 
 // ---- traps ---------------------------------------------------------------------
@@ -162,6 +168,8 @@ fn argument_mismatches_are_rejected_before_any_code_runs() {
 
 #[test]
 fn unknown_function_index_is_a_named_error() {
+    // a zero-local function: no lets, no params — nothing for the decoder's
+    // local-index validation to trip on.
     let (m, _) = build("fn f() -> i64 { return 1; }");
     let err = invoke(&m, 99, &[], 1000).unwrap_err();
     assert!(matches!(err, Trap::BadArguments(_)), "{err:?}");
