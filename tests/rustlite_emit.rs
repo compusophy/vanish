@@ -25,9 +25,12 @@ fn uleb_matches_known_encodings() {
         (0, &[0x00]),
         (1, &[0x01]),
         (63, &[0x3f]),
-        (64, &[0x80, 0x01]),   // spills to two bytes
-        (127, &[0xff, 0x01]),
-        (128, &[0x80, 0x02]),
+        (64, &[0x40]),          // still one byte: boundary is 2^7, not 64
+        (127, &[0x7f]),
+        (128, &[0x80, 0x01]),   // spills to two bytes at 2^7
+        (129, &[0x81, 0x01]),
+        (16_383, &[0xff, 0x7f]),
+        (16_384, &[0x80, 0x80, 0x01]),
         (624_485, &[0xe5, 0x8e, 0x26]), // the spec's canonical example
     ];
     for (value, expected) in cases {
@@ -38,12 +41,57 @@ fn uleb_matches_known_encodings() {
 }
 
 #[test]
-fn section_sizes_use_uleb_not_fixed_width() {
-    // a module with one tiny function must be minimal: the code section
-    // size prefix must be 1-2 bytes, not padded.
+fn section_ids_and_sizes_are_uleb_prefixed() {
+    // walk the module's sections the way a parser would: id byte + uleb
+    // size must land exactly on each section boundary. this catches padded
+    // or fixed-width size fields, which would shift every later offset.
     let bytes = compile("fn f() -> i32 { return 0; }");
-    let pos = bytes.windows(2).position(|w| w == [10, bytes.len() as u8 - 2]);
-    assert!(pos.is_some(), "code section header not found where expected");
+    let mut p = 8usize; // past magic + version
+    let mut seen = Vec::new();
+    while p < bytes.len() {
+        let id = bytes[p];
+        p += 1;
+        let (size, consumed) = read_uleb(&bytes[p..]);
+        p += consumed;
+        assert!(
+            p + size <= bytes.len(),
+            "section {id} declares {size} bytes but only {} remain",
+            bytes.len() - p
+        );
+        seen.push((id, size as usize));
+        p += size;
+    }
+    assert_eq!(p, bytes.len(), "sections must tile the module exactly");
+    let ids: Vec<u8> = seen.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, vec![1, 3, 10], "expected types/functions/code sections");
+}
+
+fn read_uleb(b: &[u8]) -> (u64, usize) {
+    let mut v = 0u64;
+    let mut shift = 0;
+    for (i, &byte) in b.iter().enumerate() {
+        v |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return (v, i + 1);
+        }
+        shift += 7;
+    }
+    panic!("unterminated uleb");
+}
+
+/// advance past `count` matching end opcodes, honoring nested openers so a
+/// block containing a loop skips two ends. this IS the branch-to-block
+/// semantic: each enclosing control frame contributes exactly one closer.
+fn skip_ends(vm: &mut Vm, count: usize) {
+    let mut remaining = count;
+    while remaining > 0 && vm.ip < vm.code.len() {
+        match vm.code[vm.ip] {
+            0x02 | 0x03 => remaining += 1, // nested opener: its end counts too
+            0x0b => remaining -= 1,
+            _ => {}
+        }
+        vm.ip += 1;
+    }
 }
 
 // ---- validation: every module parses AND validates -----------------------------
@@ -330,17 +378,18 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push((a == 0) as i64);
             }
-            // real label semantics now: depth 0 = innermost frame (loop),
-            // depth 1 = its enclosing block. br N restarts/exits by walking
-            // an explicit control stack — the same frames a real interpreter
-            // keeps. this is what makes the behavioral tests MEAN something:
-            // they would hang on the old emitter's inverted branch.
+            // real label semantics: depth 0 = innermost frame, growing
+            // outward. branching to a LOOP restarts it; branching to a
+            // BLOCK exits it, jumping past EVERY end from the innermost
+            // frame through the target's own (each control frame owns
+            // exactly one end byte). getting either half wrong produces
+            // modules that validate but misbehave — which is why this vm
+            // keeps real frames instead of pattern-matching shapes.
             0x02 | 0x03 => {
-                // block/loop: push a frame {kind, branch target ip}
                 let kind = op;
                 let _blocktype = vm.code[vm.ip]; // always void 0x40 for us
                 vm.ip += 1;
-                frames.push((kind, vm.code.len(), vm.ip));
+                frames.push((kind, 0, vm.ip)); // header = first body byte
             }
             0x0d => {
                 let depth = vm.code[vm.ip] as usize;
@@ -352,23 +401,8 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                     if kind == 0x03 {
                         vm.ip = header; // loop: RESTART
                     } else {
-                        // block: exit → jump past its matching end
-                        let mut q = vm.ip;
-                        let mut nesting = 0usize;
-                        while q < vm.code.len() {
-                            match vm.code[q] {
-                                0x02 | 0x03 => nesting += 1,
-                                0x0b => {
-                                    if nesting == 0 {
-                                        break;
-                                    }
-                                    nesting -= 1;
-                                }
-                                _ => {}
-                            }
-                            q += 1;
-                        }
-                        vm.ip = q + 1;
+                        let skips = frames.len() - n; // inner ends + target's
+                        skip_ends(&mut vm, skips);
                         frames.truncate(n);
                     }
                 }
@@ -381,29 +415,17 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                 if kind == 0x03 {
                     vm.ip = header; // loop: continue
                 } else {
-                    let mut q = vm.ip;
-                    let mut nesting = 0usize;
-                    while q < vm.code.len() {
-                        match vm.code[q] {
-                            0x02 | 0x03 => nesting += 1,
-                            0x0b => {
-                                if nesting == 0 {
-                                    break;
-                                }
-                                nesting -= 1;
-                            }
-                            _ => {}
-                        }
-                        q += 1;
-                    }
-                    vm.ip = q + 1;
+                    let skips = frames.len() - n;
+                    skip_ends(&mut vm, skips);
                     frames.truncate(n);
                 }
             }
             0x0b => {
-                frames.pop();
-                // the function's own end leaves no frames: we're done.
-                if frames.is_empty() {
+                // a closer belongs to the innermost OPEN frame; when none
+                // are open, this is the function body's own end.
+                if let Some(frame) = frames.pop() {
+                    let _ = frame;
+                } else {
                     return *vm.stack.last().unwrap_or(&0);
                 }
             }
