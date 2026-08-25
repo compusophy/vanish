@@ -6,5 +6,6 @@
 
 pub mod manifest;
 pub mod rustlite;
+pub mod wasm;
 
 pub use manifest::{CartridgeKind, CartridgeManifest, ABI_VERSION};
