@@ -78,9 +78,14 @@ jobs:
           echo "::error::no ready preview deployment for $SHA after 15 minutes"
           exit 1
 
+      # VERCEL_AUTOMATION_BYPASS_SECRET is optional: absent, a protected
+      # preview fails with the honest "behind deployment protection" verdict
+      # (exit 3) and the fix named; present, the smoke sends it as
+      # x-vercel-protection-bypass and reaches the real app.
       - name: smoke the running app
         env:
           PREVIEW_URL: ${{ steps.preview.outputs.url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: node ci/e2e.mjs
 
       - name: upload evidence

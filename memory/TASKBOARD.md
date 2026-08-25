@@ -112,6 +112,25 @@ taskboard) asked for four things. all four are resolved:
       preview_url; system prompt documents green-means-booted; guards in
       tests/ci_gate.rs. LIVE VERIFICATION OWED: a deliberately-broken pr has
       not yet been watched going red — record here when the refusal fires.
+      **FINDING (2026-08-25, while landing PR #16): smoke-preview has been
+      RED ON EVERY PR since it landed (#12–#16).** cause: preview
+      deployments sit behind Vercel Deployment Protection — the preview
+      url 302s to vercel.com/sso-api — and ci/e2e.mjs's interstitial
+      markers did not match the "Login – Vercel" page, so it misreported
+      "app html did not mount". and it never blocked anything: main has NO
+      branch protection (gh api …/branches/main/protection → 404), so a red
+      smoke-preview leaves the pr MERGEABLE/UNSTABLE, and merge_pr merged
+      #12–#15 through it. fixed in agent/e2e-sso-diagnosis: the smoke now
+      detects the redirect + login page and exits 3 with the fix named,
+      and sends VERCEL_AUTOMATION_BYPASS_SECRET as x-vercel-protection-
+      bypass when the secret exists. **OWNER ACTION (the agent cannot do
+      this — it needs the Vercel dashboard + repo secrets):** Vercel →
+      vanish project → Settings → Deployment Protection → "Protection
+      Bypass for Automation" → generate; add it as the GitHub repo secret
+      `VERCEL_AUTOMATION_BYPASS_SECRET`. then, optionally, protect main
+      with `verify` + `smoke-preview` as required checks so red actually
+      blocks. until then: verify boots by hand (PR #16's preview was opened
+      in an authenticated browser — #status "ready", build sha matched).
       LESSON from this landing: memory edits committed to an agent/ branch
       AFTER its pr is opened are stranded when the branch is squash-merged
       (commit 67e8516 never reached main). commit memory BEFORE open_pr, or
