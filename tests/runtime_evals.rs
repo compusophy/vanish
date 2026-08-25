@@ -68,8 +68,10 @@ fn deep_call_chains_keep_frames_isolated() {
     "#;
     let (m, _) = build(src);
     // entry is source-order index 0 = `one`; call `three` at index 2.
+    // (4+1)*10 = 50, +100 = 150 — the earlier 141 was the test author
+    // miscomputing their own arithmetic; the runtime was right.
     let out = invoke(&m, 2, &[Val::I64(4)], 10_000).expect("runs");
-    assert_eq!(out, Some(Val::I64(141)), "(4+1)*10 + 100");
+    assert_eq!(out, Some(Val::I64(150)), "(4+1)*10 + 100");
 }
 
 #[test]

@@ -433,12 +433,15 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             offset: 0,
             msg: format!("function {i} references type {ti}, which does not exist"),
         })?;
-        let n_params = ft.params.len();
+        let n_total = ft.params.len() + m.funcs[i].locals.len();
         let max_local = max_local_index(&m.funcs[i].code);
-        if max_local >= (n_params + m.funcs[i].locals.len()) as u32 {
+        // a function with no local references at all passes trivially — the
+        // unwrap_or(0) in max_local_index must not read as "references 0".
+        if n_total > 0 && max_local >= n_total as u32 {
             return r.err(format!(
                 "function {i} references local {max_local} but has only \
-                 {n_params} params + {} declared locals",
+                 {} params + {} declared locals ({n_total} total)",
+                ft.params.len(),
                 m.funcs[i].locals.len()
             ));
         }
