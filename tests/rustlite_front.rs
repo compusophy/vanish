@@ -5,7 +5,7 @@
 //! load-bearing as the positives: the language's SMALLNESS is the feature,
 //! and anything outside it must be refused loudly at the door.
 
-use vanish::cartridges::rustlite::{lex, parse, BinOp, Expr, Stmt, Ty, Tok};
+use vanish::cartridges::rustlite::{lex, parse, BinOp, Expr, Stmt, Tok, Ty};
 
 fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
     Expr::Binary(op, Box::new(l), Box::new(r))
@@ -35,8 +35,27 @@ fn lexes_operators_multi_char_before_single() {
 fn lexes_comments_and_rejects_unknown_characters() {
     let toks = lex("let x = 1; // trailing comment\nlet y = 2;").unwrap();
     assert_eq!(toks.len(), 10, "comments contribute no tokens");
-    let err = lex("let s = \"hello\";").unwrap_err();
-    assert!(err.msg.contains("no strings"), "{err:?}");
+    let err = lex("let s = ~1;").unwrap_err();
+    assert!(err.msg.contains("unexpected character"), "{err:?}");
+}
+
+#[test]
+fn string_literals_lex_but_are_not_expressions() {
+    // strings exist for ONE purpose — naming the extern ABI — so the lexer
+    // accepts them and the parser refuses them anywhere a value is wanted,
+    // naming the boundary and the workaround.
+    let toks = lex("let s = \"hello\";").unwrap();
+    assert!(toks.contains(&Tok::Str("hello".into())), "{toks:?}");
+    let err = parse("fn f() -> i32 { let s: i32 = \"hello\"; return s; }").unwrap_err();
+    assert!(
+        err.msg.contains("string literal") && err.msg.contains("not an expression"),
+        "{err:?}"
+    );
+    // no escapes, no unterminated strings — both named.
+    let err = lex("\"a\\n\"").unwrap_err();
+    assert!(err.msg.contains("escape"), "{err:?}");
+    let err = lex("\"open").unwrap_err();
+    assert!(err.msg.contains("unterminated"), "{err:?}");
 }
 
 #[test]
@@ -53,9 +72,10 @@ fn float_requires_digit_after_the_dot() {
 
 #[test]
 fn parses_a_full_function_with_params_and_return() {
-    let fns = parse("fn add(a: i64, b: i64) -> i64 { return a + b; }").unwrap();
+    let fns = parse("fn add(a: i64, b: i64) -> i64 { return a + b; }").unwrap().fns;
     assert_eq!(fns.len(), 1);
     assert_eq!(fns[0].sig.name, "add");
+    assert!(!fns[0].is_pub, "a plain fn is not exported");
     assert_eq!(
         fns[0].sig.params,
         vec![("a".to_string(), Ty::I64), ("b".to_string(), Ty::I64)]
@@ -74,7 +94,7 @@ fn parses_a_full_function_with_params_and_return() {
 #[test]
 fn precedence_becomes_tree_shape() {
     // * binds tighter than +: a + b * c === a + (b * c)
-    let fns = parse("fn f(a: i32, b: i32, c: i32) -> i32 { return a + b * c; }").unwrap();
+    let fns = parse("fn f(a: i32, b: i32, c: i32) -> i32 { return a + b * c; }").unwrap().fns;
     let Stmt::Return(Some(expr)) = &fns[0].body.stmts[0] else {
         panic!("expected return");
     };
@@ -89,7 +109,7 @@ fn precedence_becomes_tree_shape() {
 #[test]
 fn left_associativity_for_same_precedence() {
     // a - b - c must be (a - b) - c, never a - (b - c)
-    let fns = parse("fn f() -> i32 { return 10 - 4 - 3; }").unwrap();
+    let fns = parse("fn f() -> i32 { return 10 - 4 - 3; }").unwrap().fns;
     let Stmt::Return(Some(expr)) = &fns[0].body.stmts[0] else {
         panic!("expected return");
     };
@@ -105,7 +125,8 @@ fn left_associativity_for_same_precedence() {
 fn comparison_binds_looser_than_arithmetic_and_yields_bool() {
     // a + b < c * d  ===  (a + b) < (c * d)
     let fns = parse("fn f(a: i32, b: i32, c: i32, d: i32) -> bool { return a + b < c * d; }")
-        .unwrap();
+        .unwrap()
+        .fns;
     let Stmt::Return(Some(expr)) = &fns[0].body.stmts[0] else {
         panic!("expected return");
     };
@@ -119,7 +140,7 @@ fn comparison_binds_looser_than_arithmetic_and_yields_bool() {
 
 #[test]
 fn parens_override_precedence() {
-    let fns = parse("fn f() -> i32 { return (1 + 2) * 3; }").unwrap();
+    let fns = parse("fn f() -> i32 { return (1 + 2) * 3; }").unwrap().fns;
     let Stmt::Return(Some(expr)) = &fns[0].body.stmts[0] else {
         panic!("expected return");
     };
@@ -142,7 +163,7 @@ fn while_loop_let_assign_and_return_parse() {
             return i;
         }
     "#;
-    let fns = parse(src).unwrap();
+    let fns = parse(src).unwrap().fns;
     assert_eq!(fns.len(), 1);
     assert_eq!(fns[0].sig.name, "count");
     match &fns[0].body.stmts[0] {
@@ -178,6 +199,70 @@ fn while_loop_let_assign_and_return_parse() {
 }
 
 #[test]
+fn if_else_and_else_if_parse_to_nested_ifs() {
+    // `else if` is sugar: the else block holds exactly one If, so neither
+    // the checker nor the emitter ever meets a third form.
+    let src = r#"
+        fn sign(x: i64) -> i64 {
+            if x < 0 { return -1; } else if x == 0 { return 0; } else { return 1; }
+        }
+    "#;
+    let fns = parse(src).unwrap().fns;
+    let Stmt::If { cond, then, els } = &fns[0].body.stmts[0] else {
+        panic!("expected if, got {:?}", fns[0].body.stmts[0]);
+    };
+    assert_eq!(*cond, bin(BinOp::Lt, Expr::Var("x".into()), Expr::IntLit(0)));
+    assert_eq!(then.stmts.len(), 1);
+    let els = els.as_ref().expect("else present");
+    assert_eq!(els.stmts.len(), 1, "else-if is ONE nested If in the else block");
+    let Stmt::If { els: inner_els, .. } = &els.stmts[0] else {
+        panic!("expected nested if");
+    };
+    assert!(inner_els.is_some(), "the final else belongs to the inner if");
+
+    // no else at all is also fine.
+    let fns = parse("fn f(x: i64) -> i64 { if x > 0 { x = 0; } return x; }").unwrap().fns;
+    let Stmt::If { els, .. } = &fns[0].body.stmts[0] else {
+        panic!("expected if");
+    };
+    assert!(els.is_none());
+}
+
+#[test]
+fn extern_block_declares_host_imports_and_pub_marks_exports() {
+    let src = r#"
+        extern "C" {
+            fn now_ms() -> i64;
+            fn log(level: i32, ptr: i32, len: i32);
+        }
+        pub fn cart_alloc(size: i32) -> i32 { return 8; }
+        fn helper() -> i64 { return now_ms(); }
+    "#;
+    let p = parse(src).unwrap();
+    assert_eq!(p.externs.len(), 2);
+    assert_eq!(p.externs[0].name, "now_ms");
+    assert_eq!(p.externs[0].ret, Some(Ty::I64));
+    assert_eq!(p.externs[1].name, "log");
+    assert_eq!(p.externs[1].params.len(), 3);
+    assert_eq!(p.externs[1].ret, None);
+    assert_eq!(p.fns.len(), 2);
+    assert!(p.fns[0].is_pub, "pub fn is exported");
+    assert!(!p.fns[1].is_pub);
+}
+
+#[test]
+fn extern_with_any_abi_but_c_is_refused() {
+    let err = parse("extern \"system\" { fn f(); } fn g() -> i32 { return 0; }").unwrap_err();
+    assert!(err.msg.contains("extern \"C\""), "{err:?}");
+    // an extern block alone is not a program — nothing to run.
+    let err = parse("extern \"C\" { fn now_ms() -> i64; }").unwrap_err();
+    assert!(err.msg.contains("no functions"), "{err:?}");
+    // a prototype with a body is a fn, not an extern.
+    let err = parse("extern \"C\" { fn f() { } } fn g() -> i32 { return 0; }").unwrap_err();
+    assert!(err.msg.contains("Semi"), "{err:?}");
+}
+
+#[test]
 fn untyped_let_is_refused_the_annotation_is_required_in_v1() {
     let err = parse("fn f() -> i32 { let x = 1; return x; }").unwrap_err();
     assert!(
@@ -188,7 +273,7 @@ fn untyped_let_is_refused_the_annotation_is_required_in_v1() {
 
 #[test]
 fn unary_minus_binds_tightest_and_nests() {
-    let fns = parse("fn f() -> i32 { return -(-5); }").unwrap();
+    let fns = parse("fn f() -> i32 { return -(-5); }").unwrap().fns;
     let Stmt::Return(Some(expr)) = &fns[0].body.stmts[0] else {
         panic!("expected return");
     };
@@ -238,7 +323,7 @@ fn garbage_after_a_complete_fn_is_refused() {
 
 #[test]
 fn trailing_comma_in_params_parses_like_rust() {
-    let fns = parse("fn f(a: i32,) -> i32 { return 0; }").unwrap();
+    let fns = parse("fn f(a: i32,) -> i32 { return 0; }").unwrap().fns;
     assert_eq!(fns[0].sig.params.len(), 1);
 }
 

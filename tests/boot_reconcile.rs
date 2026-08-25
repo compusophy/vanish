@@ -25,7 +25,12 @@ use std::path::Path;
 
 fn source(rel: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("could not read {rel}: {e}"))
+    // normalize line endings: the shape guards below search for `{\n`
+    // patterns, and a windows checkout with core.autocrlf=true serves the
+    // same source as `{\r\n` — a false red on a tree ci would pass.
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {rel}: {e}"))
+        .replace("\r\n", "\n")
 }
 
 // ---- fix 3: partial reconcile survives --------------------------------------

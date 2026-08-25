@@ -3,16 +3,27 @@
 //! validator (the same core bytecodealliance ships in wasm-tools), so a bad
 //! byte sequence fails ci instead of trapping at cartridge-load time.
 //! behavioral tests additionally EXECUTE the module semantics by replaying
-//! its instruction stream through a tiny stack machine in this file — the
-//! full interpreter is L3 and does not exist yet; these pin observable
-//! arithmetic/control behavior at the byte level until it does.
+//! its instruction stream through a tiny stack machine in this file — a
+//! byte-level check independent of the L3 runtime (tests/runtime_evals.rs
+//! covers the real interpreter); these pin observable arithmetic/control
+//! behavior in the emitted bytes themselves.
 
 use vanish::cartridges::rustlite::parse;
 use vanish::cartridges::wasm::{check_fn, emit_module, uleb};
 
 fn compile(src: &str) -> Vec<u8> {
-    let fns = parse(src).expect("parse");
-    emit_module(&fns).expect("emit")
+    let program = parse(src).expect("parse");
+    emit_module(&program).expect("emit")
+}
+
+/// the first error the whole pipeline (parse → check_program → check_fn)
+/// reports for `src`.
+fn refuse(src: &str) -> String {
+    let program = parse(src).expect("parse");
+    match emit_module(&program) {
+        Ok(_) => panic!("expected a refusal for: {src}"),
+        Err(e) => e.msg,
+    }
 }
 
 // ---- leb128 ------------------------------------------------------------------
@@ -154,46 +165,223 @@ fn expression_statement_drops_call_results_to_stay_stack_balanced() {
 
 #[test]
 fn undeclared_assignment_is_refused_by_the_checker() {
-    let fns = parse("fn f() -> i32 { x = 5; return 0; }").unwrap();
-    let err = check_fn(&fns[0], &fns).unwrap_err();
+    let p = parse("fn f() -> i32 { x = 5; return 0; }").unwrap();
+    let err = check_fn(&p.fns[0], &p).unwrap_err();
     assert!(err.msg.contains("not declared"), "{err:?}");
     assert!(err.msg.contains("let"), "{err:?}"); // names the fix
 }
 
 #[test]
 fn type_mismatches_are_refused_with_both_types_named() {
-    let fns = parse("fn f() -> i64 { let x: i32 = 0; return x; }").unwrap();
-    let err = check_fn(&fns[0], &fns).unwrap_err();
+    let p = parse("fn f() -> i64 { let x: i32 = 0; return x; }").unwrap();
+    let err = check_fn(&p.fns[0], &p).unwrap_err();
     assert!(err.msg.contains("i32") && err.msg.contains("i64"), "{err:?}");
 }
 
 #[test]
 fn while_condition_must_be_bool() {
-    let fns = parse("fn f(n: i32) -> i32 { while n { n = n - 1; } return n; }").unwrap();
-    let err = check_fn(&fns[0], &fns).unwrap_err();
+    let p = parse("fn f(n: i32) -> i32 { while n { n = n - 1; } return n; }").unwrap();
+    let err = check_fn(&p.fns[0], &p).unwrap_err();
     assert!(err.msg.contains("bool"), "{err:?}");
+    let p = parse("fn f(n: i32) -> i32 { if n { n = 0; } return n; }").unwrap();
+    let err = check_fn(&p.fns[0], &p).unwrap_err();
+    assert!(err.msg.contains("if condition") && err.msg.contains("bool"), "{err:?}");
 }
 
 #[test]
 fn arity_and_arg_types_of_calls_are_checked() {
-    let fns = parse(
+    let p = parse(
         "fn f(a: i32) -> i32 { return a; } fn g() -> i32 { return f(1, 2); }",
     )
     .unwrap();
-    let err = check_fn(&fns[1], &fns).unwrap_err();
+    let err = check_fn(&p.fns[1], &p).unwrap_err();
     assert!(err.msg.contains("takes 1") && err.msg.contains("got 2"), "{err:?}");
 
-    let fns =
+    let p =
         parse("fn f(a: i32) -> i32 { return a; } fn g(b: i64) -> i32 { return f(b); }").unwrap();
-    let err = check_fn(&fns[1], &fns).unwrap_err();
+    let err = check_fn(&p.fns[1], &p).unwrap_err();
     assert!(err.msg.contains("argument 1"), "{err:?}");
 }
 
 #[test]
 fn duplicate_params_refused() {
-    let fns = parse("fn f(a: i32, a: i32) -> i32 { return a; }").unwrap();
-    let err = check_fn(&fns[0], &fns).unwrap_err();
+    let p = parse("fn f(a: i32, a: i32) -> i32 { return a; }").unwrap();
+    let err = check_fn(&p.fns[0], &p).unwrap_err();
     assert!(err.msg.contains("duplicate"), "{err:?}");
+}
+
+#[test]
+fn a_value_returning_function_must_end_in_return_on_every_path() {
+    // wasm would reject the module for an empty stack at the function's
+    // end — as a validator error three layers away. the checker says it at
+    // the source instead, and knows an if/else with returning arms counts.
+    let msg = refuse("fn f(x: i64) -> i64 { if x > 0 { return 1; } }");
+    assert!(msg.contains("does not end with `return`"), "{msg}");
+    let msg = refuse("fn f(x: i64) -> i64 { while x > 0 { return x; } }");
+    assert!(msg.contains("does not end with `return`"), "{msg}");
+    // both arms return → accepted, and the module validates.
+    let bytes = compile(
+        "fn max(a: i64, b: i64) -> i64 { if a > b { return a; } else { return b; } }",
+    );
+    assert_valid(&bytes, "if/else returning arms");
+    // void functions need no trailing return.
+    assert_valid(&compile("fn tick() { }"), "void without return");
+}
+
+#[test]
+fn void_calls_and_bare_expressions_are_valid_statements() {
+    // a void callee in statement position was a checker error before item 5
+    // ("returns nothing but is used as a value") — which made `log(…);`
+    // unwritable. and a bare value expression must be dropped, or the
+    // module fails validation on a dirty stack.
+    let src = r#"
+        fn tick() { }
+        fn seven() -> i64 { return 7; }
+        fn main() -> i32 {
+            tick();
+            seven();
+            1 + 2;
+            return 0;
+        }
+    "#;
+    assert_valid(&compile(src), "void call + dropped expression statements");
+    // a void callee used as a VALUE is still refused, naming the callee.
+    let msg = refuse("fn tick() { } fn f() -> i64 { let x: i64 = tick(); return x; }");
+    assert!(msg.contains("tick") && msg.contains("returns nothing"), "{msg}");
+}
+
+// ---- cartridges: imports, exports, memory, intrinsics ----------------------------
+
+/// a minimal but complete cartridge in rustlite: every ABI import, every
+/// lifecycle export, memory intrinsics, and packing.
+const CARTRIDGE: &str = r#"
+    extern "C" {
+        fn log(level: i32, ptr: i32, len: i32);
+        fn now_ms() -> i64;
+        fn store_get(k_ptr: i32, k_len: i32) -> i64;
+        fn store_set(k_ptr: i32, k_len: i32, v_ptr: i32, v_len: i32) -> i32;
+        fn emit(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32);
+    }
+    pub fn cart_alloc(size: i32) -> i32 {
+        let hp: i32 = load_i32(0);
+        if hp == 0 { hp = 8; }
+        store_i32(0, hp + size);
+        return hp;
+    }
+    pub fn cart_init(p: i32, n: i32) -> i32 {
+        log(1, p, n);
+        return store_set(p, n, p, n);
+    }
+    pub fn cart_handle(p: i32, n: i32) -> i64 {
+        let out: i32 = cart_alloc(n);
+        let i: i32 = 0;
+        while i < n {
+            store_u8(out + i, load_u8(p + i) + 1);
+            i = i + 1;
+        }
+        emit(p, n, out, n);
+        let t: i64 = now_ms();
+        let prev: i64 = store_get(p, n);
+        let plen: i32 = unpack_len(prev) + unpack_ptr(prev) * 0;
+        let pages: i32 = memory_size();
+        return pack(out, n);
+    }
+"#;
+
+#[test]
+fn a_full_cartridge_validates_with_wasmparser() {
+    // THE third-party check for the new sections: imports from `vanish`,
+    // a fixed memory, function + memory exports, memory ops, i64 shifts —
+    // all accepted by the same validator wasm-tools ships.
+    let bytes = compile(CARTRIDGE);
+    assert_valid(&bytes, "cartridge");
+}
+
+#[test]
+fn cartridge_sections_are_emitted_in_spec_order() {
+    // types, imports, functions, memory, exports, code — the binary format
+    // mandates ascending ids, and a validator refuses any other order.
+    let bytes = compile(CARTRIDGE);
+    let mut p = 8usize;
+    let mut ids = Vec::new();
+    while p < bytes.len() {
+        let id = bytes[p];
+        p += 1;
+        let (size, consumed) = read_uleb(&bytes[p..]);
+        p += consumed + size as usize;
+        ids.push(id);
+    }
+    assert_eq!(ids, vec![1, 2, 3, 5, 7, 10]);
+    // pure modules keep the minimal layout: no memory, no exports.
+    let pure = compile("fn f() -> i32 { return 0; }");
+    assert!(!pure.windows(6).any(|w| w == b"memory"), "pure module exports no memory");
+    // an intrinsic that touches memory pulls a memory in even with nothing
+    // exported; pack alone does not.
+    let mem = compile("fn f() -> i32 { return load_u8(4); }");
+    assert!(mem.windows(6).any(|w| w == b"memory"), "load_u8 needs memory");
+    let packed = compile("fn f() -> i64 { return pack(1, 2); }");
+    assert!(!packed.windows(6).any(|w| w == b"memory"), "pack needs no memory");
+    assert_valid(&mem, "memory-only");
+    assert_valid(&packed, "pack-only");
+}
+
+#[test]
+fn extern_declarations_are_checked_against_the_abi_table() {
+    // unknown host function: refused, and the table is named so the fix is
+    // one read away.
+    let msg = refuse("extern \"C\" { fn sleep(ms: i64); } fn f() -> i32 { return 0; }");
+    assert!(msg.contains("sleep") && msg.contains("now_ms") && msg.contains("store_get"), "{msg}");
+    // right name, wrong shape: both shapes named.
+    let msg = refuse("extern \"C\" { fn now_ms() -> i32; } fn f() -> i32 { return 0; }");
+    assert!(msg.contains("now_ms") && msg.contains("fn() -> i64"), "{msg}");
+    let msg = refuse("extern \"C\" { fn log(ptr: i32, len: i32); } fn f() -> i32 { return 0; }");
+    assert!(msg.contains("fn(i32, i32, i32)"), "{msg}");
+}
+
+#[test]
+fn lifecycle_exports_are_checked_against_the_abi_table() {
+    let msg = refuse("pub fn cart_handle(p: i32) -> i64 { return 0; }");
+    assert!(msg.contains("cart_handle") && msg.contains("fn(i32, i32) -> i64"), "{msg}");
+    // a lifecycle name that is not pub can never be reached by the host.
+    let msg = refuse("fn cart_init(p: i32, n: i32) -> i32 { return 0; }");
+    assert!(msg.contains("must be `pub fn`"), "{msg}");
+}
+
+#[test]
+fn names_are_unique_and_intrinsics_are_reserved() {
+    let msg = refuse("fn f() -> i32 { return 0; } fn f() -> i32 { return 1; }");
+    assert!(msg.contains("declared twice"), "{msg}");
+    let msg = refuse("extern \"C\" { fn now_ms() -> i64; } fn now_ms() -> i64 { return 0; }");
+    assert!(msg.contains("declared twice"), "{msg}");
+    let msg = refuse("fn load_u8(a: i32) -> i32 { return 0; }");
+    assert!(msg.contains("intrinsic"), "{msg}");
+    let msg = refuse("extern \"C\" { fn pack(a: i32, b: i32) -> i64; } fn f() -> i32 { return 0; }");
+    assert!(msg.contains("intrinsic"), "{msg}");
+    // intrinsics are arity/type checked like any call.
+    let msg = refuse("fn f() -> i32 { return load_u8(); }");
+    assert!(msg.contains("takes 1"), "{msg}");
+    let msg = refuse("fn f(x: i64) -> i32 { return load_u8(x); }");
+    assert!(msg.contains("argument 1"), "{msg}");
+}
+
+#[test]
+fn if_else_shapes_all_validate() {
+    let src = r#"
+        fn a(x: i64) -> i64 { if x > 0 { x = 1; } return x; }
+        fn b(x: i64) -> i64 { if x > 0 { return 1; } else { return 2; } }
+        fn c(x: i64) -> i64 {
+            if x < 0 { return -1; } else if x == 0 { return 0; } else { return 1; }
+        }
+        fn d(x: i64) -> i64 {
+            let acc: i64 = 0;
+            while x > 0 {
+                if x % 2 == 0 { acc = acc + x; } else { acc = acc - 1; }
+                x = x - 1;
+            }
+            return acc;
+        }
+    "#;
+    assert_valid(&compile(src), "if/else shapes");
 }
 
 // ---- behavioral: replay the instruction stream ----------------------------------
