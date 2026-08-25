@@ -7,6 +7,45 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (L3 runtime — PR #15 merged ee5c8bd)
+
+owner said "keep going". CARTRIDGE_PLAN §11 item 4 landed on
+agent/cartridge-l3-runtime:
+
+- **src/cartridges/runtime.rs**: decode + fuel-bounded invoke over exactly
+  our emission dialect (plan §6 option 2). branch targets resolved to
+  ABSOLUTE ips at decode time via control frames with unresolved-site
+  patching — outer-frame branches register there so nested-exit skipping
+  is structural, the bug class the mini-vm hit twice. each activation owns
+  Frame{locals, ip, stack_base}; caller's ip already past its Call, return
+  = pop+truncate+push, NO resume bookkeeping. fuel per instruction before
+  dispatch.
+- trap taxonomy: FuelExhausted/DivideByZero/IntegerOverflow/BadControl/
+  InvalidStack/BadArguments/HostError(reserved item 5). MIN÷−1 traps on div
+  only; remainder DEFINES MIN%−1=0 per spec §C.
+- tests/runtime_evals.rs: 19 evals; full pipeline un-mocked (source→bytes→
+  decode→invoke); exact two-instruction fuel boundary proven; infinite loop
+  dies named; THE FUZZ — every truncation + every single-byte corruption
+  (3 deltas × every position) through decode+invoke panic-free. that is
+  plan §9's "hostile opcode stream = trapped cartridge" made structural.
+
+the fuzz earned its keep on run one: found a debug-mode subtraction
+overflow in MY OWN error-reporting path (section overshoot report). the
+gate also caught two of my spec misunderstandings: (1) params are NOT
+locals — signature params prepend to zeroed declared groups at frame build,
+our emitter writes only non-param lets (spec-correct behavior I initially
+"validated" against wrongly); (2) sections are self-describing, so a prefix
+containing complete sections decodes fine — my truncation test asserted the
+wrong invariant and was rewritten to the real one. the runtime evals ALSO
+exposed a real checker bug: Binary checked r under ambient hint while l
+resolved later → false "f64 vs i64" mismatches; resolution now happens
+first with the emitter's exact l-first ordering shared. and one arithmetic
+error in my own expectation where the runtime was right ((4+1)*10+100=150).
+
+next: item 5 — cart_init/cart_handle/cart_alloc lifecycle over this
+interpreter, host-import surface as a trait (native tests inject fake host;
+OPFS-backed kv namespace cartridges/{slug}/kv), then items 6–10.
+
 ## landed this run (cartridge L1+L2 front-end — PR #13 merged 1fcd65c)
 
 owner said "send it!" twice. CARTRIDGE_PLAN §11 items 1–2 landed on

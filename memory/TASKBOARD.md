@@ -136,17 +136,27 @@ taskboard) asked for four things. all four are resolved:
             META-LESSON PROVEN: the gate cannot catch self-consistent
             wrongness in tests verifying their own implementation — quote
             the spec in the comment, make code match words, not intent.
-      - [ ] item 4 NEXT: L3 runtime — fuel-bounded stack-machine interpreter
-            over exactly the dialect rustlite emits (plan §6 option 2/3:
-            we only interpret OUR frozen subset; WAMR swap-in later if
-            third-party cartridges ever need it). needs: module DEcoder
-            (sections/types/code), fuel metering on every instruction,
-            trap taxonomy (FuelExhausted, DivByZero, Unreachable, BadType),
-            host-import surface per §4 (log/now_ms/store_get/store_set/emit)
-            as a trait so native tests inject a fake host, cart_init/
-            cart_handle/cart_alloc lifecycle wiring (item 5 rides on this).
-      - [ ] items 5–10 per plan §11 (lifecycle → ports → orchestrator →
-            cognitive cartridge → corpus capture → opcode-model experiment).
+      - [x] item 4 DONE (PR #15, ee5c8bd): L3 runtime. decode with absolute-
+            ip branch resolution at decode time; invoke with per-activation
+            Frame{locals,ip,stack_base} and NO resume bookkeeping; fuel per
+            instruction before dispatch; full trap taxonomy incl.
+            MIN÷−1-div-traps-but-rem-defines-zero. 19 evals in
+            tests/runtime_evals.rs: un-mocked full pipeline (source→bytes→
+            decode→invoke), exact fuel boundaries, infinite-loop-dies-named,
+            and THE FUZZ (every truncation + single-byte corruption × 3
+            deltas panic-free) = plan §9's hostile-cartridge property made
+            structural. fuzz found its first real bug immediately: an
+            overflow in decode's own error-reporting path.
+      - [ ] item 5 NEXT: cart_init/cart_handle/cart_alloc lifecycle over the
+            interpreter + host-import surface per plan §4 as a TRAIT
+            (log/now_ms/store_get/store_set/emit) so native tests inject a
+            fake host; OPFS-backed kv namespace cartridges/{slug}/kv;
+            packed (ptr<<32|len) ABI for store_get results. NOTE: rustlite
+            has no if-statement yet — recursion and branching cartridges
+            need it before a meaningful cognitive module compiles; consider
+            adding `if`/`else` to L2 alongside item 5.
+      - [ ] items 6–10 per plan §11 (ports → orchestrator → cognitive
+            cartridge → corpus capture → opcode-model experiment).
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).
