@@ -256,7 +256,7 @@ fn truncations_at_or_after_the_code_section_fail() {
         }
         p += size as usize;
     }
-    let end_of_code = code_start.expect("module has a code section") as usize;
+    let end_of_code = code_start.expect("module has a code section");
     for cut in end_of_code..bytes.len() {
         assert!(
             decode(&bytes[..cut]).is_err(),
