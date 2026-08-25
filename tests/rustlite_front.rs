@@ -28,7 +28,7 @@ fn lexes_operators_multi_char_before_single() {
     assert_eq!(lex("a!=b").unwrap(), vec![Tok::Ident("a".into()), Tok::Ne, Tok::Ident("b".into())]);
     assert_eq!(lex("a&&b").unwrap(), vec![Tok::Ident("a".into()), Tok::AndAnd, Tok::Ident("b".into())]);
     assert_eq!(lex("a||b").unwrap(), vec![Tok::Ident("a".into()), Tok::OrOr, Tok::Ident("b".into())]);
-    assert_eq!(lex("f(x)->i32").unwrap()[3], Tok::Arrow);
+    assert_eq!(lex("f(x)->i32").unwrap()[4], Tok::Arrow);
 }
 
 #[test]
