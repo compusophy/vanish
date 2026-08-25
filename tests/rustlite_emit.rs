@@ -53,12 +53,13 @@ fn section_ids_and_sizes_are_uleb_prefixed() {
         p += 1;
         let (size, consumed) = read_uleb(&bytes[p..]);
         p += consumed;
+        let size = size as usize;
         assert!(
             p + size <= bytes.len(),
             "section {id} declares {size} bytes but only {} remain",
             bytes.len() - p
         );
-        seen.push((id, size as usize));
+        seen.push((id, size));
         p += size;
     }
     assert_eq!(p, bytes.len(), "sections must tile the module exactly");
@@ -79,20 +80,7 @@ fn read_uleb(b: &[u8]) -> (u64, usize) {
     panic!("unterminated uleb");
 }
 
-/// advance past `count` matching end opcodes, honoring nested openers so a
-/// block containing a loop skips two ends. this IS the branch-to-block
-/// semantic: each enclosing control frame contributes exactly one closer.
-fn skip_ends(vm: &mut Vm, count: usize) {
-    let mut remaining = count;
-    while remaining > 0 && vm.ip < vm.code.len() {
-        match vm.code[vm.ip] {
-            0x02 | 0x03 => remaining += 1, // nested opener: its end counts too
-            0x0b => remaining -= 1,
-            _ => {}
-        }
-        vm.ip += 1;
-    }
-}
+
 
 // ---- validation: every module parses AND validates -----------------------------
 
@@ -401,8 +389,17 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                     if kind == 0x03 {
                         vm.ip = header; // loop: RESTART
                     } else {
-                        let skips = frames.len() - n; // inner ends + target's
-                        skip_ends(&mut vm, skips);
+                        // block exit: skip every end from innermost through
+                        // the target frame's own (each frame owns one closer)
+                        let mut remaining = frames.len() - n;
+                        while remaining > 0 && vm.ip < vm.code.len() {
+                            match vm.code[vm.ip] {
+                                0x02 | 0x03 => remaining += 1,
+                                0x0b => remaining -= 1,
+                                _ => {}
+                            }
+                            vm.ip += 1;
+                        }
                         frames.truncate(n);
                     }
                 }
@@ -415,8 +412,15 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                 if kind == 0x03 {
                     vm.ip = header; // loop: continue
                 } else {
-                    let skips = frames.len() - n;
-                    skip_ends(&mut vm, skips);
+                    let mut remaining = frames.len() - n;
+                    while remaining > 0 && vm.ip < vm.code.len() {
+                        match vm.code[vm.ip] {
+                            0x02 | 0x03 => remaining += 1,
+                            0x0b => remaining -= 1,
+                            _ => {}
+                        }
+                        vm.ip += 1;
+                    }
                     frames.truncate(n);
                 }
             }
