@@ -7,6 +7,64 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (wasm emission — PR #14 merged d69a259)
+
+owner said "send it!" again. CARTRIDGE_PLAN §11 item 3 landed on
+agent/cartridge-wasm-emission:
+
+- **rustlite → raw .wasm bytes** (src/cartridges/wasm.rs): LEB128 (uleb
+  pinned vs spec example 624485), type-check pass building the name→local-
+  index map (params first, lets in source order; wasm locals are INDEXED —
+  this map IS the check/emit calling convention), then section emission:
+  deduped functype table, functions, code. no LLVM, no cranelift, NO LINKER.
+- **context-typed literals**: `literal_ty(is_float, hint)` is ONE function
+  called by BOTH checker and emitter walks with the same hint (let→declared
+  type, assign→target, return→fn ret, while-cond→bool, call args→declared
+  param types). drift between approved types and written bytes is
+  structurally impossible rather than merely tested. this fixed
+  `fn five() -> i32 { return 5; }` being refused (literals were hardcoded
+  i64).
+- **while = block{loop{}}**: br_if 1 targets the BLOCK (exit when cond
+  false), br 0 targets the LOOP (continue). the original draft inverted
+  this: loop{cond;eqz;br_if 0} VALIDATES cleanly but re-enters forever —
+  caught by self-review against the spec, NOT by the gate, because the test
+  vm had implemented my same mistake. both sides now implement true label
+  semantics; count(5)=5 is only provable if both are right.
+- **tests/rustlite_emit.rs**: every module round-trips through wasmparser
+  0.258 validator (third-party acceptance); mini stack machine with
+  explicit control frames executes emitted bytes: double(21)=42,
+  count(5) iterates to 5 through REAL branch rules. uleb boundary ladder,
+  section-tiling walk asserting [1,3,10] exactly.
+
+honest process record — six red builds this landing, each diagnosed from
+the diagnostics branch log in one read:
+1. cd31117-era pattern repeated: first-pass compile errors (Ty needed Copy;
+   emit_function arity)
+2. a draft fix DISCARDED before commit — it used static mut + unreachable!()
+   in live paths. self-deception dressed as repair; rewrote properly.
+3. float % exposed as non-exhaustive match → became a real language rule:
+   wasm has no frem, so rustlite refuses it at check time with guidance.
+4. clippy -D warnings caught dead params in the checker walks (f, fns only
+   ever passed down) → removed, SigTys alias introduced.
+5. test-file bugs: wrong uleb pins at 2^7 (code was right), section-header
+   byte-pattern matching replaced by a real parser walk, vm block-exit
+   skipping one end instead of all ends to the target frame.
+6. diagnostics raw url served STALE content once — cache-busted by fetching
+   the diagnostics branch head sha explicitly and reading that blob.
+
+the meta-lesson, now proven twice in two runs: THE GATE CANNOT CATCH
+SELF-CONSISTENT WRONGNESS IN TESTS THAT VERIFY THEIR OWN IMPLEMENTATION.
+the while-loop bug passed every automated check and would have shipped an
+infinite-loop emitter. what caught it: writing the spec's actual label
+semantics into a comment and checking my code against the WORDS, not
+against the intent. rule for future emitters/interpreters: quote the spec
+line in the comment, then make the code match the comment.
+
+next: item 4 — the L3 runtime (fuel-bounded interpreter over the dialect we
+emit). the mini-vm in rustlite_emit.rs is its seed: frames, stack, locals
+already work; needs fuel metering, trap taxonomy, host-import surface
+(log/store/emit per CARTRIDGE_PLAN §6), OPFS-backed kv namespace.
+
 ## landed this run (cartridge L1+L2 front-end — PR #13 merged 1fcd65c)
 
 owner said "send it!" twice. CARTRIDGE_PLAN §11 items 1–2 landed on

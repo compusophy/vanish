@@ -127,18 +127,28 @@ taskboard) asked for four things. all four are resolved:
             Assign stmt added after the gate caught its absence; parser is
             scope-blind by design (undeclared-name assignment = CHECKER
             error for the next pass).
-      - [ ] item 3 NEXT: wasm emission — typed AST → raw .wasm bytes with
-            NO linking step (the whole in-browser bet). needs a type-check
-            pass FIRST over parsed fns (scope walk: params then lets in
-            order) since emission assumes well-typed input; wasm locals are
-            INDEXED so the scope walk builds the name→index map (params
-            first, then lets); i64 consts emit as i64.const even in i32
-            range or checker and emitter disagree; bool maps to i32 at
-            runtime but stays bool in the checker; round-trip validate
-            output with wasmparser in ci; golden hex tests source→bytes.
-      - [ ] items 4–10 per plan §11 (runtime → lifecycle → ports →
-            orchestrator → cognitive cartridge → corpus capture →
-            opcode-model experiment).
+      - [x] item 3 DONE (PR #14, d69a259): rustlite → raw .wasm emission.
+            context-typed literals via ONE shared literal_ty() called by both
+            walks; while = block{loop{}} with true label semantics;
+            wasmparser 0.258 round-trip validation + behavioral mini-vm
+            proving double(21)=42 and count(5)=5 through real branch rules.
+            float % refused at check time (wasm has no frem).
+            META-LESSON PROVEN: the gate cannot catch self-consistent
+            wrongness in tests verifying their own implementation — quote
+            the spec in the comment, make code match words, not intent.
+      - [ ] item 4 NEXT: L3 runtime — fuel-bounded interpreter over the
+            dialect rustlite emits. SEED EXISTS: the mini-vm in
+            tests/rustlite_emit.rs already has frames/stack/locals/branch
+            resolution. needs: fuel metering (every instruction costs,
+            trap on exhaustion), trap taxonomy (divide-by-zero, fuel,
+            unreachable, host-error), host-import surface per CARTRIDGE_PLAN
+            §6 (log/now_ms/store_get/store_set/emit), OPFS-backed kv
+            namespace per cartridge (cartridges/{slug}/kv/...), and the
+            cart_init/cart_handle lifecycle. pure core testable natively;
+            wasm-side glue thin.
+      - [ ] items 5–10 per plan §11 (lifecycle wiring → ports → orchestrator
+            → cognitive cartridge → corpus capture → opcode-model
+            experiment).
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).
