@@ -7,9 +7,8 @@
 //! control: contested paths assert as directly as clear ones.
 
 use vanish::agent::claims::{
-    contest_warning, registry_claim, registry_entries, registry_expire,
-    registry_release_conversation, registry_release_paths, ClaimRegistry, ClaimVerdict,
-    CLAIM_TTL_MS,
+    contest_warning, registry_claim, registry_entries, registry_release_conversation,
+    registry_release_paths, ClaimRegistry, ClaimVerdict, CLAIM_TTL_MS,
 };
 
 // ---- verdicts -------------------------------------------------------------
@@ -87,7 +86,7 @@ fn release_conversation_drops_only_its_own_claims() {
     r.claim("b.rs", "conv-a", 1_000);
     r.claim("c.rs", "conv-b", 1_000);
 
-    let released = r.release_conversation("conv-a");
+    let mut released = r.release_conversation("conv-a");
     released.sort();
     assert_eq!(released, vec!["a.rs".to_string(), "b.rs".to_string()]);
     // conv-b's claim survives — its run is still live.
