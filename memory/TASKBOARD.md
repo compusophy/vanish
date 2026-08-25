@@ -206,17 +206,44 @@ taskboard) asked for four things. all four are resolved:
             NOT in item 6 (deliberately): the guest-side `call(slug, msg)`
             import — it is an ABI v2 bump and needs item 7's mailbox to
             mediate; composition today is host-side routing by port.
-      - [ ] item 7 NEXT: L5 orchestrator — mailboxes (topic + bytes,
-            at-most-once with the ack packed in cart_handle's result),
-            supervision (restart a trapped cartridge with backoff up to a
-            budget, then mark it failed LOUDLY), hot-swap (drain the
-            current message, swap the module, state lives in kv so
-            nothing replays). rides on Composition. then the `call`
-            import (ABI v2) becomes an orchestrator-mediated send.
+      - [x] item 7 DONE (agent/cartridge-orchestrator, 2026-08-25): L5.
+            src/cartridges/orchestrator.rs = Orchestrator<H> over
+            Composition<ActorHost<H>>: every cartridge an actor with a
+            mailbox (cap MAX_MAILBOX 256, overflow = Undeliverable event);
+            `pump(now_ms, fuel)` delivers ONE message, round-robin in
+            wiring order — time is PASSED IN, never read (D1, and every
+            backoff decision is exact in tests); at-most-once (a message
+            that crashes its actor is gone, recorded with the trap);
+            supervision = re-instantiate from the Verified image with the
+            SAME host (kv survives) after RESTART_BASE_MS·2^(n−1) backoff,
+            MAX_RESTARTS 5 consecutive, then Health::Failed + a Failed
+            event (loud); one success resets the count; a boot refusal is
+            Failed immediately (not transient). hot-swap = Composition::
+            swap: new wiring computed, new bytes verified, ONLY THEN the
+            host moves; re-init with the remembered config; mailbox kept;
+            revives a Failed actor. guest emit(topic) routes to the port's
+            provider iff the emitter declared it under `requires` —
+            capability-based, every denial an event; the real host still
+            observes every emit first. lifecycle.rs split into
+            Verified::verify + instantiate so restarts never re-decode.
+            tests/cartridge_orchestrator.rs (8): fairness, capability
+            routing + denial, undeliverable/full, the full backoff ladder
+            to Failed with the host's init log proving state survived
+            5 restarts, crash-count reset, boot refusal isolation, swap
+            keeping host state + pending mail and reviving Failed, swap
+            refusals leaving nothing changed.
+      - [ ] NEXT (L2 follow-up, before 8): rustlite string literals +
+            data segments — `"inc"` as an expression → (ptr, len) into a
+            data section the runtime initializes at instantiate. today a
+            cartridge names a port byte-by-byte (see emitter_src in
+            tests/common), which is absurd for a cognitive module.
+      - [ ] then: `call(slug_or_port, msg) -> packed` as ABI v2 — a
+            synchronous request/response mediated by the orchestrator
+            (host import → route to provider → handle → response written
+            back via cart_alloc); manifest abi_version 2; v1 cartridges
+            keep loading.
       - [ ] items 8–10 per plan §11 (cognitive cartridge → corpus capture
-            → opcode-model experiment). BEFORE item 8: string literals +
-            data segments in rustlite (a cognitive module must name its
-            ports and topics).
+            → opcode-model experiment).
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).

@@ -235,7 +235,11 @@ to train on.
 6. [x] L4 ports/requires wiring + cycle detection — ports.rs (pure wire)
        + composition.rs (wire-then-load, providers-first init, route by
        port). the guest `call` import waits for 7's mediator (ABI v2)
-7. [ ] L5 mailboxes + supervision + hot-swap (kv-backed state)
+7. [x] L5 mailboxes + supervision + hot-swap (kv-backed state) —
+       orchestrator.rs: deterministic pump (time passed in), at-most-once,
+       backoff ladder to Failed, atomic swap keeping host + mailbox,
+       emits routed by declared capability. `call` (ABI v2) rides on it
+       next; string literals + data segments first.
 8. [ ] cognitive orchestrator: first hot-swappable reasoning module
 9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
 10. [ ] the opcode-model experiment (§9) — gated on 9
