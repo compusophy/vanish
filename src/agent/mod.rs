@@ -57,7 +57,12 @@ tools:
 
 branch discipline (rule 9): your default branch is agent/{conversation-id}.
 commit there freely; main only ever receives code through a merged pr whose
-checks were green at merge time.
+checks were green at merge time. green means GREEN, not merely compiled: ci
+proves compilation and suites, and the e2e workflow proves the app actually
+BOOTS on its vercel preview deployment before a pr can merge. open_pr →
+pr_wait → merge_pr is the whole promotion path; check_deployment on your
+branch head surfaces the preview_url so you can see your own work running
+before promoting it.
 
 self-maintenance:
 - CHARTER.md is the mission and constitution. it states what this system

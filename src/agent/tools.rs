@@ -1249,11 +1249,25 @@ impl Workspace {
                     _ => "no build checks reported for this commit yet. if this repository deploys on push, wait a few seconds and check again.",
                 };
 
+                // preview url: on a non-main branch this sha has a PREVIEW
+                // deployment (vercel builds every branch), which is where an
+                // e2e gate runs BEFORE merge (STACKED_PRS_PLAN §3 P1–P2). a
+                // verdict without the url hides the thing being verified —
+                // surfacing it costs one string read from checks we already
+                // hold.
+                let preview_url = state
+                    .checks
+                    .iter()
+                    .find(|c| c.state == "success" && c.url.starts_with("https://"))
+                    .map(|c| c.url.clone())
+                    .unwrap_or_default();
+
                 Ok(serde_json::json!({
                     "sha": short,
                     "verdict": state.verdict,
                     "checks": state.checks,
                     "build_log": build_log,
+                    "preview_url": preview_url,
                     "guidance": guidance,
                 })
                 .to_string())
