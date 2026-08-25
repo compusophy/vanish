@@ -143,6 +143,61 @@ pub fn kv_src() -> String {
     )
 }
 
+/// a cartridge that traps on EVERY message (memory out of bounds), logging
+/// its config at init so restarts are countable through the host.
+pub fn crasher_src() -> String {
+    format!(
+        r#"
+        extern "C" {{ fn log(level: i32, ptr: i32, len: i32); }}
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ log(1, p, n); return 0; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            let boom: i32 = load_i32(2000000000);
+            return pack(p, n);
+        }}
+    "#
+    )
+}
+
+/// a cartridge that traps only on an EMPTY message and echoes otherwise.
+pub fn flaky_src() -> String {
+    format!(
+        r#"
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            if n == 0 {{ let boom: i32 = load_i32(2000000000); }}
+            return pack(p, n);
+        }}
+    "#
+    )
+}
+
+/// a cartridge that, on every message, emits that message on each of
+/// `topics` (spelled out byte by byte — rustlite has no string literals
+/// yet) and then echoes it back.
+pub fn emitter_src(topics: &[&str]) -> String {
+    let mut body = String::new();
+    for (i, topic) in topics.iter().enumerate() {
+        body.push_str(&format!("let t{i}: i32 = cart_alloc({});\n", topic.len()));
+        for (j, b) in topic.bytes().enumerate() {
+            body.push_str(&format!("store_u8(t{i} + {j}, {b});\n"));
+        }
+        body.push_str(&format!("emit(t{i}, {}, p, n);\n", topic.len()));
+    }
+    format!(
+        r#"
+        extern "C" {{ fn emit(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32); }}
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            {body}
+            return pack(p, n);
+        }}
+    "#
+    )
+}
+
 /// a byte-shifting cartridge: every byte of the message + `delta`, logging
 /// its config at init so boot order is observable through the host.
 pub fn shift_src(delta: i32) -> String {

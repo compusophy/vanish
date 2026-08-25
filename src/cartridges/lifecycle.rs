@@ -87,10 +87,42 @@ impl<H: Host> std::fmt::Debug for Cartridge<H> {
     }
 }
 
-impl<H: Host> Cartridge<H> {
+/// a cartridge that has passed every door but has no host yet: manifest
+/// validated, module decoded, imports/exports/memory verified. Clone, so a
+/// supervisor can re-instantiate a crashed actor from the same image
+/// without decoding a byte — and so a hot-swap can verify the replacement
+/// BEFORE the old instance's host moves across.
+#[derive(Debug, Clone)]
+pub struct Verified {
+    manifest: CartridgeManifest,
+    module: Module,
+    init_idx: usize,
+    handle_idx: usize,
+}
+
+impl Verified {
+    pub fn manifest(&self) -> &CartridgeManifest {
+        &self.manifest
+    }
+
+    /// give the image a host and a fresh zeroed memory. the result is
+    /// uninitialized: `init` runs the guest's cart_init.
+    pub fn instantiate<H: Host>(self, host: H) -> Cartridge<H> {
+        let memory = self.module.initial_memory();
+        Cartridge {
+            manifest: self.manifest,
+            module: self.module,
+            memory,
+            host,
+            init_idx: self.init_idx,
+            handle_idx: self.handle_idx,
+            initialized: false,
+        }
+    }
+
     /// validate everything that can be validated without running a single
     /// instruction. refusals name the missing piece and its expected shape.
-    pub fn load(manifest: CartridgeManifest, bytes: &[u8], host: H) -> Result<Self, LoadError> {
+    pub fn verify(manifest: CartridgeManifest, bytes: &[u8]) -> Result<Self, LoadError> {
         manifest
             .validate()
             .map_err(|e| LoadError(format!("manifest: {e}")))?;
@@ -163,16 +195,20 @@ impl<H: Host> Cartridge<H> {
             )));
         }
 
-        let memory = module.initial_memory();
-        Ok(Self {
+        Ok(Verified {
             manifest,
             module,
-            memory,
-            host,
             init_idx,
             handle_idx,
-            initialized: false,
         })
+    }
+}
+
+impl<H: Host> Cartridge<H> {
+    /// verify, then instantiate — one call for callers that hold the host
+    /// already. the two halves exist separately for supervisors.
+    pub fn load(manifest: CartridgeManifest, bytes: &[u8], host: H) -> Result<Self, LoadError> {
+        Ok(Verified::verify(manifest, bytes)?.instantiate(host))
     }
 
     pub fn manifest(&self) -> &CartridgeManifest {

@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use super::abi::Host;
-use super::lifecycle::{CallError, Cartridge, LoadError};
+use super::lifecycle::{CallError, Cartridge, LoadError, Verified};
 use super::manifest::CartridgeManifest;
 use super::ports::{wire, WireError, Wiring};
 
@@ -26,6 +26,9 @@ pub enum ComposeError {
     NoProvider(String),
     /// a lifecycle call on one member failed.
     Call { slug: String, error: CallError },
+    /// a replacement image carried a different slug than the member it
+    /// was meant to replace — renaming is not a swap.
+    SlugMismatch { expected: String, found: String },
 }
 
 impl From<WireError> for ComposeError {
@@ -46,6 +49,10 @@ impl std::fmt::Display for ComposeError {
                 write!(f, "no cartridge in this composition provides port '{p}'")
             }
             ComposeError::Call { slug, error } => write!(f, "cartridge '{slug}': {error}"),
+            ComposeError::SlugMismatch { expected, found } => write!(
+                f,
+                "replacement is named '{found}' but the member being replaced is '{expected}'"
+            ),
         }
     }
 }
@@ -70,20 +77,37 @@ impl<H: Host> Composition<H> {
     /// each a recorder.
     pub fn load(
         entries: &[(CartridgeManifest, Vec<u8>)],
-        mut host_for: impl FnMut(&CartridgeManifest) -> H,
+        host_for: impl FnMut(&CartridgeManifest) -> H,
     ) -> Result<Self, ComposeError> {
         let manifests: Vec<CartridgeManifest> = entries.iter().map(|(m, _)| m.clone()).collect();
-        let wiring = wire(&manifests)?;
-        let mut cartridges = BTreeMap::new();
+        // wire before a single byte is decoded.
+        wire(&manifests)?;
+        let mut images = Vec::with_capacity(entries.len());
         for (m, bytes) in entries {
-            let host = host_for(m);
-            let cart = Cartridge::load(m.clone(), bytes, host).map_err(|error| {
+            images.push(Verified::verify(m.clone(), bytes).map_err(|error| {
                 ComposeError::Load {
                     slug: m.slug.clone(),
                     error,
                 }
-            })?;
-            cartridges.insert(m.slug.clone(), cart);
+            })?);
+        }
+        Self::from_verified(images, host_for)
+    }
+
+    /// compose from already-verified images (a supervisor keeps these so a
+    /// restart never re-decodes). wires first, exactly like `load`.
+    pub fn from_verified(
+        images: Vec<Verified>,
+        mut host_for: impl FnMut(&CartridgeManifest) -> H,
+    ) -> Result<Self, ComposeError> {
+        let manifests: Vec<CartridgeManifest> =
+            images.iter().map(|v| v.manifest().clone()).collect();
+        let wiring = wire(&manifests)?;
+        let mut cartridges = BTreeMap::new();
+        for image in images {
+            let host = host_for(image.manifest());
+            let slug = image.manifest().slug.clone();
+            cartridges.insert(slug, image.instantiate(host));
         }
         Ok(Self {
             wiring,
@@ -93,6 +117,71 @@ impl<H: Host> Composition<H> {
 
     pub fn wiring(&self) -> &Wiring {
         &self.wiring
+    }
+
+    /// every member's manifest, in slug order.
+    pub fn manifests(&self) -> Vec<CartridgeManifest> {
+        self.cartridges
+            .values()
+            .map(|c| c.manifest().clone())
+            .collect()
+    }
+
+    /// re-instantiate one member from an image — fresh memory, SAME host.
+    /// state lives in kv, not linear memory: that is what makes a restart
+    /// safe. the member comes back uninitialized; the caller re-inits it.
+    pub fn reinstantiate(&mut self, slug: &str, image: Verified) -> Result<(), ComposeError> {
+        if image.manifest().slug != slug {
+            return Err(ComposeError::SlugMismatch {
+                expected: slug.to_string(),
+                found: image.manifest().slug.clone(),
+            });
+        }
+        let old = self
+            .cartridges
+            .remove(slug)
+            .ok_or_else(|| ComposeError::UnknownCartridge(slug.to_string()))?;
+        let host = old.into_host();
+        self.cartridges
+            .insert(slug.to_string(), image.instantiate(host));
+        Ok(())
+    }
+
+    /// hot-swap one member ATOMICALLY: the new wiring is computed first (a
+    /// port change that breaks the set is refused with nothing touched),
+    /// the image was verified by the caller before it got here, and only
+    /// then does the old member's host move into the new instance.
+    /// `rehost` may wrap or inspect the host on its way across. the new
+    /// member comes back uninitialized; the caller re-inits it.
+    pub fn swap(
+        &mut self,
+        image: Verified,
+        rehost: impl FnOnce(H) -> H,
+    ) -> Result<(), ComposeError> {
+        let slug = image.manifest().slug.clone();
+        if !self.cartridges.contains_key(&slug) {
+            return Err(ComposeError::UnknownCartridge(slug));
+        }
+        let manifests: Vec<CartridgeManifest> = self
+            .cartridges
+            .values()
+            .map(|c| {
+                if c.manifest().slug == slug {
+                    image.manifest().clone()
+                } else {
+                    c.manifest().clone()
+                }
+            })
+            .collect();
+        let wiring = wire(&manifests)?;
+        let old = self
+            .cartridges
+            .remove(&slug)
+            .ok_or_else(|| ComposeError::UnknownCartridge(slug.clone()))?;
+        let host = rehost(old.into_host());
+        self.cartridges.insert(slug, image.instantiate(host));
+        self.wiring = wiring;
+        Ok(())
     }
 
     pub fn slugs(&self) -> impl Iterator<Item = &str> {

@@ -7,6 +7,49 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (cartridge item 7: L5 orchestrator — agent/cartridge-orchestrator)
+
+third "keep going" of the loop. item 7 per plan §8, built as a
+deterministic pump because the browser worker is single-threaded and the
+agent loop has to interleave with it:
+
+- **orchestrator.rs (new)**: actors = cartridge + mailbox + health +
+  remembered config. `pump(now_ms, fuel)` = one delivery, round-robin in
+  wiring order; `pump_all(now, fuel, max)`. time is passed in — no clock
+  inside (D1) and the backoff ladder is pinned to the millisecond.
+  at-most-once: a crashing message is consumed, its trap recorded.
+  supervision re-instantiates from the Verified image with the same host
+  (kv survives — the host's init log shows 1 + 5 boots with the same
+  config), backoff 500·2^(n−1) ms, MAX_RESTARTS 5, then Failed + loud
+  event; success resets; boot refusal = Failed at once. hot-swap goes
+  through Composition::swap (atomic: rewire, verify, THEN move the host),
+  re-inits, keeps the mailbox, revives Failed. guest emits route by
+  declared capability (`requires`) or become Denied events; the real
+  host still sees every emit first (feed observer), then ActorHost
+  captures it for routing.
+- **lifecycle.rs**: `Cartridge::load` split into `Verified::verify` +
+  `instantiate(host)` — an image is Clone, so restarts never re-decode
+  and a swap verifies the replacement before the old host moves.
+- **composition.rs**: `from_verified`, `reinstantiate`, `swap`,
+  `manifests`, `SlugMismatch`.
+- two test slips, both mine: events are CHRONOLOGICAL (a Denied raised
+  during a call precedes that call's Delivered — the implementation was
+  right, the expectation was not), and `pending()` takes a slug, not a
+  port. fixed in the tests; nothing in src changed for them.
+
+deliberately deferred, in order: rustlite string literals + data segments
+(a cognitive module cannot spell its ports byte-by-byte), then `call` as
+ABI v2 riding this mailbox, then item 8.
+
+ONE RED BUILD on this landing (f07a13b): every suite passed on ci, then
+clippy refused `outbox.drain(..).collect()` (clippy::drain_collect →
+`mem::take`). the local gate had passed — local clippy is rustc 1.96's,
+ci installs an unpinned `stable` that is newer and warns on it. lesson:
+**the gate's verdict depends on the toolchain, and ci's is the one that
+counts.** keep the local toolchain at current stable (`rustup update`)
+before trusting a local green, and read the diagnostics branch first
+when local and ci disagree — it named the line in one read.
+
 ## landed this run (cartridge item 6: L4 ports + composition — agent/cartridge-ports)
 
 second "keep going" of the 90-minute loop. taskboard read: item 6 next.
