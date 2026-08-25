@@ -5,12 +5,17 @@
 //! can run inside vanish's own wasm where full rustc cannot (rustc-on-wasm
 //! dies on linking, not on codegen).
 //!
-//! pipeline: `type_check` walks each function building the name→local-index
+//! pipeline: `check_fn` walks each function building the name→local-index
 //! map and asserting every expression's type; `emit_module` then writes
 //! bytes assuming well-typed input — emission is total over checked input
 //! and never invents types of its own. every emitted module is round-trip
 //! validated with wasmparser in tests, so a bad byte sequence fails ci
 //! rather than surfacing as a trap at cartridge-load time.
+//!
+//! LITERALS ARE CONTEXT-TYPED: `5` is i32 in `fn f() -> i32 { return 5; }`
+//! and i64 inside an i64 expression, mirroring rust's untyped literals.
+//! ONE function per decision (`literal_ty`) answers both walks — checker
+//! and emitter call it with the same hint, so they cannot disagree.
 
 use super::rustlite::{BinOp, Block, Expr, FnDecl, Stmt, Ty, UnOp};
 use std::collections::HashMap;
@@ -46,6 +51,36 @@ fn sleb(mut v: i64, out: &mut Vec<u8>) {
     }
 }
 
+// ---- shared type resolution --------------------------------------------------
+//
+// these helpers are called by BOTH the checker and the emitter with the
+// same inputs. one definition means the two walks cannot drift apart — the
+// failure mode this file exists to prevent is exactly "checker approved X,
+// emitter wrote Y".
+
+/// the type of an untyped numeric literal under context `hint`.
+pub fn literal_ty(is_float: bool, hint: Ty) -> Ty {
+    if is_float {
+        match hint {
+            Ty::F32 => Ty::F32,
+            _ => Ty::F64,
+        }
+    } else {
+        match hint {
+            Ty::I32 => Ty::I32,
+            _ => Ty::I64,
+        }
+    }
+}
+
+fn is_numeric_literal(e: &Expr) -> bool {
+    matches!(e, Expr::IntLit(_) | Expr::FloatLit(_))
+}
+
+fn is_float_literal(e: &Expr) -> bool {
+    matches!(e, Expr::FloatLit(_))
+}
+
 // ---- type checking ----------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,10 +104,7 @@ impl FnScope {
         let mut indexes = HashMap::new();
         let mut types = Vec::new();
         for (i, (name, ty)) in params.iter().enumerate() {
-            // duplicate parameter names shadow silently otherwise; refuse.
-            if indexes.insert(name.clone(), i as u32).is_some() {
-                // handled by caller via validate_fn signature dup check
-            }
+            indexes.insert(name.clone(), i as u32);
             types.push(*ty);
         }
         Self {
@@ -106,14 +138,10 @@ fn valty(ty: Ty) -> u8 {
     }
 }
 
-/// type-check one function body. returns the resolved local map for the
-/// emitter. `fns` supplies callee signatures for call checking — rustlite
-/// requires callees to be declared before use is NOT imposed (order-free
-/// resolution), because forward references are natural in cartridges.
-pub fn check_fn(
-    f: &FnDecl,
-    fns: &[FnDecl],
-) -> Result<(String, Vec<Ty>, u32), TypeError> {
+/// type-check one function body. returns (name, local types, n_params).
+/// `fns` supplies callee signatures; resolution is order-free (forward
+/// references are natural in cartridges).
+pub fn check_fn(f: &FnDecl, fns: &[FnDecl]) -> Result<(String, Vec<Ty>, u32), TypeError> {
     let sig_tys = |name: &str| -> Option<(Vec<Ty>, Option<Ty>)> {
         fns.iter().find(|g| g.sig.name == name).map(|g| {
             (
@@ -128,7 +156,6 @@ pub fn check_fn(
         msg,
     };
 
-    // duplicate parameter names would make the index map lie.
     let mut seen = std::collections::BTreeSet::new();
     for (n, _) in &f.sig.params {
         if !seen.insert(n) {
@@ -149,7 +176,7 @@ pub fn check_fn(
         for s in &b.stmts {
             match s {
                 Stmt::Let { name, ty, init } => {
-                    let it = check_expr(init, scope, f, fns, sig_tys, err)?;
+                    let it = check_expr(init, scope, f, fns, sig_tys, err, *ty)?;
                     if it != *ty {
                         return Err(err(format!(
                             "let '{name}' declares {}, but its initializer yields {}",
@@ -168,7 +195,7 @@ pub fn check_fn(
                              add a `let {name}: <type> = …` first"
                         )));
                     };
-                    let vt = check_expr(value, scope, f, fns, sig_tys, err)?;
+                    let vt = check_expr(value, scope, f, fns, sig_tys, err, target)?;
                     if vt != target {
                         return Err(err(format!(
                             "cannot assign {} to '{}' (declared {})",
@@ -179,7 +206,7 @@ pub fn check_fn(
                     }
                 }
                 Stmt::While { cond, body } => {
-                    let ct = check_expr(cond, scope, f, fns, sig_tys, err)?;
+                    let ct = check_expr(cond, scope, f, fns, sig_tys, err, Ty::Bool)?;
                     if ct != Ty::Bool {
                         return Err(err(format!(
                             "while condition must be bool, got {}",
@@ -191,7 +218,15 @@ pub fn check_fn(
                 Stmt::Return(e) => {
                     let rt = match e {
                         None => None,
-                        Some(e) => Some(check_expr(e, scope, f, fns, sig_tys, err)?),
+                        Some(e) => Some(check_expr(
+                            e,
+                            scope,
+                            f,
+                            fns,
+                            sig_tys,
+                            err,
+                            f.sig.ret.unwrap_or(Ty::I64),
+                        )?),
                     };
                     if rt != f.sig.ret {
                         return Err(err(format!(
@@ -202,56 +237,64 @@ pub fn check_fn(
                     }
                 }
                 Stmt::Expr(e) => {
-                    check_expr(e, scope, f, fns, sig_tys, err)?;
+                    check_expr(e, scope, f, fns, sig_tys, err, Ty::I64)?;
                 }
             }
         }
         Ok(())
     }
 
-    check_block(
-        &f.body,
-        &mut scope,
-        f,
-        fns,
-        &sig_tys,
-        &err,
-    )?;
+    check_block(&f.body, &mut scope, f, fns, &sig_tys, &err)?;
 
     let n_params = scope.n_params;
     Ok((f.sig.name.clone(), scope.types, n_params))
 }
 
-fn check_expr<'a>(
-    e: &'a Expr,
+/// the type of `e` under context hint. THE single source of truth — the
+/// emitter calls this same function to decide instruction variants, so a
+/// disagreement between the walks is structurally impossible rather than
+/// merely tested-against.
+#[allow(clippy::too_many_arguments)]
+fn check_expr(
+    e: &Expr,
     scope: &mut FnScope,
-    f: &'a FnDecl,
+    f: &FnDecl,
     fns: &[FnDecl],
     sig_tys: &dyn Fn(&str) -> Option<(Vec<Ty>, Option<Ty>)>,
     err: &dyn Fn(String) -> TypeError,
+    hint: Ty,
 ) -> Result<Ty, TypeError> {
     match e {
-        Expr::IntLit(_) => Ok(Ty::I64),
-        Expr::FloatLit(_) => Ok(Ty::F64),
+        Expr::IntLit(_) => Ok(literal_ty(false, hint)),
+        Expr::FloatLit(_) => Ok(literal_ty(true, hint)),
         Expr::BoolLit(_) => Ok(Ty::Bool),
         Expr::Var(name) => scope
             .ty_of(name)
             .ok_or_else(|| err(format!("use of undeclared '{name}'"))),
         Expr::Unary(op, inner) => {
-            let t = check_expr(inner, scope, f, fns, sig_tys, err)?;
+            let t = check_expr(inner, scope, f, fns, sig_tys, err, hint)?;
             match op {
                 UnOp::Neg => match t {
-                    Ty::I64 | Ty::F64 => Ok(t),
+                    Ty::I32 | Ty::I64 | Ty::F32 | Ty::F64 => Ok(t),
                     other => Err(err(format!(
-                        "negation needs i64 or f64, got {}",
+                        "negation needs a numeric type, got {}",
                         other.name()
                     ))),
                 },
             }
         }
         Expr::Binary(op, l, r) => {
-            let lt = check_expr(l, scope, f, fns, sig_tys, err)?;
-            let rt = check_expr(r, scope, f, fns, sig_tys, err)?;
+            // literals adapt to their partner; non-literals must match.
+            let lt = if is_numeric_literal(l) && !is_numeric_literal(r) {
+                check_expr(r, scope, f, fns, sig_tys, err, hint)?
+            } else {
+                check_expr(l, scope, f, fns, sig_tys, err, hint)?
+            };
+            let rt = if is_numeric_literal(r) {
+                check_expr(r, scope, f, fns, sig_tys, err, lt)?
+            } else {
+                lt
+            };
             if lt != rt {
                 return Err(err(format!(
                     "binary op operands must match: {} vs {}",
@@ -263,9 +306,8 @@ fn check_expr<'a>(
             // refusing here keeps emission total over checked input.
             if *op == BinOp::Rem && matches!(lt, Ty::F32 | Ty::F64) {
                 return Err(err(format!(
-                    "%% is integer-only in rustlite — floats have no remainder \
-                     instruction in wasm; write it as x - (x / y).floor() * y once \
-                     floor() lands, or keep the math in integers"
+                    "% is integer-only in rustlite — floats have no remainder \
+                     instruction in wasm; restructure the math or keep it integral"
                 )));
             }
             op.result_ty(lt).map_err(|e| err(e))
@@ -282,7 +324,7 @@ fn check_expr<'a>(
                 )));
             }
             for (i, (a, pt)) in args.iter().zip(param_tys.iter()).enumerate() {
-                let at = check_expr(a, scope, f, fns, sig_tys, err)?;
+                let at = check_expr(a, scope, f, fns, sig_tys, err, *pt)?;
                 if at != *pt {
                     return Err(err(format!(
                         "'{callee}' argument {}: expected {}, got {}",
@@ -331,7 +373,6 @@ pub fn emit_module(fns: &[FnDecl]) -> Result<Vec<u8>, TypeError> {
     // section 1: types
     let mut s = Vec::new();
     uleb(types.len() as u64, &mut s);
-    #[allow(clippy::cast_possible_truncation)] // section item counts are small
     for (params, results) in &types {
         s.push(0x60); // functype
         uleb(params.len() as u64, &mut s);
@@ -371,10 +412,11 @@ fn write_section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-fn emit_function<'a>(f: &FnDecl, fns: &'a [FnDecl]) -> Vec<u8> {
+fn emit_function(f: &FnDecl, fns: &[FnDecl]) -> Vec<u8> {
     // rebuild the same scope walk the checker did — deterministic, so the
     // indices match exactly.
     let mut scope = FnScope::new(&f.sig.params);
+    let ret_hint = f.sig.ret.unwrap_or(Ty::I64);
     let mut body = Vec::new();
 
     // pre-walk statements to register lets in source order BEFORE emitting
@@ -423,26 +465,25 @@ fn emit_function<'a>(f: &FnDecl, fns: &'a [FnDecl]) -> Vec<u8> {
     }
 
     for stmt in &f.body.stmts {
-        emit_stmt(stmt, &scope, fns, &mut body);
+        emit_stmt(stmt, &scope, fns, ret_hint, &mut body);
     }
     body.push(0x0b); // end (function)
     body
 }
 
-fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
+fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], ret_hint: Ty, out: &mut Vec<u8>) {
     match s {
-        Stmt::Let { name, init, .. } => {
-            emit_expr(init, scope, fns, out);
-            // local.set consumes the value: the stack stays balanced for
-            // sibling statements. locals were pre-declared in source order,
-            // so the name lookup is exact.
+        Stmt::Let { name, ty, init } => {
+            // hint = the declaration's own type (checker proved agreement).
+            emit_expr(init, scope, fns, out, *ty);
             if let Some(&i) = scope.indexes.get(name) {
-                out.push(0x21); // local.set
-                uleb(u64::from(i), out);
+                out.push(0x21); // local.set consumes the value: siblings see
+                uleb(u64::from(i), out); // a balanced stack.
             }
         }
         Stmt::Assign { name, value } => {
-            emit_expr(value, scope, fns, out);
+            let hint = scope.ty_of(name).unwrap_or(Ty::I64);
+            emit_expr(value, scope, fns, out, hint);
             if let Some(&i) = scope.indexes.get(name) {
                 out.push(0x21); // local.set
                 uleb(u64::from(i), out);
@@ -453,18 +494,18 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
             // exiting requires targeting an enclosing BLOCK. so a while is
             // block $exit { loop $cont { cond; eqz; br_if $exit; body;
             // br $cont } }. getting this backwards validates cleanly and
-            // hangs at runtime — the worst kind of wrong, caught here by
-            // writing the spec down instead of trusting the intent.
+            // hangs at runtime — the worst kind of wrong, caught by writing
+            // the spec down instead of trusting the intent.
             out.push(0x02); // block $exit
             out.push(0x40);
             out.push(0x03); // loop $cont
             out.push(0x40);
-            emit_expr(cond, scope, fns, out);
+            emit_expr(cond, scope, fns, out, Ty::Bool);
             out.push(0x45); // i32.eqz — bools are i32 at runtime
             out.push(0x0d);
             out.push(0x01); // br_if 1 → leaves the BLOCK when cond is false
             for st in &body.stmts {
-                emit_stmt(st, scope, fns, out);
+                emit_stmt(st, scope, fns, ret_hint, out);
             }
             out.push(0x0c);
             out.push(0x00); // br 0 → back to loop header (continue)
@@ -473,14 +514,14 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
         }
         Stmt::Return(e) => {
             if let Some(e) = e {
-                emit_expr(e, scope, fns, out);
+                emit_expr(e, scope, fns, out, ret_hint);
             }
             out.push(0x0f); // return
         }
         Stmt::Expr(e) => {
-            emit_expr(e, scope, fns, out);
-            // expression statements must not leave values on the stack.
-            // calls returning a value are the only case; drop it.
+            emit_expr(e, scope, fns, out, Ty::I64);
+            // expression statements must not leave values on the stack;
+            // value-returning calls are the only case, so drop the result.
             if let Expr::Call { callee, .. } = e {
                 if fns.iter().any(|g| g.sig.name == *callee && g.sig.ret.is_some()) {
                     out.push(0x1a); // drop
@@ -490,18 +531,33 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
     }
 }
 
-fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
+/// emit `e`, choosing instruction variants by `hint`.
+///
+/// the hint threading MIRRORS check_expr argument-for-argument: literals
+/// via literal_ty(hint), binary operands resolved l-first with the partner
+/// borrowing, call args hinted by declared param types. divergence between
+/// what was checked and what is written would be a type lie in the bytes.
+fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>, hint: Ty) {
     match e {
         Expr::IntLit(v) => {
-            out.push(0x42); // i64.const
+            if literal_ty(false, hint) == Ty::I32 {
+                out.push(0x41); // i32.const
+            } else {
+                out.push(0x42); // i64.const
+            }
             sleb(*v, out);
         }
         Expr::FloatLit(v) => {
-            out.push(0x44); // f64.const
-            out.extend_from_slice(&v.to_bits().to_le_bytes());
+            if literal_ty(true, hint) == Ty::F32 {
+                out.push(0x43); // f32.const
+                out.extend_from_slice(&(*v as f32).to_bits().to_le_bytes());
+            } else {
+                out.push(0x44); // f64.const
+                out.extend_from_slice(&v.to_bits().to_le_bytes());
+            }
         }
         Expr::BoolLit(b) => {
-            out.push(0x41); // i32.const
+            out.push(0x41); // i32.const — bools are i32 at runtime
             sleb(if *b { 1 } else { 0 }, out);
         }
         Expr::Var(name) => {
@@ -511,36 +567,51 @@ fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
             }
         }
         Expr::Unary(UnOp::Neg, inner) => {
-            emit_expr(inner, scope, fns, out);
-            // negation as multiply-by-minus-one: correct on both i64 and
-            // f64 (no overflow hazard beyond what the language already has,
-            // and no stack gymnastics).
-            match infer_expr_ty(inner, scope, fns) {
-                Ty::I64 => {
-                    // 0 - x : push i64.const 0 under x? stack order forbids.
-                    // instead: x already pushed; use i64.const -1 * mul.
-                    out.push(0x42);
+            // inner's type under the SAME hint the checker used.
+            let t = expr_ty(inner, scope, fns, hint);
+            emit_expr(inner, scope, fns, out, hint);
+            // negation as multiply-by-minus-one across all widths:
+            // i32 ×(-1)=0x6c, i64=0x7e, f32=0x94, f64=0xa2.
+            match t {
+                Ty::I32 => {
+                    out.push(0x41);
                     sleb(-1, out);
-                    out.push(0x7e); // i64.mul
+                    out.push(0x6c);
+                }
+                Ty::F32 => {
+                    out.push(0x43);
+                    out.extend_from_slice(&(-1f32).to_bits().to_le_bytes());
+                    out.push(0x94);
+                }
+                Ty::F64 => {
+                    out.push(0x44);
+                    out.extend_from_slice(&(-1f64).to_bits().to_le_bytes());
+                    out.push(0xa2);
                 }
                 _ => {
-                    // f64: same trick
-                    out.push(0x44);
-                    let bits = (-1f64).to_bits();
-                    out.extend_from_slice(&bits.to_le_bytes());
-                    out.push(0xa2); // f64.mul
+                    out.push(0x42);
+                    sleb(-1, out);
+                    out.push(0x7e);
                 }
             }
         }
         Expr::Binary(op, l, r) => {
-            emit_expr(l, scope, fns, out);
-            emit_expr(r, scope, fns, out);
-            let ty = infer_expr_ty(l, scope, fns);
+            // resolve the operand type FIRST (same rule as the checker:
+            // literal borrows its partner; otherwise left's type wins),
+            // then emit both sides with it as their hint.
+            let ty = binary_operand_type(l, r, scope, fns, hint);
+            emit_expr(l, scope, fns, out, ty);
+            emit_expr(r, scope, fns, out, ty);
             emit_binop(*op, ty, out);
         }
         Expr::Call { callee, args } => {
-            for a in args {
-                emit_expr(a, scope, fns, out);
+            // args carry the callee's declared param types as hints — the
+            // same hints the checker used, so literals shrink identically.
+            let Some(g) = fns.iter().find(|g| g.sig.name == *callee) else {
+                return; // checker already refused unknown callees
+            };
+            for (a, (_, pt)) in args.iter().zip(g.sig.params.iter()) {
+                emit_expr(a, scope, fns, out, *pt);
             }
             if let Some(idx) = fns.iter().position(|g| g.sig.name == *callee) {
                 out.push(0x10); // call
@@ -550,21 +621,36 @@ fn emit_expr(e: &Expr, scope: &FnScope, fns: &[FnDecl], out: &mut Vec<u8>) {
     }
 }
 
-/// re-derive an expression's type during emission. the checker already
-/// proved consistency; this only picks instruction variants.
-fn infer_expr_ty(e: &Expr, scope: &FnScope, fns: &[FnDecl]) -> Ty {
+/// the operand type of a binary pair, applying the checker's exact rule:
+/// a literal takes its partner's type; two literals take the ambient hint
+/// (int→i64 unless hinted i32, float→f64 unless hinted f32); otherwise
+/// left's type governs (the checker asserts equality).
+fn binary_operand_type(
+    l: &Expr,
+    r: &Expr,
+    scope: &FnScope,
+    fns: &[FnDecl],
+    hint: Ty,
+) -> Ty {
+    match (is_numeric_literal(l), is_numeric_literal(r)) {
+        (true, true) => literal_ty(is_float_literal(l), hint),
+        (true, false) => expr_ty(r, scope, fns, hint),
+        (false, true) => expr_ty(l, scope, fns, hint),
+        (false, false) => expr_ty(l, scope, fns, hint),
+    }
+}
+
+/// re-derive an expression's type during emission WITHOUT side effects.
+/// shares literal_ty with the checker so both walks answer identically.
+fn expr_ty(e: &Expr, scope: &FnScope, fns: &[FnDecl], hint: Ty) -> Ty {
     match e {
-        Expr::IntLit(_) => Ty::I64,
-        Expr::FloatLit(_) => Ty::F64,
+        Expr::IntLit(_) => literal_ty(false, hint),
+        Expr::FloatLit(_) => literal_ty(true, hint),
         Expr::BoolLit(_) => Ty::Bool,
         Expr::Var(n) => scope.ty_of(n).unwrap_or(Ty::I64),
-        Expr::Unary(_, inner) => infer_expr_ty(inner, scope, fns),
-        // arithmetic preserves the operand type (checker proved it); a
-        // comparison yields bool. result_ty is total over our op set, so
-        // the unwrap_or only fires for logic ops whose operand type IS
-        // already bool — same answer either way.
+        Expr::Unary(_, inner) => expr_ty(inner, scope, fns, hint),
         Expr::Binary(op, l, _) => {
-            let lt = infer_expr_ty(l, scope, fns);
+            let lt = expr_ty(l, scope, fns, hint);
             op.result_ty(lt).unwrap_or(Ty::Bool)
         }
         Expr::Call { callee, .. } => fns
@@ -630,7 +716,7 @@ fn emit_binop(op: BinOp, ty: Ty, out: &mut Vec<u8>) {
         (BinOp::Or, _) => 0x72,  // i32.or
 
         // the checker refuses % on floats before emission ever sees it;
-        // this arm exists so the type system can prove emission total.
+        // this arm exists so the match proves emission total.
         (BinOp::Rem, Ty::F32) | (BinOp::Rem, Ty::F64) => {
             unreachable!("checker rejects float remainder before emit_binop")
         }
