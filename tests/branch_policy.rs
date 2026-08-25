@@ -7,7 +7,8 @@
 
 use vanish::agent::github::{Github, PrStatus};
 use vanish::agent::tools::{
-    branch_for_conversation, commit_allowed_on, pr_gate, PROTECTED_BRANCH,
+    branch_for_conversation, commit_allowed_on, pr_gate, should_keep_waiting, wait_step_ms,
+    PROTECTED_BRANCH,
 };
 
 // ---- ref naming ------------------------------------------------------------
@@ -106,4 +107,31 @@ fn every_other_combination_is_refused_with_reasons() {
     // no signal at all is NOT a pass — it is an unread one (D4)
     let e = pr_gate(&pr(7, Some(true), "none")).unwrap_err();
     assert!(e.contains("no settled check verdict"), "{e}");
+}
+
+// ---- pr_wait pacing (the anti-spam tool) ------------------------------------
+//
+// pr_status-in-a-loop flooded conversations with a dozen identical calls per
+// merge. pr_wait sleeps inside one tool call; these pin the pure decisions
+// behind that wait so the pacing cannot silently regress.
+
+#[test]
+fn pending_waits_and_every_settled_verdict_stops_the_wait() {
+    assert_eq!(wait_step_ms("pending"), 10_000);
+    for settled in ["success", "failure", "none", "error", ""] {
+        assert_eq!(wait_step_ms(settled), 0, "{settled} must not keep waiting");
+    }
+}
+
+#[test]
+fn the_wait_budget_bounds_pending_but_not_a_settled_answer() {
+    // still pending, budget not yet exhausted → keep waiting.
+    assert!(should_keep_waiting("pending", 0, 300_000));
+    assert!(should_keep_waiting("pending", 299_999, 300_000));
+    // budget exhausted while pending → give up and report honestly.
+    assert!(!should_keep_waiting("pending", 300_000, 300_000));
+    assert!(!should_keep_waiting("pending", 500_000, 300_000));
+    // any settled verdict returns immediately regardless of budget.
+    assert!(!should_keep_waiting("success", 0, u64::MAX));
+    assert!(!should_keep_waiting("failure", 0, u64::MAX));
 }
