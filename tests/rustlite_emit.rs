@@ -49,7 +49,7 @@ fn section_sizes_use_uleb_not_fixed_width() {
 // ---- validation: every module parses AND validates -----------------------------
 
 fn assert_valid(bytes: &[u8], label: &str) {
-    let validator = wasmparser::Validator::new();
+    let mut validator = wasmparser::Validator::new();
     validator
         .validate_all(bytes)
         .unwrap_or_else(|e| panic!("{label}: emitted module failed validation: {e}"));
@@ -326,54 +326,53 @@ fn eval_i64(bytes: &[u8], entry: usize, args: &[i64]) -> i64 {
                 let a = vm.stack.pop().unwrap();
                 vm.stack.push((a == 0) as i64);
             }
+            // br_if (exit when cond false) and br (restart). our emitted
+            // loops are flat — depth is always 0 — so both branches resolve
+            // by scanning for the enclosing loop's markers. nested blocks
+            // would need a real control stack; that is L3's job, not this
+            // harness's.
             0x0d | 0x0c => {
-                let depth = vm.code[vm.ip];
+                let _depth = vm.code[vm.ip];
                 vm.ip += 1;
-                let taken = op == 0x0d && vm.stack.pop().unwrap() != 0;
-                if taken || op == 0x0c {
-                    // branch to enclosing control frame of given depth.
-                    // our emitted loops are flat: br_if 0 exits the loop,
-                    // br 0 restarts it. find the matching loop/end markers
-                    // by scanning — adequate for the shapes we emit.
+                if op == 0x0c {
+                    // unconditional: restart at the loop opener just behind us
+                    let mut q = vm.ip;
+                    let mut nesting = 0usize;
+                    loop {
+                        q -= 1;
+                        match vm.code[q] {
+                            0x03 => {
+                                if nesting == 0 {
+                                    break;
+                                }
+                                nesting -= 1;
+                            }
+                            0x0b => nesting += 1,
+                            _ => {}
+                        }
+                    }
+                    vm.ip = q + 1; // skip the loop opcode itself
+                } else {
+                    let taken = vm.stack.pop().unwrap() != 0;
                     if taken {
-                        // exit loop: jump past matching end
-                        let mut depth_left = depth as usize;
+                        // exit: jump past this loop's matching end
                         let mut q = vm.ip;
-                        let mut loops = 0usize;
+                        let mut nesting = 0usize;
                         while q < vm.code.len() {
                             match vm.code[q] {
-                                0x03 => loops += 1,
+                                0x03 => nesting += 1,
                                 0x0b => {
-                                    if loops == 0 {
+                                    if nesting == 0 {
                                         break;
                                     }
-                                    loops -= 1;
+                                    nesting -= 1;
                                 }
                                 _ => {}
                             }
                             q += 1;
                         }
-                        vm.ip = q + 1;
-                    } else {
-                        // restart: scan back to the loop opener
-                        let mut loops = depth_left;
-                        let mut q = vm.ip;
-                        loop {
-                            q -= 1;
-                            match vm.code[q] {
-                                0x03 => {
-                                    if loops == 0 {
-                                        break;
-                                    }
-                                    loops -= 1;
-                                }
-                                0x0b => loops += 1,
-                                _ => {}
-                            }
-                        }
-                        vm.ip = q + 1;
+                        vm.ip = q + 1; // past `end`
                     }
-                    let _ = &mut depth_left;
                 }
             }
             0x0b | 0x0f => {
