@@ -5,6 +5,7 @@
 //! each is independently verifiable before the next exists.
 
 pub mod manifest;
+pub mod runtime;
 pub mod rustlite;
 pub mod wasm;
 
