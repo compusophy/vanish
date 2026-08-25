@@ -16,6 +16,10 @@ serde_json = "1"
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 
+# cartridge substrate: emitted modules are round-trip validated in tests.
+# default features pull std+component-model; the validator only needs core.
+wasmparser = { version = "0.258", default-features = false, features = ["std", "validate"] }
+
 [dependencies.web-sys]
 version = "0.3"
 features = [
