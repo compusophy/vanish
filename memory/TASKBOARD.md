@@ -159,8 +159,10 @@ taskboard) asked for four things. all four are resolved:
       awaits; (3) per-file delete failures collected into
       ReconcileReport.failed instead of aborting, surfaced in both the boot
       note and sync_repo output; a failed PASS still releases the claim so
-      the next Configure retries. LIVE VERIFICATION OWED: reload the app,
-      expect exactly ONE "⇅ tree reconciled" note and NO red reconcile error.
+      the next Configure retries. LANDED via PR #10 (squash c02339f),
+      gates green — the deploy gate ran tests/boot_reconcile.rs natively
+      and passed. LIVE VERIFICATION OWED: reload the app, expect exactly
+      ONE "⇅ tree reconciled" note and NO red reconcile error.
 
 - [x] **UNBLOCK ALL COMMITS — superseded by agent/fix-red-landing-and-self-config**.
       the earlier landing on agent/ci-gate-and-loop-survival (0582489) went

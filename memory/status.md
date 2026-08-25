@@ -42,9 +42,14 @@ named memory/TASKBOARD.md (a file both passes wanted to drop).
 - new suite tests/boot_reconcile.rs: behavioral pins over ReconcileReport
   plus source-level grep guards against reintroducing check-then-set
   across awaits, the `?` propagation, and a non-timer retry sleep.
+- LANDED AND VERIFIED: PR #10 merged (squash c02339f), both gates success
+  — meaning the deploy gate RAN tests/boot_reconcile.rs natively and it
+  passed, closing the "never commit uncompiled tests" risk. remaining:
+  the human-side live check (reload → exactly one ⇅ note, no error).
 
-honest limits: no local compiler here, so compile-proof arrives with the
-deploy; live verification owed (reload → exactly one ⇅ note, no error).
+honest limits during the run: no local compiler here, so compile-proof
+arrived with the deploy rather than before it; noted so future runs keep
+budgeting for that lag instead of pretending otherwise.
 
 ## landed this run (pr_wait — the polling spam is dead; PR #6 merged, squash ff1ad44)
 
