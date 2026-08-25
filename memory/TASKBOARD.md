@@ -104,6 +104,22 @@ taskboard) asked for four things. all four are resolved:
 
 ## open work
 
+- [x] **e2e/preview gate LANDED (PR #12 merged, da6111d)** — STACKED_PRS_PLAN
+      §4 items 4–5 done. .github/workflows/e2e.yml resolves vercel's preview
+      of the PR head sha and ci/e2e.mjs asserts the app BOOTS (#status leaves
+      "booting…" = Event::Ready); check lands where deployment_state reads,
+      so merge_pr refuses until booted-green. check_deployment now surfaces
+      preview_url. system prompt documents green-means-booted. guards in
+      tests/ci_gate.rs. LIVE VERIFICATION OWED: this pr itself passed the new
+      gate (dogfooded green), but a deliberately-broken pr (blank page) has
+      not yet been watched going red — next time an e2e failure appears,
+      record here that the refusal fired.
+- [ ] **cartridge substrate** — docs/CARTRIDGE_PLAN.md is the design; §11 is
+      the build order. item 1–2 next: L1 manifest struct + validation, then
+      rustlite lexer/parser + golden tests. all pure Rust, natively testable.
+      strategic context: owner wants composable hot-swappable cognitive
+      modules (actor model), NOT a localharness clone; opcode-model horizon
+      gated on corpus capture (plan §9).
 - [x] **path-claim registry LANDED (agent/path-claim-registry)** —
       STACKED_PRS_PLAN §4 item 3 (§2 C1): pure ClaimRegistry in
       src/agent/claims.rs (ttl 30min, saturating expiry), thread_local
@@ -121,13 +137,7 @@ taskboard) asked for four things. all four are resolved:
       warning; git strategy (per-conversation agent/* branches) already
       landed via branch_for_conversation. re-read docs/MULTIAGENT_PLAN.md
       phases 2–3 before building.
-- [ ] **e2e workflow + preview deploys (STACKED_PRS_PLAN §4 items 4–5 /
-      §3 P1–P3)**: .github/workflows/e2e.yml driving playwright against a
-      vercel PREVIEW deployment (caveat: deployment protection may wall
-      previews behind auth — relax for previews or use a bypass token,
-      else nothing can test against them); e2e as required check on main;
-      system-prompt documentation of the merge discipline AFTER the tools.
-      this is what turns "deploy to production" into "promote-on-green".
+- [x] **e2e workflow + preview deploys — DONE, PR #12 (see open work top)**.
 - [x] **pr_wait LANDED (PR #6 merged, squash ff1ad44)** — pr_status polling
       loops (8–10 identical calls per merge) flooded conversations; the user
       called it out explicitly. NEVER poll pr_status in a loop again: call

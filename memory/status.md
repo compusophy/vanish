@@ -1,5 +1,62 @@
 # vanish run status — persistent context for the next run
 
+## landed this run (e2e/preview gate + cartridge foundation, PR #12 merged da6111d)
+
+user: "lets improve!", then steered hard: "we don't just want to do the same
+thing as wethem [localharness]… wasm cartridge modules with universal
+computing virtualized for hot swapping modules… something abstract that
+digests in like a composable actor model of computation… raise temperature
+majorly — you are trained on exactly stuff that exists, not stuff that
+doesn't exist yet, so we must cutting-edge COMBINE stuff that exists to make
+something truly new — TRULY USEFUL TO HUMANITY."
+
+what landed on agent/cartridge-foundation-and-e2e (PR #12, squash da6111d,
+all checks green incl. the new e2e gate dogfooding on its own merge):
+
+- **e2e/preview gate** (.github/workflows/e2e.yml + ci/e2e.mjs,
+  STACKED_PRS_PLAN §4 items 4–5): on pull_request, resolve vercel's preview
+  deployment OF THE PR HEAD SHA, drive playwright at it, assert #status
+  leaves "booting…" (= worker announced Event::Ready). check lands on the
+  head where deployment_state already reads → merge_pr's existing gate now
+  refuses until the app demonstrably BOOTS. production is promote-on-booted-
+  green, closing the last compile-only gap. deployment protection gets its
+  own diagnosis so an auth interstitial is never misread as a broken app.
+- **check_deployment surfaces preview_url** (tools.rs): agents see their own
+  work running pre-merge.
+- **system prompt** documents green-means-booted promotion discipline.
+- **tests/ci_gate.rs +2 guards**: workflow must gate on head.sha and run the
+  behavioral smoke; smoke must keep boot assertion + protection diagnosis.
+- **docs/CARTRIDGE_PLAN.md**: THE STRATEGIC DOC for the owner's vision.
+  synthesis of three verified sources: tempo-x402's shipped cartridge
+  system (CartridgeKind::Cognitive = hot-swappable brain modules; ABI v2
+  added call() so cartridges compose — composition was worth a version
+  bump; raw extern "C" host surface, zero deps, no_std guests), localharness's
+  rustlite (Rust-subset → wasm compiler, pure Rust, runs where cargo can't),
+  and rustc-on-wasm research (bjorn3 got full rustc running under wasmer;
+  rubrc exists; the LINKER is the hard edge everywhere). the plan: L1 ABI →
+  L2 rustlite-for-vanish (emit wasm bytes directly, NO LINKING STEP — this
+  is the whole trick) → L3 interpreter-in-wasm (fuel-bounded) → L4 ports/
+  requires wiring → L5 actor orchestrator with kv-backed state (state-not-
+  in-memory is what makes hot-swap safe). build order §11, each step
+  independently verifiable. §9 records the opcode-model horizon: collect
+  prompt→opcode traces from every successful cartridge build FIRST, then
+  fine-tune against verified traces — the runtime IS the reward model.
+
+research facts worth keeping (verified against sources, not memory): full
+rustc-in-browser is possible but heavy (hundreds of MB, linker fights);
+WAMR compiles to wasm32-unknown-unknown for hosting guest wasm without JIT;
+the right move is a language small enough that its COMPILER is trivially
+portable and emits final bytes directly.
+
+D10 note: .env.example showed as modified with byte-identical content to
+main — unknown-base-sha cache entries read as dirty. verified against the
+raw github blob before committing; sync_repo refreshed it afterward. the
+guard worked as designed.
+
+next buildable piece: CARTRIDGE_PLAN §11 item 1–2 (manifest struct +
+validation, then rustlite lexer/parser with golden tests) — pure Rust,
+testable natively, no network needed.
+
 > the agent has no memory between runs. this file is the memory.
 > update it at the end of every run. read it first thing every run.
 >
