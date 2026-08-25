@@ -40,17 +40,21 @@ fn lexes_comments_and_rejects_unknown_characters() {
 }
 
 #[test]
-fn string_literals_lex_but_are_not_expressions() {
-    // strings exist for ONE purpose — naming the extern ABI — so the lexer
-    // accepts them and the parser refuses them anywhere a value is wanted,
-    // naming the boundary and the workaround.
+fn string_literals_lex_and_parse_to_str_expressions() {
+    // a literal is an expression (its value: the packed (ptr, len) of its
+    // bytes — typed i64 by the checker, laid out by the emitter).
     let toks = lex("let s = \"hello\";").unwrap();
     assert!(toks.contains(&Tok::Str("hello".into())), "{toks:?}");
-    let err = parse("fn f() -> i32 { let s: i32 = \"hello\"; return s; }").unwrap_err();
-    assert!(
-        err.msg.contains("string literal") && err.msg.contains("not an expression"),
-        "{err:?}"
+    let fns = parse("fn f() -> i64 { return \"hello\"; }").unwrap().fns;
+    assert_eq!(
+        fns[0].body.stmts[0],
+        Stmt::Return(Some(Expr::StrLit("hello".into())))
     );
+    let fns = parse("fn f() -> i32 { return unpack_len(\"\"); }").unwrap().fns;
+    let Stmt::Return(Some(Expr::Call { args, .. })) = &fns[0].body.stmts[0] else {
+        panic!("expected a call");
+    };
+    assert_eq!(args[0], Expr::StrLit(String::new()), "the empty string is a literal too");
     // no escapes, no unterminated strings — both named.
     let err = lex("\"a\\n\"").unwrap_err();
     assert!(err.msg.contains("escape"), "{err:?}");

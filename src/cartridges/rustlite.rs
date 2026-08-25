@@ -12,7 +12,9 @@
 //! (`abi.rs`); `pub fn` exports a function by name. memory and packed-
 //! result handling go through the intrinsics in `wasm.rs` (load_u8,
 //! store_u8, load_i32, store_i32, memory_size, pack, unpack_ptr,
-//! unpack_len) — they parse as ordinary calls and lower inline.
+//! unpack_len, data_end) — they parse as ordinary calls and lower inline.
+//! a string literal is an i64 expression: the packed (ptr, len) of its
+//! bytes, placed in the module's data segment by the emitter.
 
 /// the closed type set. deliberately tiny: each variant maps to exactly one
 /// wasm valtype, which is what makes type checking trivial and codegen
@@ -71,9 +73,9 @@ pub enum Tok {
     /// integer literal (i64-valued; small enough for any cartridge constant)
     Int(i64),
     Float(f64),
-    /// string literal. v1 accepts these in exactly ONE position — the ABI
-    /// name of an `extern "C"` block. as an expression they are refused by
-    /// the parser: rustlite has no string type and no data segments yet.
+    /// string literal: the ABI name of an `extern "C"` block, or an
+    /// expression whose value is the packed (ptr, len) of its bytes in the
+    /// module's data segment (see Expr::StrLit).
     Str(String),
     Kw(&'static str),
     // punctuation / operators
@@ -334,6 +336,11 @@ pub enum Expr {
     FloatLit(f64),
     BoolLit(bool),
     Var(String),
+    /// a string literal. its VALUE is an i64: the packed (ptr, len) of the
+    /// bytes in the module's data segment — the ABI's own representation
+    /// of a string — so `unpack_ptr("inc")` / `unpack_len("inc")` feed any
+    /// host call directly. no string type, no new intrinsics: one node.
+    StrLit(String),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call { callee: String, args: Vec<Expr> },
@@ -708,13 +715,7 @@ impl Parser {
                 self.expect(&Tok::RParen)?;
                 Ok(e)
             }
-            Some(Tok::Str(s)) => Err(ParseError {
-                msg: format!(
-                    "string literal \"{s}\" is not an expression — rustlite v1 has no \
-                     string type; strings appear only as the extern \"C\" ABI name. \
-                     pass text through guest memory (store_u8) until data segments land"
-                ),
-            }),
+            Some(Tok::Str(s)) => Ok(Expr::StrLit(s)),
             other => Err(ParseError {
                 msg: format!("expected an expression, found {other:?}"),
             }),

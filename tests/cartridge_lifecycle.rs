@@ -59,6 +59,40 @@ fn store_get_round_trips_the_value_through_guest_memory() {
     assert_eq!(cart.handle(b"missing", 10_000).unwrap(), b"");
 }
 
+#[test]
+fn string_literals_name_keys_topics_and_answers_through_the_abi() {
+    // the language gap that made cognitive modules unwritable: a key, a
+    // topic, and a whole response as literals. the allocator starts its
+    // heap at data_end(), so message buffers never overwrite the segment.
+    let src = format!(
+        r#"
+        extern "C" {{
+            fn store_set(k_ptr: i32, k_len: i32, v_ptr: i32, v_len: i32) -> i32;
+            fn emit(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32);
+        }}
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{
+            return store_set(unpack_ptr("config"), unpack_len("config"), p, n);
+        }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            let scratch: i32 = cart_alloc(64);
+            emit(unpack_ptr("reply"), unpack_len("reply"), p, n);
+            return "static answer";
+        }}
+    "#
+    );
+    let mut cart = load(&src, FakeHost::default());
+    cart.init(b"v1", 10_000).unwrap();
+    assert_eq!(cart.host().kv.get(&b"config"[..]), Some(&b"v1".to_vec()));
+    assert_eq!(cart.handle(b"q", 10_000).unwrap(), b"static answer", "a literal IS a packed response");
+    assert_eq!(cart.host().emitted, vec![(b"reply".to_vec(), b"q".to_vec())]);
+    // more messages, more allocation — the literals are untouched.
+    for _ in 0..20 {
+        assert_eq!(cart.handle(b"again", 10_000).unwrap(), b"static answer");
+    }
+    assert_eq!(cart.host().emitted.last().unwrap().0, b"reply");
+}
+
 // ---- lifecycle rules ------------------------------------------------------------------
 
 #[test]

@@ -2,10 +2,10 @@
 //! wasm dialect `wasm.rs` emits (CARTRIDGE_PLAN §6 option 2).
 //!
 //! scope discipline: we interpret OUR frozen emission set — no simd, no
-//! threads, no reference types, no tables, no globals, no data segments, no
-//! memory growth. ONE fixed linear memory, function imports from the L1 ABI
-//! module only, and named exports — exactly what a cartridge needs to
-//! receive a message and answer it. that is deliberate: a hostile cartridge
+//! threads, no reference types, no tables, no globals, no memory growth.
+//! ONE fixed linear memory, ACTIVE data segments into it (string literals),
+//! function imports from the L1 ABI module only, and named exports —
+//! exactly what a cartridge needs to receive a message and answer it. that is deliberate: a hostile cartridge
 //! can only be as expressive as rustlite, so the interpreter stays small
 //! enough to audit. if third-party full-rustc cartridges ever need hosting,
 //! WAMR swaps in behind the same interface.
@@ -384,6 +384,14 @@ pub struct Export {
     pub index: u32,
 }
 
+/// one active data segment: `bytes` copied to `offset` in memory 0 at
+/// instantiation. decode proves it fits the declared memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSegment {
+    pub offset: u32,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Module {
     pub types: Vec<FuncType>,
@@ -395,13 +403,25 @@ pub struct Module {
     /// modules declare min == max; growth does not exist in the dialect.
     pub memory_pages: Option<u32>,
     pub exports: Vec<Export>,
+    pub data: Vec<DataSegment>,
 }
 
 impl Module {
-    /// a fresh zeroed memory of the declared size (empty when none is
-    /// declared — every load/store then traps out of bounds).
+    /// a fresh memory of the declared size — zeroed, then every data
+    /// segment written in. empty when no memory is declared (every
+    /// load/store then traps out of bounds). a restart or swap gets its
+    /// literals back exactly because this runs per instantiation.
     pub fn initial_memory(&self) -> Vec<u8> {
-        vec![0u8; self.memory_pages.unwrap_or(0) as usize * abi::PAGE_BYTES]
+        let mut mem = vec![0u8; self.memory_pages.unwrap_or(0) as usize * abi::PAGE_BYTES];
+        for seg in &self.data {
+            let start = seg.offset as usize;
+            // decode validated the bounds; a hand-built Module that lies
+            // gets its segment skipped rather than a panic.
+            if let Some(dst) = mem.get_mut(start..start + seg.bytes.len()) {
+                dst.copy_from_slice(&seg.bytes);
+            }
+        }
+        mem
     }
 
     /// the wasm function index exported under `name`, if any.
@@ -609,19 +629,47 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
                     m.exports.push(Export { name, kind, index });
                 }
             }
+            11 => {
+                let n = r.uleb()?;
+                for _ in 0..n {
+                    let mode = r.byte()?;
+                    if mode != 0x00 {
+                        return r.err(format!(
+                            "data segment mode {mode:#04x} unsupported — the dialect emits \
+                             active segments into memory 0 only"
+                        ));
+                    }
+                    // the offset expression: exactly `i32.const N; end`.
+                    if r.byte()? != 0x41 {
+                        return r.err("data segment offset must be an i32.const");
+                    }
+                    let offset = r.sleb()?;
+                    let offset = u32::try_from(offset)
+                        .map_err(|_| DecodeError {
+                            offset: r.pos,
+                            msg: format!("data segment offset {offset} is not a valid address"),
+                        })?;
+                    if r.byte()? != 0x0b {
+                        return r.err("data segment offset expression must end after one const");
+                    }
+                    let len = r.uleb()? as usize;
+                    let bytes = r.bytes(len)?.to_vec();
+                    m.data.push(DataSegment { offset, bytes });
+                }
+            }
             0 => {
                 // custom section (names, producers, …): skipped untouched.
                 r.bytes(size)?;
                 continue;
             }
             other => {
-                // NOT skipped: a data, table, global, start, or element
-                // section would change semantics we do not implement, and
-                // silently dropping it is exactly the D4 failure — the
-                // module would "load" and then behave unlike its bytes.
+                // NOT skipped: a table, global, start, or element section
+                // would change semantics we do not implement, and silently
+                // dropping it is exactly the D4 failure — the module would
+                // "load" and then behave unlike its bytes.
                 return r.err(format!(
                     "section id {other} is outside the dialect — no tables, globals, \
-                     start, elements, or data segments"
+                     start, or elements"
                 ));
             }
         }
@@ -675,6 +723,24 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             ));
         }
         m.funcs[i].type_idx = ti;
+    }
+
+    // data segments must land inside the declared memory. the spec would
+    // trap at instantiation; refusing at the door names the segment.
+    let mem_bytes = m.memory_pages.unwrap_or(0) as u64 * abi::PAGE_BYTES as u64;
+    for (i, seg) in m.data.iter().enumerate() {
+        let end = seg.offset as u64 + seg.bytes.len() as u64;
+        if m.memory_pages.is_none() || end > mem_bytes {
+            return r.err(format!(
+                "data segment {i} ({} bytes at {}) does not fit the {} memory",
+                seg.bytes.len(),
+                seg.offset,
+                match m.memory_pages {
+                    Some(p) => format!("{p}-page"),
+                    None => "absent".to_string(),
+                }
+            ));
+        }
     }
 
     // exports must name things that exist, exactly once each.

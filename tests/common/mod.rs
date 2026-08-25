@@ -87,11 +87,12 @@ pub fn compile(src: &str) -> Vec<u8> {
 }
 
 /// the bump allocator every test cartridge shares: the heap pointer lives
-/// at address 0 (zero on a fresh memory), the heap starts at 8.
+/// at address 0 (zero on a fresh memory), the heap starts past the string
+/// data segment (`data_end()`, DATA_BASE when there are no literals).
 pub const ALLOC: &str = r#"
     pub fn cart_alloc(size: i32) -> i32 {
         let hp: i32 = load_i32(0);
-        if hp == 0 { hp = 8; }
+        if hp == 0 { hp = data_end(); }
         store_i32(0, hp + size);
         return hp;
     }
@@ -174,16 +175,14 @@ pub fn flaky_src() -> String {
 }
 
 /// a cartridge that, on every message, emits that message on each of
-/// `topics` (spelled out byte by byte — rustlite has no string literals
-/// yet) and then echoes it back.
+/// `topics` (string literals — their bytes live in the data segment) and
+/// then echoes it back.
 pub fn emitter_src(topics: &[&str]) -> String {
     let mut body = String::new();
-    for (i, topic) in topics.iter().enumerate() {
-        body.push_str(&format!("let t{i}: i32 = cart_alloc({});\n", topic.len()));
-        for (j, b) in topic.bytes().enumerate() {
-            body.push_str(&format!("store_u8(t{i} + {j}, {b});\n"));
-        }
-        body.push_str(&format!("emit(t{i}, {}, p, n);\n", topic.len()));
+    for topic in topics {
+        body.push_str(&format!(
+            "emit(unpack_ptr(\"{topic}\"), unpack_len(\"{topic}\"), p, n);\n"
+        ));
     }
     format!(
         r#"

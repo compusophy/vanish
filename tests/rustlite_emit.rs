@@ -365,6 +365,40 @@ fn names_are_unique_and_intrinsics_are_reserved() {
 }
 
 #[test]
+fn string_literals_validate_and_land_in_one_interned_data_segment() {
+    let bytes = compile(r#"fn f() -> i64 { return "hello"; } fn g() -> i32 { return data_end(); }"#);
+    assert_valid(&bytes, "strings");
+    // types, functions, memory, exports (the memory is always exported
+    // when it exists), code, data — the data section trails code.
+    let mut p = 8usize;
+    let mut ids = Vec::new();
+    while p < bytes.len() {
+        let id = bytes[p];
+        p += 1;
+        let (size, consumed) = read_uleb(&bytes[p..]);
+        p += consumed + size as usize;
+        ids.push(id);
+    }
+    assert_eq!(ids, vec![1, 3, 5, 7, 10, 11]);
+    assert!(bytes.windows(5).any(|w| w == b"hello"), "the segment holds the bytes");
+
+    // interned: two uses of one literal → one copy in the segment.
+    let bytes = compile(r#"fn f() -> i64 { return "dup"; } fn g() -> i64 { return "dup"; }"#);
+    assert_valid(&bytes, "interned");
+    assert_eq!(bytes.windows(3).filter(|w| *w == b"dup").count(), 1);
+
+    // a literal is i64 whatever the context asks for.
+    let msg = refuse(r#"fn f() -> i32 { return "no"; }"#);
+    assert!(msg.contains("i64") && msg.contains("i32"), "{msg}");
+
+    // the whole blob must fit the guest memory — refused at compile time,
+    // naming the size, not at decode three layers away.
+    let big = "x".repeat(1_100_000);
+    let msg = refuse(&format!("fn f() -> i64 {{ return \"{big}\"; }}"));
+    assert!(msg.contains("does not fit"), "{msg}");
+}
+
+#[test]
 fn if_else_shapes_all_validate() {
     let src = r#"
         fn a(x: i64) -> i64 { if x > 0 { x = 1; } return x; }

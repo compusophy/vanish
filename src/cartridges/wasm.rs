@@ -23,10 +23,91 @@
 //! functions. a `call` to a defined function is therefore
 //! `externs.len() + position`; the runtime applies the identical rule when
 //! it splits calls between host dispatch and frames.
+//!
+//! STRINGS: every string literal in the program is interned (sorted, so
+//! the layout is deterministic) into ONE active data segment at
+//! DATA_BASE; a literal expression lowers to `i64.const pack(addr, len)`.
+//! `data_end()` lowers to the first byte past the segment (8-aligned), so
+//! a guest allocator knows where its heap may begin without a linker.
 
 use super::abi::{self, GuestFn, HostFn};
 use super::rustlite::{BinOp, Block, Expr, FnDecl, FnSig, Program, Stmt, Ty, UnOp};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// where the data segment starts in guest memory. bytes 0..16 are left to
+/// the guest (the test cartridges keep their heap pointer at 0).
+pub const DATA_BASE: u32 = 16;
+
+/// the interned string literals of one program and where they live.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layout {
+    /// literal → absolute address of its first byte.
+    pub offsets: BTreeMap<String, u32>,
+    /// the segment's bytes, in `offsets` order.
+    pub blob: Vec<u8>,
+    /// first byte past the segment, rounded up to 8 — what `data_end()`
+    /// answers. DATA_BASE when there are no literals.
+    pub end: u32,
+}
+
+impl Layout {
+    pub fn of(program: &Program) -> Layout {
+        let mut lits: BTreeSet<&str> = BTreeSet::new();
+        fn in_expr<'a>(e: &'a Expr, out: &mut BTreeSet<&'a str>) {
+            match e {
+                Expr::StrLit(s) => {
+                    out.insert(s.as_str());
+                }
+                Expr::Unary(_, inner) => in_expr(inner, out),
+                Expr::Binary(_, l, r) => {
+                    in_expr(l, out);
+                    in_expr(r, out);
+                }
+                Expr::Call { args, .. } => args.iter().for_each(|a| in_expr(a, out)),
+                _ => {}
+            }
+        }
+        fn in_block<'a>(b: &'a Block, out: &mut BTreeSet<&'a str>) {
+            for s in &b.stmts {
+                match s {
+                    Stmt::Let { init, .. } => in_expr(init, out),
+                    Stmt::Assign { value, .. } => in_expr(value, out),
+                    Stmt::While { cond, body } => {
+                        in_expr(cond, out);
+                        in_block(body, out);
+                    }
+                    Stmt::If { cond, then, els } => {
+                        in_expr(cond, out);
+                        in_block(then, out);
+                        if let Some(els) = els {
+                            in_block(els, out);
+                        }
+                    }
+                    Stmt::Return(Some(e)) | Stmt::Expr(e) => in_expr(e, out),
+                    Stmt::Return(None) => {}
+                }
+            }
+        }
+        for f in &program.fns {
+            in_block(&f.body, &mut lits);
+        }
+        let mut layout = Layout::default();
+        for s in lits {
+            layout
+                .offsets
+                .insert(s.to_string(), DATA_BASE + layout.blob.len() as u32);
+            layout.blob.extend_from_slice(s.as_bytes());
+        }
+        layout.end = (DATA_BASE + layout.blob.len() as u32).div_ceil(8) * 8;
+        layout
+    }
+
+    /// the packed value a literal expression evaluates to.
+    pub fn packed(&self, s: &str) -> i64 {
+        let ptr = self.offsets.get(s).copied().unwrap_or(DATA_BASE);
+        abi::pack(ptr, s.len() as u32)
+    }
+}
 
 // ---- LEB128 ---------------------------------------------------------------
 
@@ -119,10 +200,13 @@ pub enum Intrinsic {
     UnpackPtr,
     /// `unpack_len(v: i64) -> i32`
     UnpackLen,
+    /// `data_end() -> i32` — first byte past the string data segment
+    /// (8-aligned): where a guest allocator's heap may start.
+    DataEnd,
 }
 
 impl Intrinsic {
-    pub const ALL: [Intrinsic; 8] = [
+    pub const ALL: [Intrinsic; 9] = [
         Intrinsic::LoadU8,
         Intrinsic::StoreU8,
         Intrinsic::LoadI32,
@@ -131,6 +215,7 @@ impl Intrinsic {
         Intrinsic::Pack,
         Intrinsic::UnpackPtr,
         Intrinsic::UnpackLen,
+        Intrinsic::DataEnd,
     ];
 
     pub fn name(self) -> &'static str {
@@ -143,6 +228,7 @@ impl Intrinsic {
             Intrinsic::Pack => "pack",
             Intrinsic::UnpackPtr => "unpack_ptr",
             Intrinsic::UnpackLen => "unpack_len",
+            Intrinsic::DataEnd => "data_end",
         }
     }
 
@@ -160,10 +246,12 @@ impl Intrinsic {
             Intrinsic::Pack => (&[Ty::I32, Ty::I32], Some(Ty::I64)),
             Intrinsic::UnpackPtr => (&[Ty::I64], Some(Ty::I32)),
             Intrinsic::UnpackLen => (&[Ty::I64], Some(Ty::I32)),
+            Intrinsic::DataEnd => (&[], Some(Ty::I32)),
         }
     }
 
     /// does lowering this intrinsic require a linear memory to exist?
+    /// (data_end is only meaningful with a memory to lay data out in.)
     pub fn touches_memory(self) -> bool {
         !matches!(
             self,
@@ -564,6 +652,8 @@ fn check_expr(
         Expr::IntLit(_) => Ok(literal_ty(false, hint)),
         Expr::FloatLit(_) => Ok(literal_ty(true, hint)),
         Expr::BoolLit(_) => Ok(Ty::Bool),
+        // a string is its packed (ptr, len): always i64, whatever the hint.
+        Expr::StrLit(_) => Ok(Ty::I64),
         Expr::Var(name) => scope
             .ty_of(name)
             .ok_or_else(|| err(format!("use of undeclared '{name}'"))),
@@ -629,6 +719,8 @@ fn uses_memory(program: &Program) -> bool {
                 Intrinsic::from_name(callee).is_some_and(|i| i.touches_memory())
                     || args.iter().any(in_expr)
             }
+            // a literal lives in the data segment, which needs a memory.
+            Expr::StrLit(_) => true,
             Expr::Unary(_, inner) => in_expr(inner),
             Expr::Binary(_, l, r) => in_expr(l) || in_expr(r),
             _ => false,
@@ -660,6 +752,19 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, TypeError> {
     check_program(program)?;
     for f in &program.fns {
         check_fn(f, program)?;
+    }
+
+    let layout = Layout::of(program);
+    let memory_bytes = abi::GUEST_MEMORY_PAGES as usize * abi::PAGE_BYTES;
+    if layout.end as usize > memory_bytes {
+        return Err(TypeError {
+            fn_name: String::new(),
+            msg: format!(
+                "string literals total {} bytes, which does not fit the {memory_bytes}-byte \
+                 guest memory",
+                layout.blob.len()
+            ),
+        });
     }
 
     let exported: Vec<&FnDecl> = program.fns.iter().filter(|f| f.is_pub).collect();
@@ -758,11 +863,24 @@ pub fn emit_module(program: &Program) -> Result<Vec<u8>, TypeError> {
     let mut s = Vec::new();
     uleb(program.fns.len() as u64, &mut s);
     for f in &program.fns {
-        let body = emit_function(f, program);
+        let body = emit_function(f, program, &layout);
         uleb(body.len() as u64, &mut s);
         s.extend_from_slice(&body);
     }
     write_section(&mut m, 10, &s);
+
+    // section 11: data — every literal, one active segment at DATA_BASE
+    if !layout.blob.is_empty() {
+        let mut s = Vec::new();
+        uleb(1, &mut s);
+        s.push(0x00); // active segment in memory 0
+        s.push(0x41); // i32.const DATA_BASE
+        sleb(i64::from(DATA_BASE), &mut s);
+        s.push(0x0b); // end (of the offset expression)
+        uleb(layout.blob.len() as u64, &mut s);
+        s.extend_from_slice(&layout.blob);
+        write_section(&mut m, 11, &s);
+    }
 
     Ok(m)
 }
@@ -779,7 +897,7 @@ fn write_name(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn emit_function(f: &FnDecl, program: &Program) -> Vec<u8> {
+fn emit_function(f: &FnDecl, program: &Program, layout: &Layout) -> Vec<u8> {
     // rebuild the same scope walk the checker did — deterministic, so the
     // indices match exactly.
     let mut scope = FnScope::new(&f.sig.params);
@@ -838,7 +956,7 @@ fn emit_function(f: &FnDecl, program: &Program) -> Vec<u8> {
     }
 
     for stmt in &f.body.stmts {
-        emit_stmt(stmt, &scope, program, ret_hint, &mut body);
+        emit_stmt(stmt, &scope, program, layout, ret_hint, &mut body);
     }
     // a value-returning body whose last statement is an if/else (both arms
     // return — check_fn proved it) leaves the validator looking at an empty
@@ -853,11 +971,18 @@ fn emit_function(f: &FnDecl, program: &Program) -> Vec<u8> {
     body
 }
 
-fn emit_stmt(s: &Stmt, scope: &FnScope, program: &Program, ret_hint: Ty, out: &mut Vec<u8>) {
+fn emit_stmt(
+    s: &Stmt,
+    scope: &FnScope,
+    program: &Program,
+    layout: &Layout,
+    ret_hint: Ty,
+    out: &mut Vec<u8>,
+) {
     match s {
         Stmt::Let { name, ty, init } => {
             // hint = the declaration's own type (checker proved agreement).
-            emit_expr(init, scope, program, out, *ty);
+            emit_expr(init, scope, program, layout, out, *ty);
             if let Some(&i) = scope.indexes.get(name) {
                 out.push(0x21); // local.set consumes the value: siblings see
                 uleb(u64::from(i), out); // a balanced stack.
@@ -865,7 +990,7 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, program: &Program, ret_hint: Ty, out: &m
         }
         Stmt::Assign { name, value } => {
             let hint = scope.ty_of(name).unwrap_or(Ty::I64);
-            emit_expr(value, scope, program, out, hint);
+            emit_expr(value, scope, program, layout, out, hint);
             if let Some(&i) = scope.indexes.get(name) {
                 out.push(0x21); // local.set
                 uleb(u64::from(i), out);
@@ -882,12 +1007,12 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, program: &Program, ret_hint: Ty, out: &m
             out.push(0x40);
             out.push(0x03); // loop $cont
             out.push(0x40);
-            emit_expr(cond, scope, program, out, Ty::Bool);
+            emit_expr(cond, scope, program, layout, out, Ty::Bool);
             out.push(0x45); // i32.eqz — bools are i32 at runtime
             out.push(0x0d);
             out.push(0x01); // br_if 1 → leaves the BLOCK when cond is false
             for st in &body.stmts {
-                emit_stmt(st, scope, program, ret_hint, out);
+                emit_stmt(st, scope, program, layout, ret_hint, out);
             }
             out.push(0x0c);
             out.push(0x00); // br 0 → back to loop header (continue)
@@ -898,28 +1023,28 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, program: &Program, ret_hint: Ty, out: &m
             // cond; if (void) { then } [else { els }] end — the spec's own
             // if/else frame. arms are statements, so the blocktype is void
             // and neither arm leaves a value.
-            emit_expr(cond, scope, program, out, Ty::Bool);
+            emit_expr(cond, scope, program, layout, out, Ty::Bool);
             out.push(0x04); // if
             out.push(0x40); // blocktype: void
             for st in &then.stmts {
-                emit_stmt(st, scope, program, ret_hint, out);
+                emit_stmt(st, scope, program, layout, ret_hint, out);
             }
             if let Some(els) = els {
                 out.push(0x05); // else
                 for st in &els.stmts {
-                    emit_stmt(st, scope, program, ret_hint, out);
+                    emit_stmt(st, scope, program, layout, ret_hint, out);
                 }
             }
             out.push(0x0b); // end if
         }
         Stmt::Return(e) => {
             if let Some(e) = e {
-                emit_expr(e, scope, program, out, ret_hint);
+                emit_expr(e, scope, program, layout, out, ret_hint);
             }
             out.push(0x0f); // return
         }
         Stmt::Expr(e) => {
-            emit_expr(e, scope, program, out, Ty::I64);
+            emit_expr(e, scope, program, layout, out, Ty::I64);
             // expression statements must not leave values on the stack;
             // whatever the expression yields is dropped. void calls yield
             // nothing and need no drop.
@@ -936,8 +1061,19 @@ fn emit_stmt(s: &Stmt, scope: &FnScope, program: &Program, ret_hint: Ty, out: &m
 /// via literal_ty(hint), binary operands resolved l-first with the partner
 /// borrowing, call args hinted by declared param types. divergence between
 /// what was checked and what is written would be a type lie in the bytes.
-fn emit_expr(e: &Expr, scope: &FnScope, program: &Program, out: &mut Vec<u8>, hint: Ty) {
+fn emit_expr(
+    e: &Expr,
+    scope: &FnScope,
+    program: &Program,
+    layout: &Layout,
+    out: &mut Vec<u8>,
+    hint: Ty,
+) {
     match e {
+        Expr::StrLit(s) => {
+            out.push(0x42); // i64.const — the packed (ptr, len)
+            sleb(layout.packed(s), out);
+        }
         Expr::IntLit(v) => {
             if literal_ty(false, hint) == Ty::I32 {
                 out.push(0x41); // i32.const
@@ -968,7 +1104,7 @@ fn emit_expr(e: &Expr, scope: &FnScope, program: &Program, out: &mut Vec<u8>, hi
         Expr::Unary(UnOp::Neg, inner) => {
             // inner's type under the SAME hint the checker used.
             let t = expr_ty(inner, scope, program, hint);
-            emit_expr(inner, scope, program, out, hint);
+            emit_expr(inner, scope, program, layout, out, hint);
             // negation as multiply-by-minus-one across all widths:
             // i32 ×(-1)=0x6c, i64=0x7e, f32=0x94, f64=0xa2.
             match t {
@@ -999,8 +1135,8 @@ fn emit_expr(e: &Expr, scope: &FnScope, program: &Program, out: &mut Vec<u8>, hi
             // literal borrows its partner; otherwise left's type wins),
             // then emit both sides with it as their hint.
             let ty = binary_operand_type(l, r, scope, program, hint);
-            emit_expr(l, scope, program, out, ty);
-            emit_expr(r, scope, program, out, ty);
+            emit_expr(l, scope, program, layout, out, ty);
+            emit_expr(r, scope, program, layout, out, ty);
             emit_binop(*op, ty, out);
         }
         Expr::Call { callee, args } => {
@@ -1010,14 +1146,14 @@ fn emit_expr(e: &Expr, scope: &FnScope, program: &Program, out: &mut Vec<u8>, hi
                 return; // checker already refused unknown callees
             };
             if let Callee::Intrinsic(i) = target {
-                emit_intrinsic(i, args, scope, program, out);
+                emit_intrinsic(i, args, scope, program, layout, out);
                 return;
             }
             let Some((param_tys, _)) = sig_of(program, callee) else {
                 return;
             };
             for (a, pt) in args.iter().zip(param_tys.iter()) {
-                emit_expr(a, scope, program, out, *pt);
+                emit_expr(a, scope, program, layout, out, *pt);
             }
             if let Some(idx) = call_index(program, target) {
                 out.push(0x10); // call
@@ -1035,12 +1171,13 @@ fn emit_intrinsic(
     args: &[Expr],
     scope: &FnScope,
     program: &Program,
+    layout: &Layout,
     out: &mut Vec<u8>,
 ) {
     let (pts, _) = i.signature();
     let arg = |k: usize, out: &mut Vec<u8>| {
         if let (Some(a), Some(pt)) = (args.get(k), pts.get(k)) {
-            emit_expr(a, scope, program, out, *pt);
+            emit_expr(a, scope, program, layout, out, *pt);
         }
     };
     match i {
@@ -1086,6 +1223,10 @@ fn emit_intrinsic(
             arg(0, out);
             out.push(0xa7); // i32.wrap_i64
         }
+        Intrinsic::DataEnd => {
+            out.push(0x41); // i32.const — resolved at emission, no linker
+            sleb(i64::from(layout.end), out);
+        }
     }
 }
 
@@ -1121,6 +1262,7 @@ fn expr_ty_opt(e: &Expr, scope: &FnScope, program: &Program, hint: Ty) -> Option
         Expr::IntLit(_) => Some(literal_ty(false, hint)),
         Expr::FloatLit(_) => Some(literal_ty(true, hint)),
         Expr::BoolLit(_) => Some(Ty::Bool),
+        Expr::StrLit(_) => Some(Ty::I64),
         Expr::Var(n) => Some(scope.ty_of(n).unwrap_or(Ty::I64)),
         Expr::Unary(_, inner) => Some(expr_ty(inner, scope, program, hint)),
         Expr::Binary(op, l, _) => {
