@@ -405,9 +405,12 @@ pub fn decode(bytes: &[u8]) -> Result<Module, DecodeError> {
             }
         }
         if r.pos != section_end {
+            // a decoder arm overran (or the section was skipped short);
+            // report the overrun magnitude without underflowing when the
+            // fuzz flips bytes inside a size field.
+            let overshoot = r.pos.saturating_sub(section_end);
             return r.err(format!(
-                "section {id} decoded {} bytes past its declared end",
-                r.pos - section_end
+                "section {id} decoded {overshoot} byte(s) off its declared end"
             ));
         }
     }

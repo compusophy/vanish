@@ -169,12 +169,12 @@ fn unknown_function_index_is_a_named_error() {
 
 #[test]
 fn type_confusion_on_the_stack_traps_named() {
-    // hostile module: local.get typed wrong is impossible from our emitter,
-    // but a hand-built module could push i64 where i32 is popped. decode it,
-    // run it, get InvalidStack — never a panic or a wrong answer.
-    let bytes = compile("fn f() -> i64 { return 1; }");
-    let mut m = decode(&bytes).expect("decode");
-    // splice the body to push an i64 const then eqz it (i32 op).
+    // hostile module: pushing i64 where the next op pops i32 is impossible
+    // from our emitter (the checker proves types before emission), but a
+    // hand-built module could do it. build the module struct directly,
+    // run it, get InvalidStack naming BOTH types — never a panic or a
+    // silently wrong answer. this is the §9 verifier property at runtime.
+    let mut m = Module_shim();
     m.funcs[0].code = vec![
         vanish::cartridges::runtime::Instr::I64Const(5),
         vanish::cartridges::runtime::Instr::I32Eqz,
@@ -182,7 +182,7 @@ fn type_confusion_on_the_stack_traps_named() {
     ];
     let err = invoke(&m, 0, &[], 1000).unwrap_err();
     assert!(
-        matches!(err, Trap::InvalidStack(ref msg) if msg.contains("i32")),
+        matches!(err, Trap::InvalidStack(ref msg) if msg.contains("i32") && msg.contains("i64")),
         "{err:?}"
     );
 }
