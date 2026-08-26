@@ -153,7 +153,9 @@
             the module that shapes every prompt before the model sees it, and
             digests every answer afterwards. it is a cartridge: rustlite
             source, compiled here, swapped between prompts without a reload.
-            its memory survives the swap.
+            its memory survives the swap. v1 changes nothing, v2 marks every
+            prompt with a visible prefix, and v3 gives the agent one line of
+            memory that outlives the transcript.
           </p>
           <label for="cfg-policy">rustlite source</label>
           <textarea id="cfg-policy" rows="12" spellcheck="false" placeholder="pub fn cart_handle(p: i32, n: i32) -> i64 { … }"></textarea>
@@ -166,6 +168,7 @@
           <div class="policy-actions">
             <button id="policy-load-v1" class="btn btn-quiet" title="the reference passthrough policy">load v1</button>
             <button id="policy-load-v2" class="btn btn-quiet" title="the reference policy that prefixes every prompt with [v2]">load v2</button>
+            <button id="policy-load-v3" class="btn btn-quiet" title="the standing note: one line the agent writes with CARRY: and gets back on every later prompt">load v3</button>
           </div>
           <button id="policy-swap" class="btn">hot-swap policy</button>
         </div>

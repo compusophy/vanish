@@ -7,6 +7,54 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (item 8d: a policy worth swapping to — agent/reasoning-v3-standing-note)
+
+ninth "keep going". 8c gave the agent a door; this run put something on the
+other side of it. v1 and v2 are demonstrations — one changes nothing, the
+other prefixes a marker so a swap is visible — so "swap your reasoning
+policy" was an offer with no answer to "to what?".
+
+**REASONING_V3, the standing note.** its claim is deliberately narrow and
+actually true: the transcript is trimmed at KEEP_MESSAGES and is
+per-conversation; a cartridge's kv is neither. so v3 gives the agent ONE
+line of memory that outlives both.
+
+- answer phase: the first `CARRY:` in the answer, to the end of THAT line,
+  becomes the note. no marker, no change. bare `CARRY:` clears it. capped
+  at STANDING_MAX (400) — uncapped, the note would grow every later prompt
+  for as long as the policy ran.
+- prompt phase: the note is prepended, and a protocol line is appended. the
+  module cannot edit the system prompt, so it teaches its own contract in
+  the only channel it has — the prompt it is already shaping. that is the
+  part worth remembering: a policy that needs the agent to cooperate has to
+  say so itself.
+
+it is also the first reference module that makes the language work rather
+than demonstrating it: `store_get` and the packed-i64 unpack path, a
+prompt assembled from three sources, and a byte search (`find`). rustlite
+has no way to be handed a rust constant, so CARRY_MARKER / STANDING_KEY /
+STANDING_MAX / STANDING_PROTOCOL are mirrors of literals inside the module
+— and an eval pins them, because nothing else would.
+
+7 new evals (23 in tests/cognitive_wiring.rs now), a "load v3" button, and
+the swap_cartridge tool description names it. gate green: 20 suites +
+clippy, plus the wasm32 check.
+
+**the honest limit, written into plan §12 rather than left implied**: v3 is
+verified to DO what it says, not to HELP. nothing in this substrate can yet
+judge whether a shaped prompt was better than the one it replaced. that is
+what item 9's corpus capture is for, and it is now the thing blocking every
+further claim about policy quality.
+
+process note: the module was prototyped in a throwaway `tests/v3_probe.rs`
+and iterated there (two real bugs — a line-end scan that reused its loop
+variable to stop and so threw the position away, and an over-greedy
+carry) before it became a crate constant. writing rustlite straight into a
+`const` and debugging through the eval suite would have been slower and
+noisier; the probe was deleted in the same commit that landed the module.
+
+next: item 9, corpus capture (prompt → rustlite → wasm → trace, persisted).
+it is the gate on every remaining claim about whether a policy helps.
 ## landed this run (ci: a diagnostic must not break what it observes — agent/ci-diagnostics-must-not-fail-the-gate)
 
 found the honest way: a pr went red with a GREEN gate. `verify` on the

@@ -344,6 +344,38 @@ reasons badly is not something the harness can catch, which is why the
 system prompt names this the sharpest tool the agent has and the easiest to
 misuse.
 
+**8d — a policy worth swapping TO (built 2026-08-26):** v1 and v2 are
+demonstrations. one changes nothing; the other prefixes a visible marker so
+a swap is observable. neither does anything the loop could not do without
+it, which made "swap your policy" an offer with no answer to "to what?".
+
+`REASONING_V3` is the answer, and it is deliberately the smallest thing
+that is genuinely NOT available otherwise. the transcript is trimmed at
+`KEEP_MESSAGES` and is per-conversation; a cartridge's kv is neither. so v3
+gives the agent ONE line of memory that outlives both:
+
+- on an answer, the first `CARRY:` in it — to the end of that line — becomes
+  the standing note. no marker, no change; `CARRY:` with nothing after it
+  clears it.
+- on a prompt, the note is prepended and a protocol line is appended. the
+  module cannot edit the system prompt, so it teaches its own contract in
+  the only channel it has: the prompt it is already shaping.
+
+it is also the first reference module to read its own memory back
+(`store_get`, and the packed-i64 unpack path), to assemble a prompt from
+three sources, and to search bytes — items 5's intrinsics and 7's language
+doing work rather than being demonstrated. the note is capped at
+`STANDING_MAX` bytes: uncapped, it would grow every later prompt for as
+long as the policy ran.
+
+what v3 is NOT is a judge of whether the shaped prompt was BETTER. nothing
+in the substrate can answer that yet; item 9's corpus capture is where that
+starts. until then a policy can be verified to do what it says, not to
+help — and the plan says so rather than letting a demo imply otherwise.
+rustlite cannot be handed a rust constant, so `CARRY_MARKER`,
+`STANDING_KEY`, `STANDING_MAX` and `STANDING_PROTOCOL` are mirrors of
+literals inside the module and an eval pins them together.
+
 **what a host import for model calls would mean:** a synchronous
 `ask_model` cannot exist under this runtime. if a policy ever needs the
 model in the loop, the honest path is the two-phase protocol extended
@@ -380,5 +412,9 @@ policy needs it (article i).
        gate, and `swap_cartridge` as a TOOL — the agent rewrites the
        module it reasons with). the live "[v2] " swap is verified in the
        browser, not by the gate
+8d.[x] a reference policy worth swapping to: REASONING_V3, the standing
+       note — one line of memory that outlives the transcript, set by the
+       agent writing `CARRY:` in an answer. the first module to read its
+       own kv back
 9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
 10. [ ] the opcode-model experiment (§9) — gated on 9

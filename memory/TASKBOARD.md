@@ -409,13 +409,35 @@ taskboard) asked for four things. all four are resolved:
                   8b). on production, ask the agent to swap its own policy
                   and watch for "🔁 the agent swapped its own reasoning
                   policy".
-      - [ ] item 8d NEXT: give the agent something worth swapping TO. v1
-            and v2 are demos (passthrough, and a prefix). a policy that
-            earns its place needs kv it actually reads back — e.g. carry a
-            short standing note from the last answer into the next prompt.
-            that needs `store_get` in a reference module and a way to
-            judge whether the shaped prompt was better, which is where §9's
-            corpus capture (item 9) starts paying for itself.
+      - [x] item 8d DONE (agent/reasoning-v3-standing-note, 2026-08-26):
+            REASONING_V3, the standing note — the first policy worth
+            swapping TO. v1/v2 do nothing the loop could not do without
+            them, which made "swap your policy" an offer with no answer to
+            "to what?". v3's claim is narrow and real: the transcript is
+            trimmed at KEEP_MESSAGES and is per-conversation, a cartridge's
+            kv is neither, so v3 gives the agent ONE line that outlives
+            both. answer phase: the first `CARRY:` to the end of ITS line
+            becomes the note (no marker = no change; bare `CARRY:` clears
+            it; capped at STANDING_MAX=400 or it would grow every later
+            prompt). prompt phase: note prepended, protocol line appended —
+            the module cannot edit the system prompt, so it teaches its own
+            contract in the channel it already shapes.
+            first reference module to read its own kv back (store_get + the
+            packed-i64 unpack path), to assemble a prompt from three
+            sources, and to search bytes. rustlite cannot be handed a rust
+            constant, so CARRY_MARKER / STANDING_KEY / STANDING_MAX /
+            STANDING_PROTOCOL are mirrors and an eval pins them to the
+            module's literals.
+            7 new evals in tests/cognitive_wiring.rs (23 total there).
+            "load v3" in the right rail; the swap_cartridge tool
+            description names it.
+            HONEST LIMIT, written into plan §12: v3 is verified to DO what
+            it says, not to HELP. nothing in the substrate can judge whether
+            a shaped prompt was better — that is item 9's corpus capture.
+            LIVE VERIFICATION OWED: same credential gate as 8b/8c for the
+            end-to-end path; the swap itself is checkable on any preview
+            (load v3 → hot-swap → "🧪 rehearsal passed" with the probe
+            coming back plain + the protocol line).
       - [ ] items 9–10 per plan §11 (corpus capture → opcode-model
             experiment).
       strategic context: owner wants composable hot-swappable cognitive
