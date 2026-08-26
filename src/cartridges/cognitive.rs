@@ -25,6 +25,8 @@
 
 use super::abi::Host;
 use super::composition::ComposeError;
+use super::manifest::{CartridgeKind, CartridgeManifest, Port, ABI_VERSION};
+use super::memhost::{KvFlush, MemHost};
 use super::orchestrator::{Event, Orchestrator};
 
 pub const PORT_BEFORE: &str = "reasoning";
@@ -113,7 +115,11 @@ impl<H: Host> Cognition<H> {
         notes
     }
 
-    fn drain_notes(&mut self) -> Vec<String> {
+    /// feed lines for everything the orchestrator recorded since the last
+    /// drain. public because a swap is initiated from outside a hook and its
+    /// events (Swapped, or a Failed on a refused config) still belong on the
+    /// feed.
+    pub fn drain_notes(&mut self) -> Vec<String> {
         self.orch
             .drain_events()
             .iter()
@@ -220,3 +226,144 @@ pub const REASONING_V2: &str = r#"
         return pack(out, plen + blen);
     }
 "#;
+
+// ---- the reasoner, as the browser boots and swaps it -------------------
+//
+// item 8b: everything above is host-agnostic. what follows is the ONE
+// configuration the worker actually runs — a single cognitive cartridge
+// named `reasoner` providing both reasoning ports over a write-behind
+// MemHost — expressed as pure functions so the browser glue is reduced to
+// opfs reads, opfs writes, and feed notes.
+
+pub const REASONER_SLUG: &str = "reasoner";
+
+/// fuel for one hook. a policy that will not finish inside this is
+/// supervised (crash → restart → passthrough), never waited on.
+pub const REASONER_FUEL: u64 = 2_000_000;
+
+/// the manifest a policy gets when the user supplies none: the reasoner,
+/// providing both phases and requiring nothing.
+pub fn reasoner_manifest() -> CartridgeManifest {
+    CartridgeManifest {
+        slug: REASONER_SLUG.to_string(),
+        kind: CartridgeKind::Cognitive,
+        version: "0.1.0".to_string(),
+        abi_version: ABI_VERSION,
+        provides: vec![
+            Port {
+                name: PORT_BEFORE.to_string(),
+            },
+            Port {
+                name: PORT_AFTER.to_string(),
+            },
+        ],
+        requires: vec![],
+    }
+}
+
+/// rustlite → wasm, with the compiler's own words kept. a policy that does
+/// not compile must say WHERE, or the textarea is untypable.
+pub fn compile_policy(src: &str) -> Result<Vec<u8>, String> {
+    let program = super::rustlite::parse(src).map_err(|e| format!("rustlite: {}", e.msg))?;
+    super::wasm::emit_module(&program)
+        .map_err(|e| format!("rustlite `{}`: {}", e.fn_name, e.msg))
+}
+
+/// a manifest (blank = the default reasoner one) plus a source, verified as
+/// far as they can be without instantiating anything.
+pub fn parse_policy(manifest_json: &str, src: &str) -> Result<(CartridgeManifest, Vec<u8>), String> {
+    let manifest = if manifest_json.trim().is_empty() {
+        reasoner_manifest()
+    } else {
+        let m = CartridgeManifest::parse(manifest_json).map_err(|e| format!("manifest: {e}"))?;
+        m.validate().map_err(|e| format!("manifest: {e}"))?;
+        m
+    };
+    let bytes = compile_policy(src)?;
+    Ok((manifest, bytes))
+}
+
+/// build the worker's cognition: compile, instantiate over a MemHost seeded
+/// with whatever the last session flushed, then init.
+///
+/// the kv is seeded BEFORE `cart_init` so a policy that reads its own memory
+/// at boot sees it. a store that does not parse is reported and skipped —
+/// losing a policy's notes is survivable, refusing to boot the loop over it
+/// is not (D4, article iv).
+pub fn boot_reasoner(
+    manifest_json: &str,
+    src: &str,
+    kv: Option<&str>,
+    fuel: u64,
+) -> Result<(Cognition<MemHost>, Vec<String>), String> {
+    let (manifest, bytes) = parse_policy(manifest_json, src)?;
+    let slug = manifest.slug.clone();
+    let mut orch = Orchestrator::load(&[(manifest, bytes)], |m| MemHost::new(&m.slug))
+        .map_err(|e| format!("{e}"))?;
+
+    let mut notes = Vec::new();
+    if let Some(text) = kv {
+        match orch.with_host_mut(&slug, |h| h.seed_encoded(text)) {
+            Some(Ok(n)) if n > 0 => {
+                notes.push(format!("🧠 '{slug}' restored {n} remembered key(s)"))
+            }
+            Some(Ok(_)) => {}
+            Some(Err(e)) => notes.push(format!(
+                "⚠ '{slug}' memory did not parse ({e}) — starting with an empty store"
+            )),
+            None => {}
+        }
+    }
+
+    orch.boot(&|_| Vec::new(), fuel).map_err(|e| format!("{e}"))?;
+    let mut cog = Cognition::new(orch, fuel);
+    notes.extend(cog.take_logs());
+    notes.extend(cog.drain_notes());
+    Ok((cog, notes))
+}
+
+impl Cognition<MemHost> {
+    /// the clock, passed in once per step. the host reads no clock (D1), so
+    /// this is the only way `now_ms` inside a cartridge is anything but 0.
+    pub fn set_now(&mut self, now_ms: i64) {
+        for slug in self.orch.order() {
+            self.orch.with_host_mut(&slug, |h| h.set_now(now_ms));
+        }
+    }
+
+    /// the guest's own log lines since the last take, as feed notes.
+    pub fn take_logs(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        for slug in self.orch.order() {
+            if let Some(logs) = self.orch.with_host_mut(&slug, |h| h.take_logs()) {
+                out.extend(logs.into_iter().map(|(_, m)| format!("🧠 {slug}: {m}")));
+            }
+        }
+        out
+    }
+
+    /// everything that must reach opfs after this hook (D2). empty when no
+    /// cartridge wrote anything.
+    pub fn take_flushes(&mut self) -> Vec<KvFlush> {
+        let mut out = Vec::new();
+        for slug in self.orch.order() {
+            if let Some(Some(f)) = self.orch.with_host_mut(&slug, |h| h.take_flush()) {
+                out.push(f);
+            }
+        }
+        out
+    }
+
+    /// replace the running policy from source. the host — and with it every
+    /// remembered key — carries over; a bad manifest or a source that does
+    /// not compile changes nothing.
+    pub fn swap_policy(&mut self, manifest_json: &str, src: &str) -> Result<String, String> {
+        let (manifest, bytes) = parse_policy(manifest_json, src)?;
+        let slug = manifest.slug.clone();
+        let fuel = self.fuel;
+        self.orch
+            .swap(manifest, &bytes, fuel)
+            .map_err(|e| format!("{e}"))?;
+        Ok(slug)
+    }
+}

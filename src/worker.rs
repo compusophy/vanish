@@ -172,6 +172,12 @@ pub fn boot_worker() {
         }
     });
 
+    // the reasoning policy comes up alongside the config: it is not a
+    // dependency of the loop, so nothing waits on it, but a prompt typed in
+    // the first second should already go through whatever module the user
+    // last swapped in.
+    wasm_bindgen_futures::spawn_local(boot_cognition());
+
     // restore the previous conversation before the first command arrives, so
     // a reload (ota or manual) resumes the thread instead of starting over.
     // this is the fix for ota updates wiping the transcript: the messages now
@@ -578,6 +584,7 @@ fn spawn_run(config: Config, prompt: String, seq: u64) {
                 })
             },
             persist,
+            &CartridgeReasoning,
         )
         .await;
 
@@ -1107,6 +1114,261 @@ async fn run_benchmark_suite() {
     emit(Event::BenchmarkFinished {
         passed: report.passed(),
         total: report.total(),
+    });
+}
+
+// ---- the reasoning cartridge (CARTRIDGE_PLAN §12, build item 8b) --------
+//
+// the agent loop's policy is a cartridge, and this is where it lives in the
+// browser: one `Cognition<MemHost>` owned by the worker, booted from opfs,
+// consulted around every prompt and every answer, and replaceable from the
+// ui mid-conversation.
+//
+// three rules shape the glue below. it is never on the critical path — a
+// missing or broken policy is a passthrough, not an error (article iv, D9).
+// it never reads a clock itself: the worker sets `now` per hook so every
+// decision inside a cartridge is reproducible from its inputs (D1). and
+// nothing it remembers stays only in memory: each hook's dirty keys are
+// flushed to opfs immediately afterwards (D2), the same write-behind shape
+// the transcript checkpoint uses.
+
+thread_local! {
+    static COGNITION: RefCell<Option<crate::cartridges::Cognition<crate::cartridges::MemHost>>> =
+        const { RefCell::new(None) };
+}
+
+/// compile and instantiate the reasoning policy: whatever the user last
+/// swapped in, or the built-in reference v1.
+///
+/// a SAVED policy that no longer compiles falls back to v1 loudly rather
+/// than leaving the worker with no policy at all — the failure the user
+/// needs to see is "your module broke", not a silently degraded loop.
+async fn boot_cognition() {
+    use crate::cartridges as carts;
+    let slug = carts::REASONER_SLUG;
+
+    let saved_source = crate::platform::opfs::read(&carts::source_path(slug)).await.ok();
+    let saved_manifest = crate::platform::opfs::read(&carts::manifest_path(slug))
+        .await
+        .unwrap_or_default();
+    let kv = crate::platform::opfs::read(&carts::kv_path(slug)).await.ok();
+
+    let from_disk = saved_source.is_some();
+    let source =
+        saved_source.unwrap_or_else(|| crate::cartridges::cognitive::REASONING_V1.to_string());
+
+    // which module the worker ENDED UP running, which is not always the one
+    // it set out to run — saying "your swap is live" after falling back to
+    // the reference module would be the exact kind of confident-and-wrong
+    // status line this project keeps deleting.
+    let mut fell_back = false;
+    let booted =
+        carts::boot_reasoner(&saved_manifest, &source, kv.as_deref(), carts::REASONER_FUEL);
+    let (cog, mut notes) = match booted {
+        Ok(ok) => ok,
+        Err(e) => {
+            emit(Event::Error {
+                thread: String::new(),
+                scope: "cartridge".to_string(),
+                message: format!("reasoning policy did not boot: {e}"),
+            });
+            if !from_disk {
+                return;
+            }
+            // the swapped-in module is the suspect; the reference one is
+            // known-good, so the loop keeps a policy either way.
+            fell_back = true;
+            match carts::boot_reasoner(
+                "",
+                crate::cartridges::cognitive::REASONING_V1,
+                kv.as_deref(),
+                carts::REASONER_FUEL,
+            ) {
+                Ok(ok) => ok,
+                Err(e) => {
+                    emit(Event::Error {
+                        thread: String::new(),
+                        scope: "cartridge".to_string(),
+                        message: format!(
+                            "the reference reasoning policy did not boot either ({e}) — the \
+                             loop will run with prompts unshaped"
+                        ),
+                    });
+                    return;
+                }
+            }
+        }
+    };
+
+    notes.insert(
+        0,
+        format!(
+            "🧠 reasoning policy '{slug}' up ({})",
+            match (from_disk, fell_back) {
+                (_, true) => "reference v1 — your saved module did not compile",
+                (true, false) => "your last hot-swap, restored from opfs",
+                (false, false) => "reference v1",
+            }
+        ),
+    );
+    COGNITION.with(|c| *c.borrow_mut() = Some(cog));
+    // cart_init may already have written to kv; it is durable before the
+    // first prompt, not after it.
+    flush_cognition(take_cognition_flushes());
+    for text in notes {
+        emit(Event::Note {
+            thread: String::new(),
+            text,
+        });
+    }
+}
+
+fn take_cognition_flushes() -> Vec<crate::cartridges::KvFlush> {
+    COGNITION.with(|c| {
+        c.borrow_mut()
+            .as_mut()
+            .map(|cog| cog.take_flushes())
+            .unwrap_or_default()
+    })
+}
+
+/// write-behind: every key a cartridge touched during a hook reaches opfs
+/// right after it, without the hook (which is synchronous) waiting on it.
+fn flush_cognition(flushes: Vec<crate::cartridges::KvFlush>) {
+    for f in flushes {
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::platform::opfs::write(&f.path, &f.body).await {
+                emit(Event::Error {
+                    thread: String::new(),
+                    scope: "cartridge".to_string(),
+                    message: format!(
+                        "could not persist '{}' memory ({}) to {}: {e}",
+                        f.slug,
+                        f.keys.join(", "),
+                        f.path
+                    ),
+                });
+            }
+        });
+    }
+}
+
+/// the loop's view of the cartridge. every method is total: with no policy
+/// loaded it behaves exactly like `NoReasoning`.
+struct CartridgeReasoning;
+
+impl crate::agent::Reasoning for CartridgeReasoning {
+    fn before(&self, prompt: &str) -> crate::cartridges::Shaped {
+        let now = js_sys::Date::now() as i64;
+        let (shaped, flushes) = COGNITION.with(|c| {
+            let mut slot = c.borrow_mut();
+            let Some(cog) = slot.as_mut() else {
+                return (
+                    crate::cartridges::Shaped {
+                        prompt: prompt.to_string(),
+                        notes: Vec::new(),
+                    },
+                    Vec::new(),
+                );
+            };
+            cog.set_now(now);
+            let mut shaped = cog.before(prompt, now);
+            shaped.notes.extend(cog.take_logs());
+            let flushes = cog.take_flushes();
+            (shaped, flushes)
+        });
+        flush_cognition(flushes);
+        shaped
+    }
+
+    fn after(&self, answer: &str) -> Vec<String> {
+        let now = js_sys::Date::now() as i64;
+        let (notes, flushes) = COGNITION.with(|c| {
+            let mut slot = c.borrow_mut();
+            let Some(cog) = slot.as_mut() else {
+                return (Vec::new(), Vec::new());
+            };
+            cog.set_now(now);
+            let mut notes = cog.after(answer, now);
+            notes.extend(cog.take_logs());
+            let flushes = cog.take_flushes();
+            (notes, flushes)
+        });
+        flush_cognition(flushes);
+        notes
+    }
+}
+
+/// hot-swap the running policy from source, then remember it so the next
+/// boot brings it back. a refusal changes nothing — not the running module,
+/// not what is on disk.
+fn swap_cartridge(manifest: String, source: String) {
+    if source.trim().is_empty() {
+        emit(Event::Error {
+            thread: conv(),
+            scope: "cartridge".to_string(),
+            message: "no cartridge source to compile — paste a rustlite module first".to_string(),
+        });
+        return;
+    }
+
+    let swapped = COGNITION.with(|c| {
+        let mut slot = c.borrow_mut();
+        let Some(cog) = slot.as_mut() else {
+            return Err(
+                "no reasoning cartridge is running — reload the page and try again".to_string(),
+            );
+        };
+        cog.set_now(js_sys::Date::now() as i64);
+        let slug = cog.swap_policy(&manifest, &source)?;
+        let mut notes = cog.drain_notes();
+        notes.extend(cog.take_logs());
+        Ok((slug, notes, cog.take_flushes()))
+    });
+
+    let (slug, notes, flushes) = match swapped {
+        Ok(v) => v,
+        Err(e) => {
+            emit(Event::Error {
+                thread: conv(),
+                scope: "cartridge".to_string(),
+                message: format!("hot-swap refused: {e}"),
+            });
+            return;
+        }
+    };
+
+    flush_cognition(flushes);
+    for text in notes {
+        emit(Event::Note {
+            thread: conv(),
+            text,
+        });
+    }
+    emit(Event::Note {
+        thread: conv(),
+        text: format!("🔁 '{slug}' is now the reasoning policy — the next prompt goes through it"),
+    });
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let src_path = crate::cartridges::source_path(&slug);
+        let man_path = crate::cartridges::manifest_path(&slug);
+        let mut failed = None;
+        if let Err(e) = crate::platform::opfs::write(&src_path, &source).await {
+            failed = Some(format!("{src_path}: {e}"));
+        }
+        if let Err(e) = crate::platform::opfs::write(&man_path, &manifest).await {
+            failed = Some(format!("{man_path}: {e}"));
+        }
+        if let Some(e) = failed {
+            emit(Event::Error {
+                thread: String::new(),
+                scope: "cartridge".to_string(),
+                message: format!(
+                    "the swap is live but could not be saved ({e}) — it will not survive a reload"
+                ),
+            });
+        }
     });
 }
 
@@ -1687,6 +1949,8 @@ fn handle(command: Command) {
             });
             wasm_bindgen_futures::spawn_local(drive_batch(batch));
         }
+
+        Command::SwapCartridge { manifest, source } => swap_cartridge(manifest, source),
 
         Command::RunBenchmark => {
             if STATE.with(|s| s.borrow().running) {

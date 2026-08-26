@@ -147,6 +147,29 @@
           </button>
         </div>
 
+        <div class="rail-section">
+          <div class="rail-label">reasoning policy</div>
+          <p class="hint">
+            the module that shapes every prompt before the model sees it, and
+            digests every answer afterwards. it is a cartridge: rustlite
+            source, compiled here, swapped between prompts without a reload.
+            its memory survives the swap.
+          </p>
+          <label for="cfg-policy">rustlite source</label>
+          <textarea id="cfg-policy" rows="12" spellcheck="false" placeholder="pub fn cart_handle(p: i32, n: i32) -> i64 { … }"></textarea>
+
+          <details class="adv-creds">
+            <summary>optional: manifest json (blank = the default reasoner)</summary>
+            <textarea id="cfg-policy-manifest" rows="6" spellcheck="false" placeholder='{"slug":"reasoner", …}'></textarea>
+          </details>
+
+          <div class="policy-actions">
+            <button id="policy-load-v1" class="btn btn-quiet" title="the reference passthrough policy">load v1</button>
+            <button id="policy-load-v2" class="btn btn-quiet" title="the reference policy that prefixes every prompt with [v2]">load v2</button>
+          </div>
+          <button id="policy-swap" class="btn">hot-swap policy</button>
+        </div>
+
       </aside>
     </div>
 

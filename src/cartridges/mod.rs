@@ -23,11 +23,14 @@ pub mod rustlite;
 pub mod wasm;
 
 pub use abi::{pack, unpack, GuestFn, Host, HostFn};
-pub use cognitive::{Cognition, Shaped, PORT_AFTER, PORT_BEFORE};
+pub use cognitive::{
+    boot_reasoner, compile_policy, parse_policy, reasoner_manifest, Cognition, Shaped,
+    PORT_AFTER, PORT_BEFORE, REASONER_FUEL, REASONER_SLUG,
+};
 pub use composition::{ComposeError, Composition};
 pub use lifecycle::{CallError, Cartridge, LoadError, Verified};
 pub use manifest::{CartridgeKind, CartridgeManifest, ABI_VERSION};
-pub use memhost::MemHost;
+pub use memhost::{kv_path, manifest_path, source_path, KvFlush, KvPairs, MemHost};
 pub use orchestrator::{
     ActorHost, Envelope, Event, Health, Orchestrator, MAX_CALL_CHAIN, MAX_MAILBOX, MAX_RESTARTS,
     RESTART_BASE_MS,

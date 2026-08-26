@@ -265,19 +265,45 @@ the feed without instrumentation.
 
 **the host** (`src/cartridges/memhost.rs`): the `Host` trait is sync and
 opfs is async, so each cartridge's kv lives in a `MemHost` during a step
-and the worker flushes `take_dirty()` to `cartridges/{slug}/kv/…` right
+and the worker flushes it to `vanish-cartridges/{slug}/kv.json` right
 after — the transcript checkpoint's write-behind shape; the window in
 which work exists only in memory is one pump (D2). logs/emits are taken
 the same way and rendered as feed notes; time is set per step (D1).
 
-**8b — browser wiring (next):** the worker owns a `Cognition<MemHost>`
-in its STATE, compiles the reference module at boot (or loads the
-cartridge the user last swapped in), calls `before` where `agent::run`
-pushes the user prompt and `after` when a turn completes without tool
-calls, flushes dirty kv after each, and renders notes. a `Command::Swap
-{ manifest, source }` lets the user (or the agent, editing its own
-policy) hot-swap the module from the ui. live proof = the feed showing
-"[v2] " on the prompt after a swap, with no reload.
+**8b — browser wiring (built 2026-08-26):** the worker owns the
+`Cognition<MemHost>` in a `COGNITION` thread_local and boots it from opfs
+(`boot_cognition`): the source the user last swapped in, else the
+reference v1, over a kv seeded from the last flush. `agent::run` takes a
+`&dyn Reasoning` — `NoReasoning` is the identity policy, `CartridgeReasoning`
+is the worker's — and calls `before` exactly where the user prompt is
+pushed (what the cartridge returns is both what the model is asked and
+what the transcript records, so a replay cannot disagree with what was
+sent) and `after` on every turn that carries no tool calls, which is the
+only point in the loop where the model has answered rather than asked for
+work. each hook sets the clock, takes the guest's own log lines as feed
+notes, and hands back `KvFlush`es the worker spawns into opfs — the hook
+itself stays synchronous, the durability does not wait on it (D2).
+
+`Command::SwapCartridge { manifest, source }` compiles rustlite in the
+worker and calls `Orchestrator::swap`; a manifest that will not parse or a
+source that will not compile changes neither the running module nor what
+is on disk, and the compiler's own words reach the feed. a successful swap
+writes `source.rustlite` + `manifest.json` beside the kv, so it survives a
+reload — and a saved module that later stops compiling falls back to the
+reference v1 loudly rather than leaving the loop with no policy at all.
+the right rail carries the editor plus "load v1"/"load v2" buttons wired
+to the crate's own reference constants.
+
+state lives under `vanish-cartridges/{slug}/` rather than `cartridges/`:
+opfs's root is shared with the working-tree mirror, so the obvious name
+would collide with a source directory of that name. the store is ONE json
+file per cartridge (hex keys and values, versioned) because opfs
+directory iteration is the least dependable corner of the api — the same
+reason the tree keeps an index file.
+
+live proof (owed until run in the browser): type a prompt, press load v2
+then hot-swap, type another — the second prompt carries "[v2] ", with no
+reload and the remembered keys intact.
 
 **what a host import for model calls would mean:** a synchronous
 `ask_model` cannot exist under this runtime. if a policy ever needs the
@@ -306,9 +332,13 @@ policy needs it (article i).
        backoff ladder to Failed, atomic swap keeping host + mailbox,
        emits routed by declared capability. `call` (ABI v2) rides on it
        next; string literals + data segments first.
-8. [~] cognitive orchestrator: first hot-swappable reasoning module —
+8. [x] cognitive orchestrator: first hot-swappable reasoning module —
        8a (design §12, cognitive.rs, Orchestrator::request, MemHost,
-       reference v1/v2 modules, swap-with-kv-intact proven natively)
-       landed; 8b = browser wiring + the live proof
+       reference v1/v2 modules, swap-with-kv-intact proven natively);
+       8b (browser wiring: COGNITION in the worker, `Reasoning` hooks in
+       agent::run, durable kv + saved source, Command::SwapCartridge and
+       the right-rail editor) — the live "[v2] " swap is verified in the
+       browser, not by the gate. NEXT after this: a `swap_cartridge`
+       TOOL, so the agent rewrites its own policy — the recursive step
 9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
 10. [ ] the opcode-model experiment (§9) — gated on 9

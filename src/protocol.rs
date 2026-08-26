@@ -55,6 +55,13 @@ pub enum Command {
     /// the queue survives tab discards (it persists beside the resume
     /// marker); the user pressing stop cancels whatever is left.
     RunBatch { tasks: Vec<BatchTask> },
+    /// replace the running reasoning policy with a rustlite source, live.
+    /// `manifest` may be empty, meaning "the default reasoner manifest";
+    /// `source` is rustlite, compiled in the worker. this is the ui half of
+    /// the cartridge story: the agent's own reasoning module is a textarea
+    /// away from being something else, mid-conversation, with its memory
+    /// intact.
+    SwapCartridge { manifest: String, source: String },
     /// run the internal eval suite: pinned self-edit tasks through RunBatch,
     /// then grade the working tree against mechanical checkers. results land
     /// in vanish-bench/report.json and Event::BenchmarkFinished carries the
