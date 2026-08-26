@@ -12,6 +12,15 @@
 # a pushed FILE is readable by anyone — including the agent repairing its
 # own red build — via raw.githubusercontent.com/<repo>/diagnostics/
 # ci-diagnostics.log. do not remove this step: it is the self-repair loop.
+#
+# it publishes ON FAILURE ONLY, and it can never fail this job. both were
+# learned the hard way on 2026-08-26: the step ran `if: always()`, so a green
+# run overwrote the failure log the next reader needed, and the force-push to
+# a single branch RACED between the push- and pull_request-triggered runs of
+# the same commit. the loser was rejected ("cannot lock ref
+# 'refs/heads/diagnostics'") and took the whole verify job red with it — a
+# diagnostic breaking the thing it exists to observe, with the gate itself
+# green three steps above.
 name: ci
 
 on:
@@ -76,8 +85,11 @@ jobs:
       # the self-repair loop, made concrete: whatever failed above, its real
       # output lands on the diagnostics branch as a plain file. also mirrored
       # into the job summary for humans reading the run page.
+      #
+      # `failure()`, not `always()`: a green run has nothing a reader wants,
+      # and publishing one CLOBBERS the failure log that is the whole point.
       - name: publish diagnostics
-        if: always()
+        if: failure()
         run: |
           LOG=ci-diagnostics.log
           {
@@ -111,8 +123,21 @@ jobs:
           git rm -rfq . || true
           git add "$LOG"
           git commit -m "ci diagnostics for ${GITHUB_SHA}" --allow-empty
-          git push --force \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "HEAD:diagnostics"
+
+          # this push must never decide whether the build is green. two runs
+          # of the same commit (push + pull_request) can reach here together
+          # and one loses the ref lock; retry, then give up LOUDLY but with
+          # exit 0. a lost diagnostics log costs a reader one click into the
+          # job log below it. a red gate over one costs a landing.
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for attempt in 1 2 3; do
+            if git push --force "$REMOTE" "HEAD:diagnostics"; then
+              echo "diagnostics published on attempt ${attempt}"
+              exit 0
+            fi
+            echo "diagnostics push lost the ref lock (attempt ${attempt}); retrying"
+            sleep $((attempt * 5))
+          done
+          echo "::warning::could not publish ci-diagnostics.log after 3 attempts; read the job log above instead. the gate result is unaffected."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
