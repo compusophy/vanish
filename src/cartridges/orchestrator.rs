@@ -608,29 +608,12 @@ impl<H: Host> Orchestrator<H> {
                 Plan::Skip => continue,
                 Plan::Restart(attempt) => {
                     self.cursor = idx + 1;
-                    match self.restart(&slug, fuel) {
-                        Ok(()) => {
-                            let mut sh = self.shared.borrow_mut();
-                            let has_mail = sh
-                                .actors
-                                .get_mut(&slug)
-                                .map(|a| {
-                                    a.health = Health::Up;
-                                    !a.mailbox.is_empty()
-                                })
-                                .unwrap_or(false);
-                            sh.events.push(Event::Restarted {
-                                slug: slug.clone(),
-                                attempt,
-                            });
-                            if !has_mail {
-                                return true; // the rebuild was the step
-                            }
-                        }
-                        Err(reason) => {
-                            self.shared.borrow_mut().crash(&slug, reason, now_ms);
-                            return true;
-                        }
+                    if !self.try_restart(&slug, attempt, now_ms, fuel) {
+                        return true;
+                    }
+                    let has_mail = self.pending(&slug) > 0;
+                    if !has_mail {
+                        return true; // the rebuild was the step
                     }
                 }
                 Plan::Deliver => {
@@ -674,6 +657,99 @@ impl<H: Host> Orchestrator<H> {
             return true;
         }
         false
+    }
+
+    /// rebuild a down actor whose backoff elapsed: true when it is Up again
+    /// (Restarted recorded), false when the rebuild itself crashed (which
+    /// schedules the next backoff).
+    fn try_restart(&mut self, slug: &str, attempt: u32, now_ms: i64, fuel: u64) -> bool {
+        match self.restart(slug, fuel) {
+            Ok(()) => {
+                let mut sh = self.shared.borrow_mut();
+                if let Some(a) = sh.actors.get_mut(slug) {
+                    a.health = Health::Up;
+                }
+                sh.events.push(Event::Restarted {
+                    slug: slug.to_string(),
+                    attempt,
+                });
+                true
+            }
+            Err(reason) => {
+                self.shared.borrow_mut().crash(slug, reason, now_ms);
+                false
+            }
+        }
+    }
+
+    /// a SYNCHRONOUS request from the host to whoever provides `port`: the
+    /// cognitive orchestrator's primitive ("route the prompt to whichever
+    /// cartridge provides reasoning" — plan §8). the host needs no
+    /// capability; the provider must be Up (a down one whose backoff has
+    /// elapsed is rebuilt first; otherwise NotUp). runs on the same
+    /// take/put_back path as everything else, so the provider may `call`
+    /// out while answering. a trap is supervised exactly like a crash on
+    /// mail, and surfaces as the error.
+    pub fn request(
+        &mut self,
+        port: &str,
+        msg: &[u8],
+        now_ms: i64,
+        fuel: u64,
+    ) -> Result<Vec<u8>, ComposeError> {
+        self.shared.borrow_mut().now_ms = now_ms;
+        let slug = self
+            .provider_of(port)
+            .ok_or_else(|| ComposeError::NoProvider(port.to_string()))?;
+        match self.health(&slug) {
+            Some(Health::Up) => {}
+            Some(Health::Restarting {
+                attempt,
+                not_before_ms,
+                reason,
+            }) => {
+                if now_ms < not_before_ms || !self.try_restart(&slug, attempt, now_ms, fuel) {
+                    return Err(ComposeError::NotUp {
+                        slug,
+                        reason: format!("restarting (attempt {attempt}): {reason}"),
+                    });
+                }
+            }
+            Some(Health::Failed { reason }) => {
+                return Err(ComposeError::NotUp {
+                    slug,
+                    reason: format!("failed: {reason}"),
+                })
+            }
+            None => return Err(ComposeError::UnknownCartridge(slug)),
+        }
+        let mut budget = fuel;
+        let result = self
+            .run_taken(&slug, |c| c.handle_with(msg, &mut budget))
+            .ok_or_else(|| ComposeError::NotUp {
+                slug: slug.clone(),
+                reason: "busy (already running in this call chain)".into(),
+            })?;
+        let mut sh = self.shared.borrow_mut();
+        sh.route_outbox(&slug);
+        match result {
+            Ok(response) => {
+                if let Some(a) = sh.actors.get_mut(&slug) {
+                    a.crashes = 0;
+                }
+                sh.events.push(Event::Delivered {
+                    to: slug,
+                    from: None,
+                    topic: port.to_string(),
+                    response: response.clone(),
+                });
+                Ok(response)
+            }
+            Err(error) => {
+                sh.crash(&slug, error.to_string(), now_ms);
+                Err(ComposeError::Call { slug, error })
+            }
+        }
     }
 
     /// pump until nothing is runnable or `max` deliveries; returns the count.

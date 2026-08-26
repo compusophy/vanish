@@ -278,20 +278,46 @@ taskboard) asked for four things. all four are resolved:
             a nested call routed after it), +2 lifecycle (host-routed call
             writes the answer into the caller's memory; v1 manifest
             refused for `call`, v1 with v1 imports still loads).
-      - [ ] item 8 NEXT: the cognitive orchestrator — the first hot-
-            swappable reasoning module. concretely: a `cognitive`
-            cartridge providing "reasoning" whose cart_handle takes a
-            prompt and answers (v1: a rustlite module that composes a
-            reply from kv memory + the prompt; the LLM itself stays in
-            the worker — the cartridge decides WHAT to ask and HOW to
-            use the answer, via a new host import for model calls? design
-            first: read plan §8 last paragraph and CHARTER article i —
-            ship the host import only when the module needs it). wire it
-            as Orchestrator over Composition; route the agent loop's
-            prompt through handle_port("reasoning"); prove hot-swap live
-            (swap the module mid-conversation, next prompt uses the new
-            one). browser wiring: a real Host over the worker's feed /
-            clock / opfs kv namespace per slug / bus.
+      - [x] item 8a DONE (agent/cognitive-policy, 2026-08-25): the
+            reasoning policy as a hot-swappable cartridge — everything
+            native-testable. DESIGN in plan §12: the model call is async
+            and the interpreter cannot suspend, so a cartridge cannot
+            MAKE the model call; it owns the policy AROUND it. two
+            ports: `reasoning` (prompt in → prompt out, empty = as
+            written) and `reasoning.after` (answer in → feed note out;
+            digest into kv). every message carries a phase byte (0x00 /
+            0x01) because cart_handle gets bytes only and one cartridge
+            provides both ports. `Cognition<H>::before/after` over
+            `Orchestrator::request` (new: host-originated synchronous
+            request — rebuilds a due actor first, NotUp otherwise, trap
+            = supervised crash). NEVER HOSTAGE: no provider → silent
+            passthrough; crashed/restarting/failed → passthrough + feed
+            note; swap revives mid-conversation. `describe(&Event)` =
+            the feed line (routine traffic excluded). REASONING_V1
+            (passthrough + remember) and REASONING_V2 ("[v2] " prefix +
+            remember) as rustlite consts; the swap between them keeps
+            kv. `MemHost` (memhost.rs): the sync write-behind host the
+            worker gives each cartridge — kv + dirty set (take_dirty →
+            opfs flush after each step), take_logs/take_emits for feed
+            notes, set_now per step (no clock read). NO host import for
+            model calls (article i — nothing needs one; §12 records the
+            honest path if a policy ever does). tests/cartridge_cognitive
+            (8). ComposeError::NotUp added.
+      - [ ] item 8b NEXT: browser wiring. worker STATE owns a
+            Cognition<MemHost>; boot compiles REASONING_V1 (or loads the
+            last swapped-in source from opfs `cartridges/reasoner/`);
+            agent::run gets before/after hooks (call `before` where the
+            user prompt is pushed, `after` when a turn completes with no
+            tool calls — via callbacks like `persist`, default
+            passthrough); flush take_dirty() to opfs `cartridges/{slug}/
+            kv/…` right after each hook (D2), render take_logs + notes
+            as Event::Note. `Command::SwapCartridge { manifest, source }`
+            from the ui (a textarea in the right rail is enough for v1)
+            → compile in the worker → Orchestrator::swap → note. LIVE
+            PROOF (the v1 definition in plan §10): type a prompt, swap to
+            v2 from the ui, type another — the feed shows "[v2] " on the
+            second, no reload. then let the AGENT swap its own policy
+            (a `swap_cartridge` tool) — that is the recursive step.
       - [ ] items 9–10 per plan §11 (corpus capture → opcode-model
             experiment).
       strategic context: owner wants composable hot-swappable cognitive

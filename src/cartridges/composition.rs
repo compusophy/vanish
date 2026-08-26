@@ -29,6 +29,9 @@ pub enum ComposeError {
     /// a replacement image carried a different slug than the member it
     /// was meant to replace — renaming is not a swap.
     SlugMismatch { expected: String, found: String },
+    /// the member exists but is not runnable right now (restarting after a
+    /// crash with its backoff pending, or failed).
+    NotUp { slug: String, reason: String },
 }
 
 impl From<WireError> for ComposeError {
@@ -53,6 +56,7 @@ impl std::fmt::Display for ComposeError {
                 f,
                 "replacement is named '{found}' but the member being replaced is '{expected}'"
             ),
+            ComposeError::NotUp { slug, reason } => write!(f, "cartridge '{slug}' is not up: {reason}"),
         }
     }
 }
