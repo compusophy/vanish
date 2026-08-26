@@ -301,9 +301,16 @@ file per cartridge (hex keys and values, versioned) because opfs
 directory iteration is the least dependable corner of the api — the same
 reason the tree keeps an index file.
 
-live proof (owed until run in the browser): type a prompt, press load v2
-then hot-swap, type another — the second prompt carries "[v2] ", with no
-reload and the remembered keys intact.
+live proof, watched on the preview of bdc7008: boot brings the policy up
+and puts the GUEST's own init log on the feed; "load v2" + "hot-swap
+policy" compiles rustlite in the worker, swaps atomically and re-inits with
+no reload; a full page reload comes back as "your last hot-swap, restored
+from opfs". the fourth link — "[v2] " on a real prompt — is not reachable
+from a preview: `Command::Run` refuses at the credential check before
+`agent::run` is entered, and a preview branch is its own origin with no
+saved credentials. that half is owed on production, and the blind spot is
+general: nothing downstream of the credential gate can be proven on a
+preview.
 
 **what a host import for model calls would mean:** a synchronous
 `ask_model` cannot exist under this runtime. if a policy ever needs the

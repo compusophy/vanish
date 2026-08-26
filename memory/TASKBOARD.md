@@ -337,9 +337,32 @@ taskboard) asked for four things. all four are resolved:
             something changed, memory surviving a "reload", boot fallback,
             swap changing the next prompt with kv intact, a refused swap
             leaving the policy alone.
-            LIVE VERIFICATION OWED: type a prompt, load v2, hot-swap, type
-            another — the feed must show "[v2] " on the second with no
-            reload. record the result here when it is watched.
+            LIVE VERIFICATION (preview of bdc7008, watched in an
+            authenticated browser 2026-08-26) — THREE OF THE FOUR LINKS
+            PROVEN, one still owed:
+              [x] boot: the feed shows "🧠 reasoning policy 'reasoner' up
+                  (reference v1)" and "🧠 reasoner: reasoning v1 up:
+                  passthrough + remember" — the cognition instantiates in
+                  the worker and the GUEST's own init log reaches the feed.
+              [x] swap: "load v2" fills the editor; "hot-swap policy" gives
+                  "🔁 cartridge 'reasoner' hot-swapped", "🧠 reasoner:
+                  reasoning v2 up: prefix + remember", "🔁 'reasoner' is now
+                  the reasoning policy" — rustlite COMPILED IN THE WORKER,
+                  swapped atomically, re-inited, all without a reload.
+              [x] persistence: after a full page reload the boot note reads
+                  "up (your last hot-swap, restored from opfs)" followed by
+                  v2's init log — source.rustlite + manifest.json were
+                  written and read back.
+              [ ] the "[v2] " prefix on a real prompt. NOT reachable on a
+                  preview: Command::Run refuses on the credential check in
+                  worker.rs BEFORE agent::run is entered, and a preview
+                  branch is its own origin, so its opfs has no saved
+                  credentials. do this on production (or in a preview with
+                  credentials entered): type a prompt, load v2, hot-swap,
+                  type another — the second must render with "[v2] ". the
+                  before-hook itself is pinned natively in
+                  tests/cognitive_wiring.rs; what is unproven is only that
+                  agent::run reaches it in the browser.
       - [ ] item 8c NEXT: the RECURSIVE step — a `swap_cartridge` TOOL, so
             the agent rewrites its own reasoning policy mid-run rather than
             waiting for a human to paste one. the worker half already
