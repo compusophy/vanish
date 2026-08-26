@@ -67,7 +67,11 @@ fn the_shared_gate_uses_filesystem_discovery_not_a_list() {
 /// these assertions are load-bearing.
 fn workflow_source() -> Option<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/ci.yml");
-    std::fs::read_to_string(path).ok()
+    // normalized: this repo is edited on a checkout with core.autocrlf=true,
+    // and every shape guard below would go red on \r\n while ci passed.
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|t| t.replace("\r\n", "\n"))
 }
 
 #[test]
@@ -189,5 +193,58 @@ fn the_e2e_smoke_asserts_boot_not_mere_reachability() {
         "ci/e2e.mjs dropped the deployment-protection diagnosis — when the \
          preview walls itself behind auth, the report must say THAT, not a \
          misleading 'worker never announced ready'."
+    );
+}
+
+/// the diagnostics publisher must not be able to fail the gate, and must
+/// only run when there is something to publish.
+///
+/// both halves are scar tissue from 2026-08-26. the step ran `if: always()`
+/// and force-pushed to one branch, so the push- and pull_request-triggered
+/// runs of the SAME commit reached it together, one lost the ref lock
+/// ("cannot lock ref 'refs/heads/diagnostics'"), and its non-zero exit took
+/// the whole verify job red — with the gate itself green three steps above.
+/// a green run also overwrote the failure log the next reader needed.
+///
+/// this is D9's shape applied to ci: a diagnostic that breaks the thing it
+/// observes is not a diagnostic.
+#[test]
+fn the_diagnostics_publisher_cannot_turn_a_green_gate_red() {
+    let Some(wf) = workflow_source() else {
+        eprintln!("SKIP: .github/workflows/ci.yml not present in this checkout");
+        return;
+    };
+
+    let step = wf
+        .split("- name: publish diagnostics")
+        .nth(1)
+        .expect("ci.yml has no `publish diagnostics` step — it is the self-repair loop");
+
+    assert!(
+        step.contains("if: failure()"),
+        "the diagnostics step must run only on failure. `always()` publishes \
+         green runs, which CLOBBERS the failure log that is the entire point \
+         of the diagnostics branch."
+    );
+    assert!(
+        !step.contains("if: always()"),
+        "the diagnostics step is back on `always()`"
+    );
+
+    // the push is the racy part: it must be retried and it must not be the
+    // last word on the step's exit status.
+    assert!(
+        step.contains("for attempt in"),
+        "the diagnostics push is not retried; a lost ref lock between two \
+         concurrent runs of the same commit will fail the job again."
+    );
+    assert!(
+        step.contains("::warning::"),
+        "a diagnostics push that gives up must say so loudly (D4) rather than \
+         failing silently or fatally."
+    );
+    assert!(
+        !step.trim_end().ends_with("\"HEAD:diagnostics\""),
+        "the step ends on a bare push: its exit status decides the gate again"
     );
 }

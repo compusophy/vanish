@@ -7,6 +7,47 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (ci: a diagnostic must not break what it observes — agent/ci-diagnostics-must-not-fail-the-gate)
+
+found the honest way: a pr went red with a GREEN gate. `verify` on the
+pull_request event failed at `publish diagnostics`, three steps after the
+wasm check, the test gate and clippy had all passed.
+
+cause: that step ran `if: always()` and force-pushed to a single
+`diagnostics` branch, so the push- and pull_request-triggered runs of the
+SAME commit reached it together, one lost the ref lock ("cannot lock ref
+'refs/heads/diagnostics': is at X but expected Y"), and its non-zero exit
+took the whole job with it.
+
+two defects, both fixed:
+
+- **it published on success.** the workflow's own header says "on any
+  failure this workflow publishes"; the code said `always()`. so every
+  green run OVERWROTE the failure log the next reader needed — the same
+  words-vs-code gap item 3 named as this project's recurring failure mode.
+  now `if: failure()`.
+- **it could fail the job.** the push is retried three times with backoff,
+  then gives up with a `::warning::` and exit 0. a lost diagnostics log
+  costs a reader one click into the job log printed directly above it; a
+  red gate over one costs a landing.
+
+D9's shape applied to ci: an escape hatch that only works when things are
+fine is not an escape hatch, and a diagnostic that breaks the thing it
+observes is not a diagnostic. pinned by
+`the_diagnostics_publisher_cannot_turn_a_green_gate_red` in
+tests/ci_gate.rs and verified in BOTH directions — flipping the step back
+to `always()` reds the guard.
+
+`workflow_source()` now normalizes \r\n: this checkout has
+core.autocrlf=true, and every multi-line shape guard would otherwise go red
+locally while ci passed — the trap boot_reconcile fell into in PR #16, now
+recurring exactly as the board predicted it would.
+
+LESSON for reading a red pr here: `ci` runs TWICE per pr (push and
+pull_request). when one is green and the other is red on the same sha, the
+difference is not the code — look at which STEP failed before assuming the
+gate caught something.
+
 ## landed this run (item 8c: the agent rewrites its own reasoning policy — agent/cognitive-swap-tool)
 
 eighth "keep going", stacked on 8b because github actions was in a major
