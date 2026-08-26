@@ -391,11 +391,24 @@ taskboard) asked for four things. all four are resolved:
             tools::definitions() must appear in SYSTEM_PROMPT (with its
             negative control). it fired for real — the definition landed
             before the prompt line did.
-            LIVE VERIFICATION OWED: the tool cannot run without
-            credentials (same gate as 8b's fourth link). when running on
-            production, ask the agent to swap its policy to v2 and watch
-            the feed for "🧪 rehearsal passed" + "🔁 the agent swapped its
-            own reasoning policy".
+            LIVE VERIFICATION (preview of 2dcfe67, watched in an
+            authenticated browser 2026-08-26) — the GATE is proven:
+              [x] v1 → v2 gives "🧪 rehearsal passed: "rehearsal: a prompt"
+                  → "[v2] rehearsal: a prompt" (writes last_answer,
+                  last_prompt)" before the swap notes.
+              [x] a module that compiles and then reads out of bounds is
+                  REFUSED — "hot-swap refused: it failed on a prompt:
+                  cartridge 'reasoner': cartridge trapped: memory access
+                  out of bounds: 4 byte(s) at 2000000000 exceed the
+                  1048576-byte memory" — with no swap note after it.
+              [x] a reload after the refusal restores v2, not the refused
+                  module: the refusal touched disk as little as it touched
+                  the running policy.
+              [ ] the TOOL path. swap_cartridge needs a run and a run needs
+                  credentials, so a preview cannot reach it (same gate as
+                  8b). on production, ask the agent to swap its own policy
+                  and watch for "🔁 the agent swapped its own reasoning
+                  policy".
       - [ ] item 8d NEXT: give the agent something worth swapping TO. v1
             and v2 are demos (passthrough, and a prefix). a policy that
             earns its place needs kv it actually reads back — e.g. carry a

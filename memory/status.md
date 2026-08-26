@@ -63,10 +63,31 @@ cartridge track was built toward: `swap_cartridge` is a TOOL.
   worked was closing and reopening the pr, which fires a fresh
   `pull_request` event. `verify` then passed in 82s.
 
-**LIVE VERIFICATION OWED** — the tool sits behind the same credential gate
-as 8b's fourth link, so a preview cannot exercise it. on production: ask
-the agent to swap its policy to v2 and watch for "🧪 rehearsal passed" and
-"🔁 the agent swapped its own reasoning policy".
+**LIVE VERIFICATION (preview of 2dcfe67, authenticated browser)** — the
+rehearsal gate proven end to end in the running app:
+
+- swap to v2 → "🧪 rehearsal passed: "rehearsal: a prompt" → "[v2]
+  rehearsal: a prompt" (writes last_answer, last_prompt)", then the swap
+  notes. the candidate really is made to run before it is installed, and
+  the feed says what it did.
+- swap to a module that compiles and then reads out of bounds → "hot-swap
+  refused: it failed on a prompt: cartridge 'reasoner': cartridge trapped:
+  memory access out of bounds: 4 byte(s) at 2000000000 exceed the
+  1048576-byte memory". no swap note followed.
+- reload after the refusal → "up (your last hot-swap, restored from opfs)"
+  + "reasoning v2 up". the refusal changed nothing on disk either.
+
+**still owed: the TOOL path.** `swap_cartridge` needs a run, and a run
+needs credentials, so a preview cannot reach it (same gate as 8b). on
+production: ask the agent to swap its own policy and watch for "🔁 the
+agent swapped its own reasoning policy".
+
+BROWSER-AUTOMATION NOTE (cost ~20 minutes here): synthetic coordinate
+clicks did not reach the buttons in the right rail — the rail is clipped by
+the viewport and the click silently no-ops, which reads exactly like "the
+handler is not wired". a real DOM `.click()` through the js console fired
+the same handler correctly. when a control "does nothing", prove the
+handler is dead before believing it.
 
 next: 8d — give the agent something worth swapping TO. v1 and v2 are demos.
 a policy that earns its place needs kv it reads back (a standing note
