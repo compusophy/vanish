@@ -249,13 +249,51 @@ taskboard) asked for four things. all four are resolved:
             back (pinned). tests/common ALLOC now starts its heap at
             data_end(); emitter_src spells topics as literals. +7 evals
             across front/emit/runtime/lifecycle.
-      - [ ] NEXT: `call(slug_or_port, msg) -> packed` as ABI v2 — a
-            synchronous request/response mediated by the orchestrator
-            (host import → route to provider → handle → response written
-            back via cart_alloc); manifest abi_version 2; v1 cartridges
-            keep loading.
-      - [ ] items 8–10 per plan §11 (cognitive cartridge → corpus capture
-            → opcode-model experiment).
+      - [x] `call` as ABI v2 DONE (agent/abi-v2-call, 2026-08-25):
+            ABI_VERSION 2; `HostFn::Call` (since 2 — a v1 manifest that
+            imports it is refused at the door naming the bump), signature
+            (port_ptr, port_len, msg_ptr, msg_len) -> packed i64, 0 =
+            "did not happen". RE-ENTRANCY DISCIPLINE in orchestrator.rs:
+            state behind Rc<RefCell<Shared>>, every actor's host holds a
+            Weak back-link + its declared `requires`; EVERY guest run is
+            on a cartridge TAKEN OUT of the composition (Composition::
+            take/put_back) with no borrow held, so a nested call borrows
+            the rest, a busy callee is refused (not deadlocked), chains
+            are bounded (MAX_CALL_CHAIN 8), and the callee runs on the
+            CALLER's fuel (Cartridge::handle_with shares the counter).
+            failures are soft for the guest (0) and loud for the log
+            (Denied / CallFailed); a callee that traps is supervised as a
+            crash — EXCEPT fuel exhaustion, which is the caller's fault:
+            the callee gets `Event::Reset` (rebuilt on the next pump, no
+            backoff, no crash counted — otherwise a stingy caller could
+            back an innocent provider into Failed). the pump now rebuilds
+            a down actor even with no mail (call-only providers must come
+            back). boot/restart/swap all run guest code through the same
+            take/put_back path (init_all would hold the borrow a nested
+            call needs). API: with_host(slug, f) replaces host(slug);
+            order() / provider_of() replace composition(). +5 orchestrator
+            evals (answer round-trip + caller-pays fuel + reset, denied
+            call, callee trap → soft fail + supervision + "not up"
+            refusal, 3-deep chain with answers propagating, emits during
+            a nested call routed after it), +2 lifecycle (host-routed call
+            writes the answer into the caller's memory; v1 manifest
+            refused for `call`, v1 with v1 imports still loads).
+      - [ ] item 8 NEXT: the cognitive orchestrator — the first hot-
+            swappable reasoning module. concretely: a `cognitive`
+            cartridge providing "reasoning" whose cart_handle takes a
+            prompt and answers (v1: a rustlite module that composes a
+            reply from kv memory + the prompt; the LLM itself stays in
+            the worker — the cartridge decides WHAT to ask and HOW to
+            use the answer, via a new host import for model calls? design
+            first: read plan §8 last paragraph and CHARTER article i —
+            ship the host import only when the module needs it). wire it
+            as Orchestrator over Composition; route the agent loop's
+            prompt through handle_port("reasoning"); prove hot-swap live
+            (swap the module mid-conversation, next prompt uses the new
+            one). browser wiring: a real Host over the worker's feed /
+            clock / opfs kv namespace per slug / bus.
+      - [ ] items 9–10 per plan §11 (corpus capture → opcode-model
+            experiment).
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).

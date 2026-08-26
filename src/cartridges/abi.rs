@@ -48,15 +48,24 @@ pub enum HostFn {
     /// bus. a host that cannot deliver TRAPS the guest (D4): there is no
     /// status channel to lose the failure in.
     Emit,
+    /// ABI v2. `call(port_ptr, port_len, msg_ptr, msg_len) -> i64` — a
+    /// SYNCHRONOUS request to whoever provides `port`, mediated by the
+    /// orchestrator, charged to the caller's fuel. the answer is written
+    /// into the caller's memory via cart_alloc and returned packed; 0 means
+    /// the call did not happen (undeclared port, no provider, callee not
+    /// up or busy, callee trapped) — every such case is an orchestrator
+    /// event, never a silent nothing.
+    Call,
 }
 
 impl HostFn {
-    pub const ALL: [HostFn; 5] = [
+    pub const ALL: [HostFn; 6] = [
         HostFn::Log,
         HostFn::NowMs,
         HostFn::StoreGet,
         HostFn::StoreSet,
         HostFn::Emit,
+        HostFn::Call,
     ];
 
     pub fn name(self) -> &'static str {
@@ -66,6 +75,17 @@ impl HostFn {
             HostFn::StoreGet => "store_get",
             HostFn::StoreSet => "store_set",
             HostFn::Emit => "emit",
+            HostFn::Call => "call",
+        }
+    }
+
+    /// the ABI version that introduced this function. a manifest declaring
+    /// an older version cannot import it — the door check that keeps a v1
+    /// cartridge honest about what it was built against.
+    pub fn since(self) -> u32 {
+        match self {
+            HostFn::Call => 2,
+            _ => 1,
         }
     }
 
@@ -81,6 +101,7 @@ impl HostFn {
             HostFn::StoreGet => (&[Ty::I32, Ty::I32], Some(Ty::I64)),
             HostFn::StoreSet => (&[Ty::I32, Ty::I32, Ty::I32, Ty::I32], Some(Ty::I32)),
             HostFn::Emit => (&[Ty::I32, Ty::I32, Ty::I32, Ty::I32], None),
+            HostFn::Call => (&[Ty::I32, Ty::I32, Ty::I32, Ty::I32], Some(Ty::I64)),
         }
     }
 
@@ -189,4 +210,10 @@ pub trait Host {
     fn store_set(&mut self, key: &[u8], value: &[u8]) -> Result<(), String>;
     /// Err = undeliverable; the guest traps with the reason.
     fn emit(&mut self, topic: &[u8], payload: &[u8]) -> Result<(), String>;
+    /// ABI v2: a synchronous request to the provider of `port`, run under
+    /// the CALLER's remaining `fuel`. Ok(Some(bytes)) = the answer;
+    /// Ok(None) = the call did not happen (the host has already recorded
+    /// why) and the guest sees 0; Err = the host itself cannot route at all
+    /// (the guest traps). a host that mediates nothing answers Ok(None).
+    fn call(&mut self, port: &[u8], msg: &[u8], fuel: &mut u64) -> Result<Option<Vec<u8>>, String>;
 }

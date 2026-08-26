@@ -1,5 +1,5 @@
-//! L5 — the orchestrator: actors, mailboxes, supervision, hot-swap
-//! (CARTRIDGE_PLAN §8, build-order item 7).
+//! L5 — the orchestrator: actors, mailboxes, supervision, hot-swap, and
+//! (ABI v2) synchronous calls between actors (CARTRIDGE_PLAN §7–§8).
 //!
 //! every cartridge in a composition is an ACTOR: private state (its kv
 //! namespace in the host + its linear memory), a mailbox, and behavior =
@@ -26,19 +26,34 @@
 //! replayed, it is simply still pending. state that mattered was in kv;
 //! that is why state-in-kv is an architectural rule, not a style.
 //!
-//! guest → guest messages: an actor's `emit(topic, payload)` is routed to
-//! the provider of port `topic` — IF the emitter declared that port under
-//! `requires`. capability-based (declared at wire time), auditable (every
-//! denial is an event), never a direct call. a synchronous request/response
-//! `call` is ABI v2 and rides on this mailbox as its mediator.
+//! guest → guest, asynchronously: an actor's `emit(topic, payload)` is
+//! routed to the provider of port `topic` — IF the emitter declared that
+//! port under `requires`. capability-based (declared at wire time),
+//! auditable (every denial is an event), never a direct call.
+//!
+//! guest → guest, synchronously (ABI v2 `call`): the same capability
+//! check, then the callee's cart_handle runs IMMEDIATELY under the
+//! caller's fuel and its answer is written back into the caller's memory.
+//! RE-ENTRANCY DISCIPLINE: every guest run happens on a cartridge TAKEN
+//! OUT of the composition (`Composition::take` / `put_back`), and the
+//! shared state lives behind `Rc<RefCell<_>>` that is never borrowed
+//! while guest code runs — so a nested call can borrow the rest of the
+//! composition, a busy callee is refused (not deadlocked), and the chain
+//! is bounded by MAX_CALL_CHAIN. failures are SOFT for the guest (it sees
+//! 0) and LOUD for the log (`CallFailed`, `Denied`); a callee that traps
+//! inside a call is handed to supervision exactly as if it had crashed on
+//! its own mail.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::{Rc, Weak};
 
 use super::abi::Host;
 use super::composition::{ComposeError, Composition};
-use super::lifecycle::Verified;
+use super::lifecycle::{CallError, Cartridge, Verified};
 use super::manifest::CartridgeManifest;
 use super::ports::wire;
+use super::runtime::Trap;
 
 /// consecutive crashes tolerated before an actor is marked Failed.
 pub const MAX_RESTARTS: u32 = 5;
@@ -47,6 +62,9 @@ pub const RESTART_BASE_MS: i64 = 500;
 /// pending messages one actor may hold; beyond it, sends are refused loudly
 /// rather than growing without bound behind a slow or failed actor.
 pub const MAX_MAILBOX: usize = 256;
+/// deepest chain of synchronous calls (a → b → c …). each level is a
+/// native frame set, so this bounds native recursion as well as guest work.
+pub const MAX_CALL_CHAIN: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
@@ -70,6 +88,16 @@ pub enum Health {
     Failed { reason: String },
 }
 
+impl Health {
+    fn label(&self) -> String {
+        match self {
+            Health::Up => "up".into(),
+            Health::Restarting { attempt, .. } => format!("restarting (attempt {attempt})"),
+            Health::Failed { reason } => format!("failed: {reason}"),
+        }
+    }
+}
+
 /// everything observable about the pump, for the feed (D4: every failure
 /// renders) and for tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,26 +116,62 @@ pub enum Event {
     },
     Restarted { slug: String, attempt: u32 },
     Failed { slug: String, reason: String },
-    /// an emit to a port the emitter did not declare under `requires`.
+    /// an emit or call to a port the actor did not declare under `requires`.
     Denied { from: String, topic: String, reason: String },
     /// a host send that has nowhere to go, or a mailbox at capacity.
     Undeliverable { topic: String, reason: String },
     Swapped { slug: String },
+    /// a synchronous call completed: `to` answered `from` on `port`.
+    Called {
+        from: String,
+        to: String,
+        port: String,
+        response_len: usize,
+    },
+    /// a synchronous call did not complete; the caller saw 0.
+    CallFailed { from: String, port: String, reason: String },
+    /// an actor is rebuilt on the next pump WITHOUT backoff or a crash
+    /// counted: it was interrupted by someone else's fault (the caller's
+    /// fuel ran out inside it), and its memory may be mid-write.
+    Reset { slug: String, reason: String },
 }
 
-/// the host each actor actually talks to: delegates everything to the real
-/// host and captures emits for routing. the real host still sees the emit
-/// first (it is the feed's observer; its refusal traps the guest as ever).
-pub struct ActorHost<H> {
+/// what the orchestrator and every actor's host share. borrowed only
+/// BETWEEN guest runs — see the module doc's re-entrancy discipline.
+struct Shared<H: Host> {
+    comp: Composition<ActorHost<H>>,
+    /// verified images by slug, for restarts without re-decoding.
+    images: BTreeMap<String, Verified>,
+    actors: BTreeMap<String, Actor>,
+    events: Vec<Event>,
+    /// the pump's current time, so a crash inside a nested call can
+    /// schedule its backoff without the guest passing a clock around.
+    now_ms: i64,
+    call_depth: u32,
+}
+
+/// the host each actor actually talks to: delegates the v1 surface to the
+/// real host, captures emits for routing, and mediates v2 `call`s through
+/// the shared composition. the real host still sees every emit first (it
+/// is the feed's witness); it never sees a `call` — routing is the
+/// orchestrator's job, not the platform's.
+pub struct ActorHost<H: Host> {
     pub inner: H,
     outbox: Vec<(Vec<u8>, Vec<u8>)>,
+    slug: String,
+    /// ports this actor declared under `requires` — its call capabilities.
+    requires: BTreeSet<String>,
+    shared: Weak<RefCell<Shared<H>>>,
 }
 
 impl<H: Host> ActorHost<H> {
-    pub fn new(inner: H) -> Self {
+    fn new(inner: H, manifest: &CartridgeManifest) -> Self {
         Self {
             inner,
             outbox: Vec::new(),
+            slug: manifest.slug.clone(),
+            requires: manifest.requires.iter().map(|p| p.name.clone()).collect(),
+            shared: Weak::new(),
         }
     }
 }
@@ -130,6 +194,100 @@ impl<H: Host> Host for ActorHost<H> {
         self.outbox.push((topic.to_vec(), payload.to_vec()));
         Ok(())
     }
+
+    fn call(&mut self, port: &[u8], msg: &[u8], fuel: &mut u64) -> Result<Option<Vec<u8>>, String> {
+        let port = String::from_utf8_lossy(port).into_owned();
+        let Some(rc) = self.shared.upgrade() else {
+            return Err("no orchestrator is attached to route calls".into());
+        };
+        if !self.requires.contains(&port) {
+            rc.borrow_mut().events.push(Event::Denied {
+                from: self.slug.clone(),
+                topic: port,
+                reason: "port not declared under `requires` — declare it in the manifest so \
+                         the wiring can check it"
+                    .into(),
+            });
+            return Ok(None);
+        }
+        // resolve and TAKE the callee under one short borrow, so the
+        // callee's own host can borrow the shared state while it runs.
+        let (to, mut callee) = {
+            let mut sh = rc.borrow_mut();
+            let refuse = |sh: &mut Shared<H>, reason: String| {
+                sh.events.push(Event::CallFailed {
+                    from: self.slug.clone(),
+                    port: port.clone(),
+                    reason,
+                });
+            };
+            if sh.call_depth >= MAX_CALL_CHAIN {
+                refuse(&mut sh, format!("call chain deeper than {MAX_CALL_CHAIN}"));
+                return Ok(None);
+            }
+            let Some(to) = sh.comp.provider_of(&port).map(str::to_string) else {
+                refuse(&mut sh, "no provider in the current wiring".into());
+                return Ok(None);
+            };
+            match sh.actors.get(&to).map(|a| &a.health) {
+                Some(Health::Up) => {}
+                Some(other) => {
+                    let reason = format!("'{to}' is not up: {}", other.label());
+                    refuse(&mut sh, reason);
+                    return Ok(None);
+                }
+                None => {
+                    refuse(&mut sh, format!("no actor named '{to}'"));
+                    return Ok(None);
+                }
+            }
+            let Some(callee) = sh.comp.take(&to) else {
+                refuse(&mut sh, format!("'{to}' is busy (already running in this call chain)"));
+                return Ok(None);
+            };
+            sh.call_depth += 1;
+            (to, callee)
+        };
+
+        // the guest runs with NO shared borrow held, on the caller's fuel.
+        let result = callee.handle_with(msg, fuel);
+
+        let mut sh = rc.borrow_mut();
+        sh.comp.put_back(to.clone(), callee);
+        sh.call_depth -= 1;
+        sh.route_outbox(&to);
+        match result {
+            Ok(bytes) => {
+                sh.events.push(Event::Called {
+                    from: self.slug.clone(),
+                    to,
+                    port,
+                    response_len: bytes.len(),
+                });
+                Ok(Some(bytes))
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                sh.events.push(Event::CallFailed {
+                    from: self.slug.clone(),
+                    port,
+                    reason: format!("'{to}' failed: {reason}"),
+                });
+                let now = sh.now_ms;
+                if matches!(e, CallError::Trap(Trap::FuelExhausted)) {
+                    // the CALLER's budget ran out inside the callee. that is
+                    // not the callee's crash — counting it would let a stingy
+                    // caller back an innocent provider off into Failed. its
+                    // memory may be mid-write, so it is rebuilt on the next
+                    // pump: no backoff, no crash counted.
+                    sh.reset(&to, "the caller's fuel ran out inside it", now);
+                } else {
+                    sh.crash(&to, reason, now);
+                }
+                Ok(None)
+            }
+        }
+    }
 }
 
 struct Actor {
@@ -141,124 +299,7 @@ struct Actor {
     config: Vec<u8>,
 }
 
-pub struct Orchestrator<H: Host> {
-    comp: Composition<ActorHost<H>>,
-    /// verified images by slug, for restarts without re-decoding.
-    images: BTreeMap<String, Verified>,
-    actors: BTreeMap<String, Actor>,
-    events: Vec<Event>,
-    /// round-robin position over wiring order.
-    cursor: usize,
-}
-
-impl<H: Host> std::fmt::Debug for Orchestrator<H> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Orchestrator")
-            .field("order", &self.comp.wiring().order)
-            .field(
-                "health",
-                &self
-                    .actors
-                    .iter()
-                    .map(|(s, a)| (s.clone(), a.health.clone()))
-                    .collect::<Vec<_>>(),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-impl<H: Host> Orchestrator<H> {
-    /// wire, verify, instantiate — refusals in that order, each named.
-    pub fn load(
-        entries: &[(CartridgeManifest, Vec<u8>)],
-        mut host_for: impl FnMut(&CartridgeManifest) -> H,
-    ) -> Result<Self, ComposeError> {
-        let manifests: Vec<CartridgeManifest> = entries.iter().map(|(m, _)| m.clone()).collect();
-        wire(&manifests)?;
-        let mut images = BTreeMap::new();
-        let mut list = Vec::with_capacity(entries.len());
-        for (m, bytes) in entries {
-            let image = Verified::verify(m.clone(), bytes).map_err(|error| {
-                ComposeError::Load {
-                    slug: m.slug.clone(),
-                    error,
-                }
-            })?;
-            images.insert(m.slug.clone(), image.clone());
-            list.push(image);
-        }
-        let comp = Composition::from_verified(list, |m| ActorHost::new(host_for(m)))?;
-        let actors = comp
-            .slugs()
-            .map(|s| {
-                (
-                    s.to_string(),
-                    Actor {
-                        mailbox: VecDeque::new(),
-                        health: Health::Up,
-                        crashes: 0,
-                        config: Vec::new(),
-                    },
-                )
-            })
-            .collect();
-        Ok(Self {
-            comp,
-            images,
-            actors,
-            events: Vec::new(),
-            cursor: 0,
-        })
-    }
-
-    /// cart_init every actor in wiring order with `config_for(slug)`; the
-    /// configs are remembered for restarts and swaps. a refusal is not
-    /// transient: that actor is marked Failed (until swapped) and the
-    /// error is returned, exactly as Composition::init_all reports it.
-    pub fn boot(
-        &mut self,
-        config_for: &dyn Fn(&str) -> Vec<u8>,
-        fuel: u64,
-    ) -> Result<Vec<String>, ComposeError> {
-        for (slug, actor) in &mut self.actors {
-            actor.config = config_for(slug);
-        }
-        let configs: BTreeMap<String, Vec<u8>> = self
-            .actors
-            .iter()
-            .map(|(s, a)| (s.clone(), a.config.clone()))
-            .collect();
-        let result = self
-            .comp
-            .init_all(&|slug| configs.get(slug).cloned().unwrap_or_default(), fuel);
-        if let Err(ComposeError::Call { slug, error }) = &result {
-            let reason = format!("boot: {error}");
-            if let Some(a) = self.actors.get_mut(slug) {
-                a.health = Health::Failed {
-                    reason: reason.clone(),
-                };
-            }
-            self.events.push(Event::Failed {
-                slug: slug.clone(),
-                reason,
-            });
-        }
-        result
-    }
-
-    /// a message from the host to whoever provides `port`. false (with an
-    /// Undeliverable event) when nothing does or the mailbox is full.
-    pub fn send(&mut self, port: &str, payload: &[u8]) -> bool {
-        let Some(slug) = self.comp.provider_of(port).map(str::to_string) else {
-            self.events.push(Event::Undeliverable {
-                topic: port.to_string(),
-                reason: "no cartridge provides this port".into(),
-            });
-            return false;
-        };
-        self.enqueue(None, slug, port, payload)
-    }
-
+impl<H: Host> Shared<H> {
     fn enqueue(&mut self, from: Option<String>, to: String, topic: &str, payload: &[u8]) -> bool {
         let Some(actor) = self.actors.get_mut(&to) else {
             self.events.push(Event::Undeliverable {
@@ -280,98 +321,6 @@ impl<H: Host> Orchestrator<H> {
             payload: payload.to_vec(),
         });
         true
-    }
-
-    /// deliver ONE message: the next actor in round-robin order that has
-    /// mail and is runnable at `now_ms` (Up, or Restarting with its backoff
-    /// elapsed — in which case it is re-instantiated first). returns false
-    /// when nothing was runnable. every outcome lands in the event log.
-    pub fn pump(&mut self, now_ms: i64, fuel: u64) -> bool {
-        let order = self.comp.wiring().order.clone();
-        let n = order.len();
-        for i in 0..n {
-            let idx = (self.cursor + i) % n;
-            let slug = order[idx].clone();
-            let Some(actor) = self.actors.get(&slug) else {
-                continue;
-            };
-            if actor.mailbox.is_empty() {
-                continue;
-            }
-            match actor.health.clone() {
-                Health::Failed { .. } => continue,
-                Health::Restarting {
-                    attempt,
-                    not_before_ms,
-                    ..
-                } => {
-                    if now_ms < not_before_ms {
-                        continue;
-                    }
-                    self.cursor = idx + 1;
-                    match self.restart(&slug, fuel) {
-                        Ok(()) => {
-                            if let Some(a) = self.actors.get_mut(&slug) {
-                                a.health = Health::Up;
-                            }
-                            self.events.push(Event::Restarted {
-                                slug: slug.clone(),
-                                attempt,
-                            });
-                        }
-                        Err(reason) => {
-                            self.crash(&slug, reason, now_ms);
-                            return true;
-                        }
-                    }
-                }
-                Health::Up => {
-                    self.cursor = idx + 1;
-                }
-            }
-
-            let Some(env) = self
-                .actors
-                .get_mut(&slug)
-                .and_then(|a| a.mailbox.pop_front())
-            else {
-                continue;
-            };
-            let result = self.comp.handle(&slug, &env.payload, fuel);
-            // emits that happened before a trap still happened: route them.
-            self.route_outbox(&slug);
-            match result {
-                Ok(response) => {
-                    if let Some(a) = self.actors.get_mut(&slug) {
-                        a.crashes = 0;
-                    }
-                    self.events.push(Event::Delivered {
-                        to: slug,
-                        from: env.from,
-                        topic: env.topic,
-                        response,
-                    });
-                }
-                Err(e) => {
-                    let reason = match e {
-                        ComposeError::Call { error, .. } => error.to_string(),
-                        other => other.to_string(),
-                    };
-                    self.crash(&slug, reason, now_ms);
-                }
-            }
-            return true;
-        }
-        false
-    }
-
-    /// pump until nothing is runnable or `max` deliveries; returns the count.
-    pub fn pump_all(&mut self, now_ms: i64, fuel: u64, max: usize) -> usize {
-        let mut n = 0;
-        while n < max && self.pump(now_ms, fuel) {
-            n += 1;
-        }
-        n
     }
 
     fn crash(&mut self, slug: &str, reason: String, now_ms: i64) {
@@ -404,31 +353,25 @@ impl<H: Host> Orchestrator<H> {
         }
     }
 
-    /// re-instantiate from the image (same host) and re-init with the
-    /// remembered config. an Err here counts as another crash.
-    fn restart(&mut self, slug: &str, fuel: u64) -> Result<(), String> {
-        let image = self
-            .images
-            .get(slug)
-            .cloned()
-            .ok_or_else(|| format!("no verified image for '{slug}'"))?;
-        self.comp
-            .reinstantiate(slug, image)
-            .map_err(|e| e.to_string())?;
-        let config = self
-            .actors
-            .get(slug)
-            .map(|a| a.config.clone())
-            .unwrap_or_default();
-        let cart = self
-            .comp
-            .get_mut(slug)
-            .ok_or_else(|| format!("'{slug}' vanished during restart"))?;
-        cart.init(&config, fuel)
-            .map_err(|e| format!("re-init after restart: {e}"))
+    /// schedule a rebuild on the next pump with NO backoff and NO crash
+    /// counted — for interruptions that were not the actor's own doing.
+    fn reset(&mut self, slug: &str, why: &str, now_ms: i64) {
+        let Some(a) = self.actors.get_mut(slug) else {
+            return;
+        };
+        let reason = format!("reset: {why}");
+        a.health = Health::Restarting {
+            attempt: a.crashes,
+            not_before_ms: now_ms,
+            reason: reason.clone(),
+        };
+        self.events.push(Event::Reset {
+            slug: slug.to_string(),
+            reason,
+        });
     }
 
-    /// route everything `slug` emitted during its last call: to the
+    /// route everything `slug` emitted during its last run: to the
     /// provider of the topic's port when the emitter declared it under
     /// `requires`; otherwise a Denied event, never a delivery.
     fn route_outbox(&mut self, slug: &str) {
@@ -439,10 +382,10 @@ impl<H: Host> Orchestrator<H> {
         if out.is_empty() {
             return;
         }
-        let requires: Vec<String> = self
+        let requires: BTreeSet<String> = self
             .comp
             .get(slug)
-            .map(|c| c.manifest().requires.iter().map(|p| p.name.clone()).collect())
+            .map(|c| c.host().requires.clone())
             .unwrap_or_default();
         for (topic, payload) in out {
             let topic = String::from_utf8_lossy(&topic).into_owned();
@@ -467,11 +410,315 @@ impl<H: Host> Orchestrator<H> {
             self.enqueue(Some(slug.to_string()), to, &topic, &payload);
         }
     }
+}
+
+pub struct Orchestrator<H: Host> {
+    shared: Rc<RefCell<Shared<H>>>,
+    /// round-robin position over wiring order.
+    cursor: usize,
+}
+
+impl<H: Host> std::fmt::Debug for Orchestrator<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sh = self.shared.borrow();
+        f.debug_struct("Orchestrator")
+            .field("order", &sh.comp.wiring().order)
+            .field(
+                "health",
+                &sh.actors
+                    .iter()
+                    .map(|(s, a)| (s.clone(), a.health.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl<H: Host> Orchestrator<H> {
+    /// wire, verify, instantiate — refusals in that order, each named.
+    pub fn load(
+        entries: &[(CartridgeManifest, Vec<u8>)],
+        mut host_for: impl FnMut(&CartridgeManifest) -> H,
+    ) -> Result<Self, ComposeError> {
+        let manifests: Vec<CartridgeManifest> = entries.iter().map(|(m, _)| m.clone()).collect();
+        wire(&manifests)?;
+        let mut images = BTreeMap::new();
+        let mut list = Vec::with_capacity(entries.len());
+        for (m, bytes) in entries {
+            let image = Verified::verify(m.clone(), bytes).map_err(|error| {
+                ComposeError::Load {
+                    slug: m.slug.clone(),
+                    error,
+                }
+            })?;
+            images.insert(m.slug.clone(), image.clone());
+            list.push(image);
+        }
+        let comp = Composition::from_verified(list, |m| ActorHost::new(host_for(m), m))?;
+        let actors = comp
+            .slugs()
+            .map(|s| {
+                (
+                    s.to_string(),
+                    Actor {
+                        mailbox: VecDeque::new(),
+                        health: Health::Up,
+                        crashes: 0,
+                        config: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        let shared = Rc::new(RefCell::new(Shared {
+            comp,
+            images,
+            actors,
+            events: Vec::new(),
+            now_ms: 0,
+            call_depth: 0,
+        }));
+        // every actor's host learns where the shared state lives.
+        {
+            let weak = Rc::downgrade(&shared);
+            let mut sh = shared.borrow_mut();
+            let slugs: Vec<String> = sh.comp.slugs().map(String::from).collect();
+            for slug in slugs {
+                if let Some(c) = sh.comp.get_mut(&slug) {
+                    c.host_mut().shared = weak.clone();
+                }
+            }
+        }
+        Ok(Self { shared, cursor: 0 })
+    }
+
+    /// run `f` on `slug`'s cartridge TAKEN OUT of the composition, with no
+    /// shared borrow held — the only way guest code ever runs here.
+    fn run_taken<R>(
+        &self,
+        slug: &str,
+        f: impl FnOnce(&mut Cartridge<ActorHost<H>>) -> R,
+    ) -> Option<R> {
+        let mut cart = self.shared.borrow_mut().comp.take(slug)?;
+        let r = f(&mut cart);
+        self.shared.borrow_mut().comp.put_back(slug.to_string(), cart);
+        Some(r)
+    }
+
+    /// cart_init every actor in wiring order with `config_for(slug)`; the
+    /// configs are remembered for restarts and swaps. a refusal is not
+    /// transient: that actor is marked Failed (until swapped) and the
+    /// error is returned; actors after it in the order never boot.
+    pub fn boot(
+        &mut self,
+        config_for: &dyn Fn(&str) -> Vec<u8>,
+        fuel: u64,
+    ) -> Result<Vec<String>, ComposeError> {
+        let order = {
+            let mut sh = self.shared.borrow_mut();
+            for (slug, actor) in &mut sh.actors {
+                actor.config = config_for(slug);
+            }
+            sh.comp.wiring().order.clone()
+        };
+        let mut done = Vec::with_capacity(order.len());
+        for slug in order {
+            let config = config_for(&slug);
+            let result = self
+                .run_taken(&slug, |c| c.init(&config, fuel))
+                .ok_or_else(|| ComposeError::UnknownCartridge(slug.clone()))?;
+            let mut sh = self.shared.borrow_mut();
+            sh.route_outbox(&slug);
+            if let Err(error) = result {
+                let reason = format!("boot: {error}");
+                if let Some(a) = sh.actors.get_mut(&slug) {
+                    a.health = Health::Failed {
+                        reason: reason.clone(),
+                    };
+                }
+                sh.events.push(Event::Failed {
+                    slug: slug.clone(),
+                    reason,
+                });
+                return Err(ComposeError::Call { slug, error });
+            }
+            done.push(slug);
+        }
+        Ok(done)
+    }
+
+    /// a message from the host to whoever provides `port`. false (with an
+    /// Undeliverable event) when nothing does or the mailbox is full.
+    pub fn send(&mut self, port: &str, payload: &[u8]) -> bool {
+        let mut sh = self.shared.borrow_mut();
+        let Some(slug) = sh.comp.provider_of(port).map(str::to_string) else {
+            sh.events.push(Event::Undeliverable {
+                topic: port.to_string(),
+                reason: "no cartridge provides this port".into(),
+            });
+            return false;
+        };
+        sh.enqueue(None, slug, port, payload)
+    }
+
+    /// deliver ONE message: the next actor in round-robin order that has
+    /// mail and is runnable at `now_ms` (Up, or Restarting with its backoff
+    /// elapsed — in which case it is re-instantiated first). returns false
+    /// when nothing was runnable. every outcome lands in the event log.
+    pub fn pump(&mut self, now_ms: i64, fuel: u64) -> bool {
+        let order = {
+            let mut sh = self.shared.borrow_mut();
+            sh.now_ms = now_ms;
+            sh.comp.wiring().order.clone()
+        };
+        let n = order.len();
+        for i in 0..n {
+            let idx = (self.cursor + i) % n;
+            let slug = order[idx].clone();
+            enum Plan {
+                Skip,
+                Restart(u32),
+                Deliver,
+            }
+            // a down actor whose backoff elapsed is rebuilt whether or not
+            // it has mail: call-only providers are never pumped for mail,
+            // and they must come back too.
+            let plan = {
+                let sh = self.shared.borrow();
+                match sh.actors.get(&slug) {
+                    None => Plan::Skip,
+                    Some(a) => match &a.health {
+                        Health::Failed { .. } => Plan::Skip,
+                        Health::Restarting {
+                            attempt,
+                            not_before_ms,
+                            ..
+                        } => {
+                            if now_ms < *not_before_ms {
+                                Plan::Skip
+                            } else {
+                                Plan::Restart(*attempt)
+                            }
+                        }
+                        Health::Up if a.mailbox.is_empty() => Plan::Skip,
+                        Health::Up => Plan::Deliver,
+                    },
+                }
+            };
+            match plan {
+                Plan::Skip => continue,
+                Plan::Restart(attempt) => {
+                    self.cursor = idx + 1;
+                    match self.restart(&slug, fuel) {
+                        Ok(()) => {
+                            let mut sh = self.shared.borrow_mut();
+                            let has_mail = sh
+                                .actors
+                                .get_mut(&slug)
+                                .map(|a| {
+                                    a.health = Health::Up;
+                                    !a.mailbox.is_empty()
+                                })
+                                .unwrap_or(false);
+                            sh.events.push(Event::Restarted {
+                                slug: slug.clone(),
+                                attempt,
+                            });
+                            if !has_mail {
+                                return true; // the rebuild was the step
+                            }
+                        }
+                        Err(reason) => {
+                            self.shared.borrow_mut().crash(&slug, reason, now_ms);
+                            return true;
+                        }
+                    }
+                }
+                Plan::Deliver => {
+                    self.cursor = idx + 1;
+                }
+            }
+
+            let Some(env) = self
+                .shared
+                .borrow_mut()
+                .actors
+                .get_mut(&slug)
+                .and_then(|a| a.mailbox.pop_front())
+            else {
+                continue;
+            };
+            let mut budget = fuel;
+            let Some(result) = self.run_taken(&slug, |c| c.handle_with(&env.payload, &mut budget))
+            else {
+                continue;
+            };
+            let mut sh = self.shared.borrow_mut();
+            // emits that happened before a trap still happened: route them.
+            sh.route_outbox(&slug);
+            match result {
+                Ok(response) => {
+                    if let Some(a) = sh.actors.get_mut(&slug) {
+                        a.crashes = 0;
+                    }
+                    sh.events.push(Event::Delivered {
+                        to: slug,
+                        from: env.from,
+                        topic: env.topic,
+                        response,
+                    });
+                }
+                Err(e) => {
+                    sh.crash(&slug, e.to_string(), now_ms);
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    /// pump until nothing is runnable or `max` deliveries; returns the count.
+    pub fn pump_all(&mut self, now_ms: i64, fuel: u64, max: usize) -> usize {
+        let mut n = 0;
+        while n < max && self.pump(now_ms, fuel) {
+            n += 1;
+        }
+        n
+    }
+
+    /// re-instantiate from the image (same host) and re-init with the
+    /// remembered config. an Err here counts as another crash.
+    fn restart(&mut self, slug: &str, fuel: u64) -> Result<(), String> {
+        let (image, config) = {
+            let sh = self.shared.borrow();
+            let image = sh
+                .images
+                .get(slug)
+                .cloned()
+                .ok_or_else(|| format!("no verified image for '{slug}'"))?;
+            let config = sh
+                .actors
+                .get(slug)
+                .map(|a| a.config.clone())
+                .unwrap_or_default();
+            (image, config)
+        };
+        self.shared
+            .borrow_mut()
+            .comp
+            .reinstantiate(slug, image)
+            .map_err(|e| e.to_string())?;
+        let result = self
+            .run_taken(slug, |c| c.init(&config, fuel))
+            .ok_or_else(|| format!("'{slug}' vanished during restart"))?;
+        self.shared.borrow_mut().route_outbox(slug);
+        result.map_err(|e| format!("re-init after restart: {e}"))
+    }
 
     /// replace one actor's module between messages. atomic: a wiring
     /// break or bad bytes refuse with nothing changed. on success the host
-    /// (and its kv state) and the mailbox carry over, the actor is re-inited
-    /// with its remembered config, and its health resets to Up.
+    /// (and its kv state) and the mailbox carry over, the actor's call
+    /// capabilities follow the new manifest, it is re-inited with its
+    /// remembered config, and its health resets to Up.
     pub fn swap(
         &mut self,
         manifest: CartridgeManifest,
@@ -479,40 +726,47 @@ impl<H: Host> Orchestrator<H> {
         fuel: u64,
     ) -> Result<(), ComposeError> {
         let slug = manifest.slug.clone();
+        let requires: BTreeSet<String> =
+            manifest.requires.iter().map(|p| p.name.clone()).collect();
         let image = Verified::verify(manifest, bytes).map_err(|error| ComposeError::Load {
             slug: slug.clone(),
             error,
         })?;
-        self.comp.swap(image.clone(), |h| h)?;
-        self.images.insert(slug.clone(), image);
-        let config = self
-            .actors
-            .get(&slug)
-            .map(|a| a.config.clone())
-            .unwrap_or_default();
+        let config = {
+            let mut sh = self.shared.borrow_mut();
+            sh.comp.swap(image.clone(), |mut h| {
+                h.requires = requires;
+                h
+            })?;
+            sh.images.insert(slug.clone(), image);
+            sh.actors
+                .get(&slug)
+                .map(|a| a.config.clone())
+                .unwrap_or_default()
+        };
         let init = self
-            .comp
-            .get_mut(&slug)
-            .ok_or_else(|| ComposeError::UnknownCartridge(slug.clone()))?
-            .init(&config, fuel);
+            .run_taken(&slug, |c| c.init(&config, fuel))
+            .ok_or_else(|| ComposeError::UnknownCartridge(slug.clone()))?;
+        let mut sh = self.shared.borrow_mut();
+        sh.route_outbox(&slug);
         match init {
             Ok(()) => {
-                if let Some(a) = self.actors.get_mut(&slug) {
+                if let Some(a) = sh.actors.get_mut(&slug) {
                     a.health = Health::Up;
                     a.crashes = 0;
                 }
-                self.events.push(Event::Swapped { slug });
+                sh.events.push(Event::Swapped { slug });
                 Ok(())
             }
             Err(error) => {
                 // the new module is in place but refused its config: loud.
                 let reason = format!("swap: {error}");
-                if let Some(a) = self.actors.get_mut(&slug) {
+                if let Some(a) = sh.actors.get_mut(&slug) {
                     a.health = Health::Failed {
                         reason: reason.clone(),
                     };
                 }
-                self.events.push(Event::Failed {
+                sh.events.push(Event::Failed {
                     slug: slug.clone(),
                     reason,
                 });
@@ -522,32 +776,45 @@ impl<H: Host> Orchestrator<H> {
     }
 
     pub fn drain_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.events)
+        std::mem::take(&mut self.shared.borrow_mut().events)
     }
 
-    pub fn events(&self) -> &[Event] {
-        &self.events
-    }
-
-    pub fn health(&self, slug: &str) -> Option<&Health> {
-        self.actors.get(slug).map(|a| &a.health)
+    pub fn health(&self, slug: &str) -> Option<Health> {
+        self.shared.borrow().actors.get(slug).map(|a| a.health.clone())
     }
 
     pub fn pending(&self, slug: &str) -> usize {
-        self.actors.get(slug).map(|a| a.mailbox.len()).unwrap_or(0)
+        self.shared
+            .borrow()
+            .actors
+            .get(slug)
+            .map(|a| a.mailbox.len())
+            .unwrap_or(0)
     }
 
-    /// the REAL host behind an actor (the recorder in tests, the feed/kv
-    /// in the browser).
-    pub fn host(&self, slug: &str) -> Option<&H> {
-        self.comp.get(slug).map(|c| &c.host().inner)
+    /// the wiring's initialization order.
+    pub fn order(&self) -> Vec<String> {
+        self.shared.borrow().comp.wiring().order.clone()
     }
 
-    pub fn host_mut(&mut self, slug: &str) -> Option<&mut H> {
-        self.comp.get_mut(slug).map(|c| &mut c.host_mut().inner)
+    pub fn provider_of(&self, port: &str) -> Option<String> {
+        self.shared
+            .borrow()
+            .comp
+            .provider_of(port)
+            .map(str::to_string)
     }
 
-    pub fn composition(&self) -> &Composition<ActorHost<H>> {
-        &self.comp
+    /// inspect the REAL host behind an actor (the recorder in tests, the
+    /// feed/kv in the browser). None between a `take` and its `put_back`
+    /// — i.e. never from outside a guest run.
+    pub fn with_host<R>(&self, slug: &str, f: impl FnOnce(&H) -> R) -> Option<R> {
+        let sh = self.shared.borrow();
+        sh.comp.get(slug).map(|c| f(&c.host().inner))
+    }
+
+    pub fn with_host_mut<R>(&mut self, slug: &str, f: impl FnOnce(&mut H) -> R) -> Option<R> {
+        let mut sh = self.shared.borrow_mut();
+        sh.comp.get_mut(slug).map(|c| f(&mut c.host_mut().inner))
     }
 }

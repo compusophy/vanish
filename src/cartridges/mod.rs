@@ -22,6 +22,7 @@ pub use composition::{ComposeError, Composition};
 pub use lifecycle::{CallError, Cartridge, LoadError, Verified};
 pub use manifest::{CartridgeKind, CartridgeManifest, ABI_VERSION};
 pub use orchestrator::{
-    ActorHost, Envelope, Event, Health, Orchestrator, MAX_MAILBOX, MAX_RESTARTS, RESTART_BASE_MS,
+    ActorHost, Envelope, Event, Health, Orchestrator, MAX_CALL_CHAIN, MAX_MAILBOX, MAX_RESTARTS,
+    RESTART_BASE_MS,
 };
 pub use ports::{wire, Edge, WireError, Wiring};

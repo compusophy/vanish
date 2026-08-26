@@ -150,6 +150,16 @@ impl Verified {
                     HostFn::names()
                 )));
             };
+            if hf.since() > manifest.abi_version {
+                return Err(LoadError(format!(
+                    "import '{}' exists since ABI v{}, but the manifest declares abi_version {} \
+                     — bump it (and mean it: the cartridge now depends on v{} semantics)",
+                    imp.name,
+                    hf.since(),
+                    manifest.abi_version,
+                    hf.since()
+                )));
+            }
             let ft = &module.types[imp.type_idx as usize]; // decode validated the index
             let (want_p, want_r) = hf.valtypes();
             if ft.params != want_p || ft.results != want_r {
@@ -283,11 +293,18 @@ impl<H: Host> Cartridge<H> {
     /// the response bytes are COPIED out of guest memory before returning,
     /// so the caller never holds a view into the sandbox.
     pub fn handle(&mut self, msg: &[u8], fuel: u64) -> Result<Vec<u8>, CallError> {
+        let mut fuel = fuel;
+        self.handle_with(msg, &mut fuel)
+    }
+
+    /// `handle` on a SHARED fuel counter — what remains is left in `fuel`.
+    /// a synchronous `call` runs the callee this way, so the caller pays
+    /// for the work it asked for.
+    pub fn handle_with(&mut self, msg: &[u8], fuel: &mut u64) -> Result<Vec<u8>, CallError> {
         if !self.initialized {
             return Err(CallError::NotInitialized);
         }
-        let mut fuel = fuel;
-        let (ptr, len) = self.hand_over(msg, &mut fuel)?;
+        let (ptr, len) = self.hand_over(msg, fuel)?;
         let host: &mut dyn Host = &mut self.host;
         let out = runtime::invoke_hosted(
             &self.module,
@@ -295,7 +312,7 @@ impl<H: Host> Cartridge<H> {
             host,
             self.handle_idx,
             &[Val::I32(ptr), Val::I32(len)],
-            &mut fuel,
+            fuel,
         )?;
         let packed = match out {
             Some(Val::I64(v)) => v,

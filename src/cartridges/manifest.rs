@@ -9,10 +9,15 @@
 
 use serde::{Deserialize, Serialize};
 
-/// the only ABI this build understands. a manifest claiming a NEWER major
+/// the newest ABI this build understands. a manifest claiming a NEWER
 /// version was built against host functions we do not have; loading it
 /// would trap unpredictably mid-run, so it is refused at the door instead.
-pub const ABI_VERSION: u32 = 1;
+/// older versions still load — and a cartridge may only import the host
+/// functions its declared version has (`HostFn::since`), so a v1 manifest
+/// cannot reach for v2's `call`.
+///
+/// v1: log, now_ms, store_get, store_set, emit. v2: + call.
+pub const ABI_VERSION: u32 = 2;
 
 /// what kind of computation this module performs. mirrors tempo-x402's
 /// proven taxonomy (its cognitive kind = hot-swappable brain modules);

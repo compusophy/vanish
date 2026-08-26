@@ -23,6 +23,10 @@ pub struct FakeHost {
     pub fail_emit: bool,
     /// answer EVERY store_get with this value (for the re-entry bomb).
     pub always_get: Option<Vec<u8>>,
+    /// every (port, msg) the guest `call`ed through this host directly
+    /// (no orchestrator in between), and the answer it was given.
+    pub calls: Vec<(Vec<u8>, Vec<u8>)>,
+    pub call_answer: Option<Vec<u8>>,
 }
 
 impl Host for FakeHost {
@@ -53,6 +57,28 @@ impl Host for FakeHost {
         self.emitted.push((topic.to_vec(), payload.to_vec()));
         Ok(())
     }
+    fn call(&mut self, port: &[u8], msg: &[u8], _fuel: &mut u64) -> Result<Option<Vec<u8>>, String> {
+        self.calls.push((port.to_vec(), msg.to_vec()));
+        Ok(self.call_answer.clone())
+    }
+}
+
+/// a cartridge that forwards every message synchronously to `port` and
+/// answers with what came back — or echoes the message when the call did
+/// not happen (packed 0), so the two outcomes are distinguishable.
+pub fn caller_src(port: &str) -> String {
+    format!(
+        r#"
+        extern "C" {{ fn call(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32) -> i64; }}
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            let r: i64 = call(unpack_ptr("{port}"), unpack_len("{port}"), p, n);
+            if r == 0 {{ return pack(p, n); }}
+            return r;
+        }}
+    "#
+    )
 }
 
 pub fn port(name: &str) -> vanish::cartridges::manifest::Port {

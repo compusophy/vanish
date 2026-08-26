@@ -7,6 +7,41 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (`call` as ABI v2 — agent/abi-v2-call)
+
+fifth "keep going". the synchronous request/response between actors, the
+thing plan §7 said must be "orchestrator-mediated, never direct":
+
+- **abi.rs / manifest.rs**: ABI_VERSION 2. `HostFn::Call` with
+  `since() == 2`; `Verified::verify` refuses an import newer than the
+  manifest's declared abi_version (v1 cartridges with v1 imports load
+  unchanged). `Host::call(port, msg, fuel)` → Ok(Some) answer / Ok(None)
+  did-not-happen / Err host-cannot-route (trap). runtime writes the
+  answer into the caller's memory via cart_alloc, packed; 0 otherwise.
+- **the re-entrancy problem**: a call runs the callee's cart_handle while
+  the caller's is on the stack, and both live in one Composition that
+  the pump borrows mutably. solution: orchestrator state behind
+  Rc<RefCell<Shared>>; each ActorHost holds a Weak back-link and its own
+  `requires`; EVERY guest run happens on a cartridge taken OUT of the
+  composition (`Composition::take`/`put_back`) with no RefCell borrow
+  held. a nested call therefore borrows the rest; a busy callee is
+  refused, not deadlocked; MAX_CALL_CHAIN 8 bounds the chain. boot,
+  restart, and swap were moved onto the same path — `init_all` would
+  have held the borrow a cart_init that calls out needs (RefCell panic).
+- **supervision interaction — a real flaw the first eval run caught**:
+  the callee runs on the CALLER's fuel (`handle_with` shares the
+  counter), and my first version charged a fuel-exhausted callee with a
+  crash. that lets a stingy caller back an innocent provider off into
+  Failed. fixed: FuelExhausted inside a call → `Event::Reset` on the
+  callee (rebuilt on the next pump, no backoff, no count); any other
+  trap → crash as usual. corollary fix: the pump now rebuilds a down
+  actor even when it has no mail — call-only providers were never
+  pumped and would have stayed "not up" forever.
+- one test slip (at-most-once means the message that crashed the caller
+  is gone; the expectation wanted it redelivered) — fixed in the test.
+
+next: item 8, the cognitive orchestrator. design first (see board).
+
 ## landed this run (rustlite string literals + data segments — agent/rustlite-strings)
 
 fourth "keep going". the board's first item: the language gap that made a
