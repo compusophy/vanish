@@ -228,6 +228,64 @@ to train on.
 - article viii (harness not output): the runtime/compiler/orchestrator ARE
   harness. every future improvement inherits them.
 
+## 12. the cognitive orchestrator — design (item 8, written 2026-08-25)
+
+**constraint that shapes everything:** the model call is an async streamed
+fetch in the worker; the L3 interpreter is synchronous and cannot suspend
+(no continuations, no resume bookkeeping — by design, §6). therefore a
+cartridge cannot MAKE the model call. what it can own is the policy around
+it: what goes in, what comes out, and what is remembered. that is the
+"reasoning module" in v1 — thin by construction, but the seam is real and
+the swap is live.
+
+**the two-phase protocol** (`src/cartridges/cognitive.rs`):
+
+- port `reasoning`       — before the model. in: the user's prompt. out:
+  the prompt to send (empty = unchanged).
+- port `reasoning.after` — after the model. in: the assistant's answer.
+  out: a note for the feed (empty = nothing). the cartridge digests the
+  answer into kv (memory across prompts and across swaps).
+- framing: `cart_handle` receives bytes only, and one cartridge normally
+  provides both ports, so every message is prefixed with a phase byte
+  (0x00 prompt, 0x01 answer). ports remain the wiring/capability key; the
+  phase byte is the guest's dispatch.
+- `Cognition::before/after` drive it through `Orchestrator::request` — a
+  host-originated synchronous request to whichever cartridge provides the
+  port (plan §8's routing rule, made literal).
+
+**never hostage (article iv, D9):** no provider → passthrough, silently.
+a provider that traps, is restarting, or has failed → passthrough with a
+feed note; supervision does the rest; a swap revives it mid-conversation.
+the reasoning module is an enhancement of the loop, not a dependency.
+
+**reference modules** (`REASONING_V1`, `REASONING_V2`, rustlite, compiled
+in the browser): v1 = passthrough + remember last prompt/answer; v2 = the
+same plus a visible "[v2] " prefix, so a live hot-swap is observable from
+the feed without instrumentation.
+
+**the host** (`src/cartridges/memhost.rs`): the `Host` trait is sync and
+opfs is async, so each cartridge's kv lives in a `MemHost` during a step
+and the worker flushes `take_dirty()` to `cartridges/{slug}/kv/…` right
+after — the transcript checkpoint's write-behind shape; the window in
+which work exists only in memory is one pump (D2). logs/emits are taken
+the same way and rendered as feed notes; time is set per step (D1).
+
+**8b — browser wiring (next):** the worker owns a `Cognition<MemHost>`
+in its STATE, compiles the reference module at boot (or loads the
+cartridge the user last swapped in), calls `before` where `agent::run`
+pushes the user prompt and `after` when a turn completes without tool
+calls, flushes dirty kv after each, and renders notes. a `Command::Swap
+{ manifest, source }` lets the user (or the agent, editing its own
+policy) hot-swap the module from the ui. live proof = the feed showing
+"[v2] " on the prompt after a swap, with no reload.
+
+**what a host import for model calls would mean:** a synchronous
+`ask_model` cannot exist under this runtime. if a policy ever needs the
+model in the loop, the honest path is the two-phase protocol extended
+with a "please ask the model this, then call me back" response — the
+worker does the async work and re-enters the cartridge. not until a
+policy needs it (article i).
+
 ## 11. build order (each item independently verifiable)
 
 1. [x] L1 ABI: manifest struct + validation (pure, testable now) — PR #13
@@ -248,6 +306,9 @@ to train on.
        backoff ladder to Failed, atomic swap keeping host + mailbox,
        emits routed by declared capability. `call` (ABI v2) rides on it
        next; string literals + data segments first.
-8. [ ] cognitive orchestrator: first hot-swappable reasoning module
+8. [~] cognitive orchestrator: first hot-swappable reasoning module —
+       8a (design §12, cognitive.rs, Orchestrator::request, MemHost,
+       reference v1/v2 modules, swap-with-kv-intact proven natively)
+       landed; 8b = browser wiring + the live proof
 9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
 10. [ ] the opcode-model experiment (§9) — gated on 9

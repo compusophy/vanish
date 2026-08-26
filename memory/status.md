@@ -7,6 +7,41 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (item 8a: the reasoning policy as a cartridge — agent/cognitive-policy)
+
+sixth "keep going". the board said design first, so: read agent/mod.rs
+(`run` seeds the system prompt, pushes the user prompt, loops
+llm::run_turn — async streamed fetch) and llm.rs. the constraint that
+decides the design: the interpreter cannot suspend, so a cartridge cannot
+make the model call; it owns the policy AROUND it. §12 written into the
+plan before any code. what landed, all native-testable:
+
+- **cognitive.rs**: two ports (`reasoning` before / `reasoning.after`
+  after), phase-byte framing (cart_handle gets bytes only; one cartridge
+  provides both ports), `Cognition::before/after` with passthrough on
+  no-provider (silent) and on crash/not-up/failed (with a feed note);
+  `describe(&Event)` for the feed; REASONING_V1/V2 reference modules in
+  rustlite — v2's "[v2] " prefix exists so a live swap is visible with
+  no instrumentation.
+- **orchestrator.rs**: `request(port, msg, now, fuel)` — host-originated
+  synchronous request (plan §8's routing rule); rebuilds a due actor
+  first, NotUp otherwise; trap = supervised crash. `try_restart` shared
+  with the pump.
+- **memhost.rs**: the write-behind host — sync kv with a dirty set the
+  worker flushes to opfs after each step, logs/emits taken for feed
+  notes, time set per step. the shape D2 allows for a sync trait over an
+  async store: the window is one pump.
+- **no host import for model calls** — nothing needs one (article i);
+  §12 records the honest path (a "ask the model this, then call me
+  back" response) for when a policy does.
+- process note: a first draft of the eval file contained an `unsafe`
+  const-cast helper I had abandoned mid-thought and not deleted; caught
+  on review before it ever compiled into anything. the fix is the rule:
+  never leave a half-thought in a file — finish it or delete it.
+
+green first run (8 + 17 + 13). next: 8b, the browser wiring — the live
+proof the plan's §10 defines v1 by.
+
 ## landed this run (`call` as ABI v2 — agent/abi-v2-call)
 
 fifth "keep going". the synchronous request/response between actors, the
