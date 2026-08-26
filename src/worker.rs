@@ -1175,6 +1175,7 @@ async fn boot_corpus() {
 }
 
 /// what the corpus looks like right now, for a feed note or a tool result.
+#[derive(Clone)]
 pub struct CorpusStats {
     pub samples: usize,
     pub verified: usize,
@@ -1399,13 +1400,20 @@ pub struct PolicySwap {
 /// only evidence this system ever gets about where its own boundary is, and
 /// throwing it away is how a training set ends up full of nothing but
 /// answers that already worked (§9).
+/// the corpus stats come back on BOTH paths, because a refused attempt
+/// still grew the corpus and a feed that only mentioned it on success would
+/// make "refusals are kept" a claim with no evidence behind it (§9, D4).
+/// `None` means nothing was recorded at all — there was no candidate.
 fn apply_policy_swap(
     manifest: &str,
     source: &str,
     origin: crate::cartridges::Origin,
-) -> Result<PolicySwap, String> {
+) -> (Option<CorpusStats>, Result<PolicySwap, String>) {
     if source.trim().is_empty() {
-        return Err("no cartridge source to compile — a policy is a rustlite module".to_string());
+        return (
+            None,
+            Err("no cartridge source to compile — a policy is a rustlite module".to_string()),
+        );
     }
     let now = js_sys::Date::now() as i64;
     let outcome = COGNITION.with(|c| {
@@ -1431,19 +1439,30 @@ fn apply_policy_swap(
                 (sample, Err(e))
             }
         })
-    })?;
+    });
 
-    let (sample, result) = outcome;
+    let (sample, result) = match outcome {
+        Ok(v) => v,
+        // no cognition at all: nothing was compiled, so nothing is recorded.
+        Err(e) => return (None, Err(e)),
+    };
     let corpus = record_sample(sample);
-    let (slug, rehearsal, notes, flushes) = result?;
-    flush_cognition(flushes);
-    Ok(PolicySwap {
-        slug,
-        rehearsal,
-        notes,
-        save_error: None,
-        corpus,
-    })
+    match result {
+        Ok((slug, rehearsal, notes, flushes)) => {
+            flush_cognition(flushes);
+            (
+                Some(corpus.clone()),
+                Ok(PolicySwap {
+                    slug,
+                    rehearsal,
+                    notes,
+                    save_error: None,
+                    corpus,
+                }),
+            )
+        }
+        Err(e) => (Some(corpus), Err(e)),
+    }
 }
 
 /// remember a swapped-in policy so the next boot brings it back.
@@ -1491,7 +1510,9 @@ fn describe_rehearsal(r: &crate::cartridges::Rehearsal) -> String {
 /// background. a refusal changes nothing — not the running module, not what
 /// is on disk — and carries the compiler's or the rehearsal's own words.
 fn swap_cartridge(manifest: String, source: String) {
-    let swap = match apply_policy_swap(&manifest, &source, crate::cartridges::Origin::Human) {
+    let (corpus, result) =
+        apply_policy_swap(&manifest, &source, crate::cartridges::Origin::Human);
+    let swap = match result {
         Ok(s) => s,
         Err(e) => {
             emit(Event::Error {
@@ -1499,6 +1520,14 @@ fn swap_cartridge(manifest: String, source: String) {
                 scope: "cartridge".to_string(),
                 message: format!("hot-swap refused: {e}"),
             });
+            // the refusal is IN the corpus; say so, or the claim that
+            // refusals are kept has nothing behind it on screen.
+            if let Some(c) = corpus {
+                emit(Event::Note {
+                    thread: conv(),
+                    text: describe_corpus(&c),
+                });
+            }
             return;
         }
     };
@@ -1554,7 +1583,22 @@ pub async fn swap_reasoning_policy(
     let origin = crate::cartridges::Origin::Agent {
         intent: intent.to_string(),
     };
-    let mut swap = apply_policy_swap(manifest, source, origin)?;
+    let (corpus, result) = apply_policy_swap(manifest, source, origin);
+    let mut swap = match result {
+        Ok(s) => s,
+        Err(e) => {
+            // the model gets the refusal as a tool error, but the feed still
+            // shows that the attempt was recorded — the run produced
+            // training data even though it produced no swap.
+            if let Some(c) = corpus {
+                emit(Event::Note {
+                    thread: conv(),
+                    text: describe_corpus(&c),
+                });
+            }
+            return Err(e);
+        }
+    };
     emit(Event::Note {
         thread: conv(),
         text: describe_rehearsal(&swap.rehearsal),
