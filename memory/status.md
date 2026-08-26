@@ -7,6 +7,61 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (item 8c: the agent rewrites its own reasoning policy — agent/cognitive-swap-tool)
+
+eighth "keep going", stacked on 8b because github actions was in a major
+outage and #23 could not go green. this is the recursive step the whole
+cartridge track was built toward: `swap_cartridge` is a TOOL.
+
+- **the lock came before the door.** `parse_policy` proves a module
+  compiles; supervision catches one that traps later. between them sits the
+  case that matters: a module that compiles and traps on its FIRST message
+  would be installed, crash on the next real prompt, and cost a restart
+  cycle before anyone learned why. `cognitive::rehearse` instantiates the
+  candidate over a SCRATCH MemHost seeded from a COPY of the live kv, inits
+  it, and puts one message through each declared phase. it refuses — with
+  nothing changed — when the module will not start, declares no `reasoning`
+  port, or traps. seeding from the live kv is the deliberate part: a policy
+  that only works against an empty store is exactly the one a naive check
+  would pass.
+- `Cognition::swap_policy` returns `(slug, Rehearsal)`; the ui and the tool
+  both narrate it as "🧪 rehearsal passed: "…" → "…"".
+- **worker.rs split** into `apply_policy_swap` (sync) and `persist_policy`
+  (async). `Command::SwapCartridge` spawns the save; the TOOL awaits it,
+  because the model is about to be told whether the swap is durable and
+  that answer has to be true when it is given.
+- **the question 8b left open, answered**: a swap is not retroactive. the
+  prompt of the run making the call was already shaped by the old module
+  and is already in the transcript; the new one takes effect at the next
+  hook, and the tool result says so instead of letting the model assume.
+  nothing else is restricted — the loop is never hostage to a cartridge, so
+  the worst a bad swap does is degrade its own future prompts. a module
+  that RUNS and reasons badly is not catchable by the harness; the system
+  prompt names this the sharpest tool the agent has and the easiest to
+  misuse.
+- **new drift guard** (tests/agent_evals.rs, with its negative control):
+  every name in `tools::definitions()` must appear in SYSTEM_PROMPT. it
+  fired for real while writing this — the definition landed before the
+  prompt line did. the definitions are what the api enforces, so a tool
+  missing from the prompt still *works*, which is precisely why it rots
+  quietly: the prompt is where a tool's when-and-why lives.
+- 4 new evals on the rehearsal (a trapping candidate refused and its
+  scratch write proven not to reach the live store; an init-refusing
+  candidate; a portless manifest; the rehearsal seeded from live memory
+  leaving that memory byte-identical). gate green: 20 suites + clippy,
+  plus the wasm32 check.
+
+**LIVE VERIFICATION OWED** — the tool sits behind the same credential gate
+as 8b's fourth link, so a preview cannot exercise it. on production: ask
+the agent to swap its policy to v2 and watch for "🧪 rehearsal passed" and
+"🔁 the agent swapped its own reasoning policy".
+
+next: 8d — give the agent something worth swapping TO. v1 and v2 are demos.
+a policy that earns its place needs kv it reads back (a standing note
+carried from the last answer into the next prompt), which needs `store_get`
+in a reference module and some way to judge whether the shaped prompt was
+better — which is where item 9's corpus capture starts paying for itself.
+
 ## landed this run (item 8b: the reasoning cartridge, wired into the browser — agent/cognitive-browser-wiring)
 
 seventh "keep going". 8a made the policy real and native-testable; 8b puts

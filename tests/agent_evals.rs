@@ -326,3 +326,49 @@ fn empty_batch_is_rejected_before_it_starts() {
     assert!(b.is_empty());
     assert_eq!(b.next_prompt(), None);
 }
+
+// ---- the tool list and the prompt that describes it ----------------------
+
+/// every tool the model is offered must also be NAMED in the system prompt.
+///
+/// the definitions are what the api enforces, so a tool missing from the
+/// prompt still works — which is precisely why this rots quietly. the prompt
+/// is where a tool's *when and why* lives; a tool the prompt never mentions
+/// is one the model reaches for by guessing. this fired for real when
+/// swap_cartridge was added: the definition landed first.
+#[test]
+fn every_tool_definition_is_described_in_the_system_prompt() {
+    let defs = vanish::agent::tools::definitions();
+    let names: Vec<String> = defs
+        .as_array()
+        .expect("definitions() is a json array")
+        .iter()
+        .map(|d| {
+            d["function"]["name"]
+                .as_str()
+                .expect("every definition names a function")
+                .to_string()
+        })
+        .collect();
+    assert!(names.len() > 10, "suspiciously few tools: {names:?}");
+    assert!(names.contains(&"swap_cartridge".to_string()));
+
+    let missing: Vec<&String> = names
+        .iter()
+        .filter(|n| !vanish::agent::SYSTEM_PROMPT.contains(n.as_str()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these tools exist but the system prompt never names them: {missing:?}"
+    );
+}
+
+/// the negative control: the guard above only means something if it can
+/// fail. a name the prompt does not contain must be reported.
+#[test]
+fn the_prompt_guard_catches_a_tool_the_prompt_never_mentions() {
+    assert!(
+        !vanish::agent::SYSTEM_PROMPT.contains("teleport_repository"),
+        "the guard's own control leaked into the prompt"
+    );
+}
