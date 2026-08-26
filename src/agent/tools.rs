@@ -533,9 +533,10 @@ pub fn definitions() -> serde_json::Value {
             "type": "object",
             "properties": {
               "source": { "type": "string", "description": "the rustlite module. it must export cart_alloc, cart_init and cart_handle, and cart_handle receives a phase byte first (0 = a prompt to shape, 1 = an answer to digest) followed by the body" },
-              "manifest": { "type": "string", "description": "optional manifest json; omit for the default reasoner manifest, which provides both the 'reasoning' and 'reasoning.after' ports" }
+              "manifest": { "type": "string", "description": "optional manifest json; omit for the default reasoner manifest, which provides both the 'reasoning' and 'reasoning.after' ports" },
+              "intent": { "type": "string", "description": "one line: what you mean this policy to do differently. it is stored with the program and the runtime's verdict in the corpus, and it is the only prompt-shaped half of the (prompt to program) pair a future opcode model would train on. write it even when the swap is refused - a refusal with a stated intent is the most useful record there is" }
             },
-            "required": ["source"]
+            "required": ["source", "intent"]
           }
         }
       },
@@ -1295,7 +1296,9 @@ impl Workspace {
             "swap_cartridge" => {
                 let source = arg(&args, "source").ok_or("swap_cartridge requires 'source'")?;
                 let manifest = arg(&args, "manifest").unwrap_or("");
-                let swap = crate::worker::swap_reasoning_policy(manifest, source).await?;
+                let intent = arg(&args, "intent").unwrap_or("");
+                let swap =
+                    crate::worker::swap_reasoning_policy(manifest, source, intent).await?;
                 Ok(serde_json::json!({
                     "success": true,
                     "slug": swap.slug,
@@ -1308,6 +1311,14 @@ impl Workspace {
                     "durable": swap.save_error.is_none(),
                     "save_error": swap.save_error,
                     "effective": "from the next prompt onward — the one you are working on now was shaped by the previous policy",
+                    // §9: what the corpus looks like after this attempt.
+                    // refused attempts are in here too.
+                    "corpus": {
+                        "programs": swap.corpus.samples,
+                        "verified": swap.corpus.verified,
+                        "refused": swap.corpus.refused,
+                        "most_emitted_ops": swap.corpus.top_ops,
+                    },
                 })
                 .to_string())
             }

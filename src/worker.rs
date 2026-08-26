@@ -177,6 +177,7 @@ pub fn boot_worker() {
     // the first second should already go through whatever module the user
     // last swapped in.
     wasm_bindgen_futures::spawn_local(boot_cognition());
+    wasm_bindgen_futures::spawn_local(boot_corpus());
 
     // restore the previous conversation before the first command arrives, so
     // a reload (ota or manual) resumes the thread instead of starting over.
@@ -1137,6 +1138,80 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// every candidate program this browser has seen, with the runtime's
+    /// verdict on it (CARTRIDGE_PLAN §9). loaded at boot, written back after
+    /// every swap attempt — including the refused ones, which are the only
+    /// record of where the boundary actually is.
+    static CORPUS: RefCell<crate::cartridges::Corpus> =
+        RefCell::new(crate::cartridges::Corpus::new());
+}
+
+/// read the corpus back at boot. a corpus that does not parse is reported
+/// and started fresh: losing training data is survivable, refusing to boot
+/// the loop over it is not (D4).
+async fn boot_corpus() {
+    let path = crate::cartridges::corpus_path();
+    let Ok(text) = crate::platform::opfs::read(&path).await else {
+        return;
+    };
+    match crate::cartridges::Corpus::decode(&text) {
+        Ok(c) => {
+            let (n, v) = (c.samples.len(), c.verified());
+            CORPUS.with(|slot| *slot.borrow_mut() = c);
+            if n > 0 {
+                emit(Event::Note {
+                    thread: String::new(),
+                    text: format!("📚 corpus restored: {n} program(s), {v} verified"),
+                });
+            }
+        }
+        Err(e) => emit(Event::Error {
+            thread: String::new(),
+            scope: "corpus".to_string(),
+            message: format!("the cartridge corpus did not parse ({e}) — starting a fresh one"),
+        }),
+    }
+}
+
+/// what the corpus looks like right now, for a feed note or a tool result.
+pub struct CorpusStats {
+    pub samples: usize,
+    pub verified: usize,
+    pub refused: usize,
+    pub top_ops: Vec<(String, usize)>,
+}
+
+/// record one candidate and write the corpus back. the write is spawned,
+/// like every other durable write in this file: the swap path is
+/// synchronous and must not wait on opfs (D2's write-behind shape).
+fn record_sample(sample: crate::cartridges::Sample) -> CorpusStats {
+    let (stats, body) = CORPUS.with(|slot| {
+        let mut c = slot.borrow_mut();
+        c.record(sample);
+        (
+            CorpusStats {
+                samples: c.samples.len(),
+                verified: c.verified(),
+                refused: c.refused(),
+                top_ops: c.top_ops(5),
+            },
+            c.encode(),
+        )
+    });
+    wasm_bindgen_futures::spawn_local(async move {
+        let path = crate::cartridges::corpus_path();
+        if let Err(e) = crate::platform::opfs::write(&path, &body).await {
+            emit(Event::Error {
+                thread: String::new(),
+                scope: "corpus".to_string(),
+                message: format!("could not persist the cartridge corpus to {path}: {e}"),
+            });
+        }
+    });
+    stats
+}
+
 /// compile and instantiate the reasoning policy: whatever the user last
 /// swapped in, or the built-in reference v1.
 ///
@@ -1311,33 +1386,63 @@ pub struct PolicySwap {
     /// it will not survive a reload, and saying otherwise would be a lie
     /// the next boot exposes.
     pub save_error: Option<String>,
+    /// the corpus AFTER this attempt was recorded. a refused swap has one
+    /// of these too — that is the point of recording refusals.
+    pub corpus: CorpusStats,
 }
 
-/// the swap itself: rehearse the candidate, install it, take the notes and
-/// anything it wrote. synchronous, because everything it touches is.
-fn apply_policy_swap(manifest: &str, source: &str) -> Result<PolicySwap, String> {
+/// the swap itself: rehearse the candidate, record it in the corpus
+/// whatever happens, and install it if the verdict allows. synchronous,
+/// because everything it touches is.
+///
+/// the corpus write is not conditional on success. a refused program is the
+/// only evidence this system ever gets about where its own boundary is, and
+/// throwing it away is how a training set ends up full of nothing but
+/// answers that already worked (§9).
+fn apply_policy_swap(
+    manifest: &str,
+    source: &str,
+    origin: crate::cartridges::Origin,
+) -> Result<PolicySwap, String> {
     if source.trim().is_empty() {
         return Err("no cartridge source to compile — a policy is a rustlite module".to_string());
     }
-    let (slug, rehearsal, notes, flushes) = COGNITION.with(|c| {
+    let now = js_sys::Date::now() as i64;
+    let outcome = COGNITION.with(|c| {
         let mut slot = c.borrow_mut();
         let Some(cog) = slot.as_mut() else {
             return Err(
                 "no reasoning cartridge is running — reload the page and try again".to_string(),
             );
         };
-        cog.set_now(js_sys::Date::now() as i64);
-        let (slug, rehearsal) = cog.swap_policy(manifest, source)?;
-        let mut notes = cog.drain_notes();
-        notes.extend(cog.take_logs());
-        Ok((slug, rehearsal, notes, cog.take_flushes()))
+        cog.set_now(now);
+        let (sample, result) = cog.swap_policy(manifest, source, origin, now);
+        Ok(match result {
+            Ok((slug, rehearsal)) => {
+                let mut notes = cog.drain_notes();
+                notes.extend(cog.take_logs());
+                (sample, Ok((slug, rehearsal, notes, cog.take_flushes())))
+            }
+            // drain the events even on a refusal: a wiring error can have
+            // pushed one, and leaving it queued would surface it later
+            // attached to the wrong action.
+            Err(e) => {
+                let _ = cog.drain_notes();
+                (sample, Err(e))
+            }
+        })
     })?;
+
+    let (sample, result) = outcome;
+    let corpus = record_sample(sample);
+    let (slug, rehearsal, notes, flushes) = result?;
     flush_cognition(flushes);
     Ok(PolicySwap {
         slug,
         rehearsal,
         notes,
         save_error: None,
+        corpus,
     })
 }
 
@@ -1351,6 +1456,23 @@ async fn persist_policy(slug: &str, manifest: &str, source: &str) -> Result<(), 
     crate::platform::opfs::write(&man_path, manifest)
         .await
         .map_err(|e| format!("{man_path}: {e}"))
+}
+
+fn describe_corpus(c: &CorpusStats) -> String {
+    let ops: Vec<String> = c
+        .top_ops
+        .iter()
+        .map(|(op, n)| format!("{op}×{n}"))
+        .collect();
+    let tail = if ops.is_empty() {
+        String::new()
+    } else {
+        format!(" — most-emitted: {}", ops.join(", "))
+    };
+    format!(
+        "📚 corpus: {} program(s), {} verified, {} refused{tail}",
+        c.samples, c.verified, c.refused
+    )
 }
 
 fn describe_rehearsal(r: &crate::cartridges::Rehearsal) -> String {
@@ -1369,7 +1491,7 @@ fn describe_rehearsal(r: &crate::cartridges::Rehearsal) -> String {
 /// background. a refusal changes nothing — not the running module, not what
 /// is on disk — and carries the compiler's or the rehearsal's own words.
 fn swap_cartridge(manifest: String, source: String) {
-    let swap = match apply_policy_swap(&manifest, &source) {
+    let swap = match apply_policy_swap(&manifest, &source, crate::cartridges::Origin::Human) {
         Ok(s) => s,
         Err(e) => {
             emit(Event::Error {
@@ -1398,6 +1520,10 @@ fn swap_cartridge(manifest: String, source: String) {
             swap.slug
         ),
     });
+    emit(Event::Note {
+        thread: conv(),
+        text: describe_corpus(&swap.corpus),
+    });
 
     wasm_bindgen_futures::spawn_local(async move {
         if let Err(e) = persist_policy(&swap.slug, &manifest, &source).await {
@@ -1420,8 +1546,15 @@ fn swap_cartridge(manifest: String, source: String) {
 /// call was already shaped by the old policy. the new one takes effect at
 /// the next hook, and the returned summary says so rather than leaving the
 /// model to assume otherwise.
-pub async fn swap_reasoning_policy(manifest: &str, source: &str) -> Result<PolicySwap, String> {
-    let mut swap = apply_policy_swap(manifest, source)?;
+pub async fn swap_reasoning_policy(
+    manifest: &str,
+    source: &str,
+    intent: &str,
+) -> Result<PolicySwap, String> {
+    let origin = crate::cartridges::Origin::Agent {
+        intent: intent.to_string(),
+    };
+    let mut swap = apply_policy_swap(manifest, source, origin)?;
     emit(Event::Note {
         thread: conv(),
         text: describe_rehearsal(&swap.rehearsal),
@@ -1444,6 +1577,10 @@ pub async fn swap_reasoning_policy(manifest: &str, source: &str) -> Result<Polic
             "🔁 the agent swapped its own reasoning policy to '{}'",
             swap.slug
         ),
+    });
+    emit(Event::Note {
+        thread: conv(),
+        text: describe_corpus(&swap.corpus),
     });
     Ok(swap)
 }

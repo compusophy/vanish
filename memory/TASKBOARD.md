@@ -438,8 +438,40 @@ taskboard) asked for four things. all four are resolved:
             end-to-end path; the swap itself is checkable on any preview
             (load v3 → hot-swap → "🧪 rehearsal passed" with the probe
             coming back plain + the protocol line).
-      - [ ] items 9–10 per plan §11 (corpus capture → opcode-model
-            experiment).
+      - [x] item 9 DONE (agent/corpus-capture, 2026-08-26): the corpus.
+            src/cartridges/corpus.rs — every candidate policy that goes
+            through a swap becomes a Sample: rustlite source, opcode trace,
+            Origin (Human | Agent{intent}), and the runtime's Verdict.
+            persisted to vanish-cartridges/corpus.json, bounded at
+            MAX_SAMPLES=200, keyed by an FNV-1a fingerprint of the source so
+            a re-try updates its verdict in place instead of growing the log.
+            captured inside Cognition::swap_policy, which now returns
+            (Sample, Result<…>) — EVERY attempt yields a sample; whether it
+            also yields a swap is the verdict.
+            three decisions: REFUSALS ARE KEPT (a corpus of only successes
+            teaches nothing about the boundary; a program that emitted and
+            then trapped keeps its trace, one that never compiled has an
+            empty one and says so); the trace DROPS OPERANDS (emission is
+            deterministic, so the source rebuilds them — storing them would
+            double the corpus to hold what it already holds); the histogram
+            counts VERIFIED programs only (a rejected sequence is not
+            evidence about good code, though it is excellent evidence about
+            failure). the `intent` argument on swap_cartridge is now
+            REQUIRED and is the prompt half of §9's pair.
+            9 new evals (31 in tests/cognitive_wiring.rs). feed + tool
+            result both carry corpus stats and the top emitted opcodes.
+            WHAT IT STILL DOES NOT BUY: whether a policy HELPED. that needs
+            an outcome signal the loop does not collect, and no amount of
+            corpus makes it answerable — written into plan §9 rather than
+            left implied.
+      - [ ] item 10 NEXT per plan §11: the opcode-model experiment, gated on
+            the corpus having real volume. the honest precondition is not
+            "the corpus exists" (it does now) but "the corpus has enough
+            VERIFIED programs from enough distinct intents to be worth
+            training on" — today it fills one program per swap, so the
+            first real question is whether anything generates candidates at
+            volume. an obvious cheap source: a corpus_stats / corpus_read
+            tool so the agent can see what it has tried and iterate.
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).
