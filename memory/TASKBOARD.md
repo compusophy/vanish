@@ -363,12 +363,46 @@ taskboard) asked for four things. all four are resolved:
                   before-hook itself is pinned natively in
                   tests/cognitive_wiring.rs; what is unproven is only that
                   agent::run reaches it in the browser.
-      - [ ] item 8c NEXT: the RECURSIVE step — a `swap_cartridge` TOOL, so
-            the agent rewrites its own reasoning policy mid-run rather than
-            waiting for a human to paste one. the worker half already
-            exists (swap_cartridge()); this is a tools.rs entry plus the
-            system-prompt line, and a decision about what a policy is
-            allowed to do to itself while a run is in flight.
+      - [x] item 8c DONE (agent/cognitive-swap-tool, 2026-08-26): the
+            RECURSIVE step — `swap_cartridge` is a TOOL. the agent
+            rewrites the module it reasons with, mid-run, through the same
+            door the ui uses. the door got a lock first:
+            `cognitive::rehearse` instantiates a candidate over a SCRATCH
+            MemHost seeded from a COPY of the live kv, inits it, and puts
+            one message through each declared phase. refused (nothing
+            changed — not the module, not its memory, not disk) when it
+            will not start, declares no `reasoning` port, or traps.
+            `Cognition::swap_policy` now returns (slug, Rehearsal) and
+            both the ui and the tool narrate it. worker.rs split into
+            apply_policy_swap (sync) / persist_policy (async):
+            Command::SwapCartridge spawns the save, the TOOL awaits it —
+            the model is told whether the swap is durable, so that answer
+            has to be true when given.
+            THE POLICY QUESTION 8b LEFT OPEN, answered: a swap is not
+            retroactive. the prompt of the run making the call was already
+            shaped by the old module and is already in the transcript; the
+            new one takes effect at the next hook, and the tool result
+            says so. nothing else is restricted — the loop is never
+            hostage to a cartridge, so the worst a bad swap does is
+            degrade its own future prompts. a module that RUNS and reasons
+            badly is not catchable by the harness, which is why the system
+            prompt names this the sharpest tool the agent has.
+            new guard in tests/agent_evals.rs: every name in
+            tools::definitions() must appear in SYSTEM_PROMPT (with its
+            negative control). it fired for real — the definition landed
+            before the prompt line did.
+            LIVE VERIFICATION OWED: the tool cannot run without
+            credentials (same gate as 8b's fourth link). when running on
+            production, ask the agent to swap its policy to v2 and watch
+            the feed for "🧪 rehearsal passed" + "🔁 the agent swapped its
+            own reasoning policy".
+      - [ ] item 8d NEXT: give the agent something worth swapping TO. v1
+            and v2 are demos (passthrough, and a prefix). a policy that
+            earns its place needs kv it actually reads back — e.g. carry a
+            short standing note from the last answer into the next prompt.
+            that needs `store_get` in a reference module and a way to
+            judge whether the shaped prompt was better, which is where §9's
+            corpus capture (item 9) starts paying for itself.
       - [ ] items 9–10 per plan §11 (corpus capture → opcode-model
             experiment).
       strategic context: owner wants composable hot-swappable cognitive

@@ -26,7 +26,7 @@
 use super::abi::Host;
 use super::composition::ComposeError;
 use super::manifest::{CartridgeKind, CartridgeManifest, Port, ABI_VERSION};
-use super::memhost::{KvFlush, MemHost};
+use super::memhost::{KvFlush, KvPairs, MemHost};
 use super::orchestrator::{Event, Orchestrator};
 
 pub const PORT_BEFORE: &str = "reasoning";
@@ -322,6 +322,103 @@ pub fn boot_reasoner(
     Ok((cog, notes))
 }
 
+/// what a candidate policy did when it was made to run before being
+/// allowed to replace the running one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rehearsal {
+    /// what the probe prompt became under the candidate.
+    pub shaped: String,
+    /// what the candidate answered on the `after` phase, if anything.
+    pub note: Option<String>,
+    /// keys it wrote — in the scratch store, never the live one.
+    pub wrote: Vec<String>,
+}
+
+/// the two messages a candidate is made to handle. fixed strings, because a
+/// rehearsal that varied with the conversation would refuse a policy on
+/// monday and accept it on tuesday.
+pub const REHEARSAL_PROMPT: &str = "rehearsal: a prompt";
+pub const REHEARSAL_ANSWER: &str = "rehearsal: an answer";
+
+/// run a candidate policy end to end before it replaces a running one:
+/// instantiate it over a SCRATCH host seeded from a copy of the live memory,
+/// init it, and put one message through each phase it declares.
+///
+/// why this exists. `parse_policy` proves a module compiles; supervision
+/// catches one that traps later. between those two sits the case this
+/// closes: a module that compiles and then traps on its FIRST message would
+/// be installed, crash on the next real prompt, and cost a restart cycle and
+/// a passthrough before anyone learned why. rehearsing moves that discovery
+/// to the swap, where the answer is simply "no, and here is the trap".
+///
+/// the scratch host is seeded from a COPY and then discarded, so a rehearsal
+/// can neither read stale memory nor write into the live store — and a policy
+/// that only works against an empty store is caught here rather than in
+/// production.
+pub fn rehearse(
+    manifest: CartridgeManifest,
+    bytes: &[u8],
+    kv: KvPairs,
+    fuel: u64,
+) -> Result<Rehearsal, String> {
+    if !manifest.provides.iter().any(|p| p.name == PORT_BEFORE) {
+        return Err(format!(
+            "the module does not provide '{PORT_BEFORE}', so nothing would route to it — \
+             a reasoning policy must declare that port"
+        ));
+    }
+    let slug = manifest.slug.clone();
+    let mut orch = Orchestrator::load(&[(manifest, bytes.to_vec())], |m| MemHost::new(&m.slug))
+        .map_err(|e| format!("{e}"))?;
+    orch.with_host_mut(&slug, |h| h.seed(kv));
+    orch.boot(&|_| Vec::new(), fuel)
+        .map_err(|e| format!("it refused to start: {e}"))?;
+
+    // straight through the orchestrator rather than `before`/`after`: those
+    // two turn a failure into a passthrough on purpose, which is exactly the
+    // answer a rehearsal must not accept.
+    let mut cog = Cognition::new(orch, fuel);
+    let out = cog
+        .orch
+        .request(
+            PORT_BEFORE,
+            &framed(PHASE_BEFORE, REHEARSAL_PROMPT.as_bytes()),
+            0,
+            fuel,
+        )
+        .map_err(|e| format!("it failed on a prompt: {e}"))?;
+    let shaped = if out.is_empty() {
+        REHEARSAL_PROMPT.to_string()
+    } else {
+        String::from_utf8_lossy(&out).into_owned()
+    };
+
+    // the after phase is optional: a policy may shape prompts and digest
+    // nothing. only a DECLARED port that then fails is a refusal.
+    let note = match cog.orch.request(
+        PORT_AFTER,
+        &framed(PHASE_AFTER, REHEARSAL_ANSWER.as_bytes()),
+        0,
+        fuel,
+    ) {
+        Ok(b) if b.is_empty() => None,
+        Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        Err(ComposeError::NoProvider(_)) => None,
+        Err(e) => return Err(format!("it failed on an answer: {e}")),
+    };
+
+    let wrote = cog
+        .take_flushes()
+        .into_iter()
+        .flat_map(|f| f.keys)
+        .collect();
+    Ok(Rehearsal {
+        shaped,
+        note,
+        wrote,
+    })
+}
+
 impl Cognition<MemHost> {
     /// the clock, passed in once per step. the host reads no clock (D1), so
     /// this is the only way `now_ms` inside a cartridge is anything but 0.
@@ -354,16 +451,31 @@ impl Cognition<MemHost> {
         out
     }
 
-    /// replace the running policy from source. the host — and with it every
-    /// remembered key — carries over; a bad manifest or a source that does
-    /// not compile changes nothing.
-    pub fn swap_policy(&mut self, manifest_json: &str, src: &str) -> Result<String, String> {
+    /// replace the running policy from source, but only after the candidate
+    /// has proven it runs (`rehearse`). the host — and with it every
+    /// remembered key — carries over; a bad manifest, a source that does not
+    /// compile, and a module that fails its rehearsal all change nothing.
+    ///
+    /// this is the door the agent itself walks through (the `swap_cartridge`
+    /// tool), so "compiles" is not a high enough bar: an autonomous run that
+    /// installs a policy which traps on its own next prompt has broken the
+    /// thing it reasons with, and the only evidence would be a restart
+    /// cycle in the feed.
+    pub fn swap_policy(
+        &mut self,
+        manifest_json: &str,
+        src: &str,
+    ) -> Result<(String, Rehearsal), String> {
         let (manifest, bytes) = parse_policy(manifest_json, src)?;
         let slug = manifest.slug.clone();
         let fuel = self.fuel;
+        // a COPY of what the running policy remembers: the candidate has to
+        // work against the memory it will actually inherit, not a blank one.
+        let kv = self.orch.with_host(&slug, |h| h.snapshot()).unwrap_or_default();
+        let rehearsal = rehearse(manifest.clone(), &bytes, kv, fuel)?;
         self.orch
             .swap(manifest, &bytes, fuel)
             .map_err(|e| format!("{e}"))?;
-        Ok(slug)
+        Ok((slug, rehearsal))
     }
 }

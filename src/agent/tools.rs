@@ -527,6 +527,21 @@ pub fn definitions() -> serde_json::Value {
       {
         "type": "function",
         "function": {
+          "name": "swap_cartridge",
+          "description": "replace YOUR OWN reasoning policy, live. the policy is a cartridge: a rustlite module that shapes every prompt before you are given it and digests every answer you finish a turn with, keeping memory in its own kv across prompts and across swaps. the candidate is REHEARSED first — compiled, instantiated over a copy of the current memory, and made to handle one message of each phase — and a module that will not compile, will not start, or traps is refused with NOTHING changed. read docs/CARTRIDGE_PLAN.md section 12 and src/cartridges/cognitive.rs (REASONING_V1 is the reference module, REASONING_V2 the same plus a visible prefix) before writing one. the swap is not retroactive: the prompt you are working on now was shaped by the old policy.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string", "description": "the rustlite module. it must export cart_alloc, cart_init and cart_handle, and cart_handle receives a phase byte first (0 = a prompt to shape, 1 = an answer to digest) followed by the body" },
+              "manifest": { "type": "string", "description": "optional manifest json; omit for the default reasoner manifest, which provides both the 'reasoning' and 'reasoning.after' ports" }
+            },
+            "required": ["source"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "task_complete",
           "description": "declare the task finished. call this only when the work is done and committed.",
           "parameters": {
@@ -1269,6 +1284,30 @@ impl Workspace {
                     "build_log": build_log,
                     "preview_url": preview_url,
                     "guidance": guidance,
+                })
+                .to_string())
+            }
+
+            // the recursive step: the agent rewriting the module it
+            // reasons with. it goes through the same rehearse-then-install
+            // door the ui does, so an autonomous run cannot install a policy
+            // that has never been made to run.
+            "swap_cartridge" => {
+                let source = arg(&args, "source").ok_or("swap_cartridge requires 'source'")?;
+                let manifest = arg(&args, "manifest").unwrap_or("");
+                let swap = crate::worker::swap_reasoning_policy(manifest, source).await?;
+                Ok(serde_json::json!({
+                    "success": true,
+                    "slug": swap.slug,
+                    "rehearsal": {
+                        "prompt_in": crate::cartridges::cognitive::REHEARSAL_PROMPT,
+                        "prompt_out": swap.rehearsal.shaped,
+                        "note": swap.rehearsal.note,
+                        "wrote": swap.rehearsal.wrote,
+                    },
+                    "durable": swap.save_error.is_none(),
+                    "save_error": swap.save_error,
+                    "effective": "from the next prompt onward — the one you are working on now was shaped by the previous policy",
                 })
                 .to_string())
             }
