@@ -50,6 +50,18 @@ cartridge track was built toward: `swap_cartridge` is a TOOL.
   candidate; a portless manifest; the rehearsal seeded from live memory
   leaving that memory byte-identical). gate green: 20 suites + clippy,
   plus the wasm32 check.
+- **process lesson, stacked prs**: this landed as a stack (8c on top of
+  8b) because github actions was in a major outage and 8b's pr could not
+  go green. squash-merging the PARENT with `--delete-branch` did not
+  retarget the child — github CLOSED it, and a closed pr's base cannot be
+  changed, so the work needed a new pr number. do it in this order
+  instead: retarget the child to main FIRST, then merge the parent, then
+  rebase the child onto the new main (`git rebase --onto origin/main
+  <old-parent-head>`) so its diff is its own work and nothing else.
+- **process lesson, ci after an outage**: runs queued during the outage
+  stayed queued forever and could not be cancelled or rerun by id. what
+  worked was closing and reopening the pr, which fires a fresh
+  `pull_request` event. `verify` then passed in 82s.
 
 **LIVE VERIFICATION OWED** — the tool sits behind the same credential gate
 as 8b's fourth link, so a preview cannot exercise it. on production: ask
