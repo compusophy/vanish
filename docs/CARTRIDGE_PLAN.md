@@ -118,6 +118,14 @@ a cartridge built for an ABI newer than its own, LOUDLY (D4). breaking
 changes bump the major and keep the old loading — old cartridges never break
 when the host moves.
 
+**v2 (landed 2026-08-25):** `call(port_ptr, port_len, msg_ptr, msg_len)
+-> i64` — a synchronous request to the provider of `port`, mediated by
+the orchestrator (§7/§8), allowed only for ports the caller declared under
+`requires`, charged to the caller's fuel, answered as a packed (ptr, len)
+written into the caller's memory; 0 = the call did not happen (every such
+case is an orchestrator event). a manifest declaring `abi_version: 1`
+cannot import it (`HostFn::since`).
+
 ## 5. L2 — rustlite-for-vanish
 
 the language must be small enough to compile with a few thousand lines of

@@ -1,14 +1,17 @@
-//! L5 evals (CARTRIDGE_PLAN §11 item 7): actors with mailboxes pumped
-//! deterministically, guest emits routed by declared capability, crashed
-//! actors restarted with backoff from their image (same host — kv state
-//! survives) and marked Failed loudly past the budget, and hot-swap that
-//! keeps host state and pending mail. time is passed in, so every backoff
-//! decision here is exact, not approximate.
+//! L5 evals (CARTRIDGE_PLAN §11 item 7 + ABI v2 `call`): actors with
+//! mailboxes pumped deterministically, guest emits routed by declared
+//! capability, crashed actors restarted with backoff from their image
+//! (same host — kv state survives) and marked Failed loudly past the
+//! budget, hot-swap that keeps host state and pending mail, and
+//! synchronous calls between actors — mediated, capability-checked,
+//! charged to the caller, soft for the guest and loud for the log. time
+//! is passed in, so every backoff decision here is exact, not approximate.
 
 mod common;
 
 use common::{
-    compile, crasher_src, emitter_src, flaky_src, manifest_with, shift_src, FakeHost, ALLOC,
+    caller_src, compile, crasher_src, emitter_src, flaky_src, manifest_with, shift_src, FakeHost,
+    ALLOC,
 };
 use vanish::cartridges::{
     CallError, CartridgeManifest, ComposeError, Event, Health, Orchestrator, WireError,
@@ -40,6 +43,10 @@ fn delivered(to: &str, from: Option<&str>, topic: &str, response: &[u8]) -> Even
         topic: topic.into(),
         response: response.to_vec(),
     }
+}
+
+fn logs(o: &Orchestrator<FakeHost>, slug: &str) -> Vec<(i32, Vec<u8>)> {
+    o.with_host(slug, |h| h.logs.clone()).unwrap()
 }
 
 // ---- mailboxes and the pump ----------------------------------------------------------
@@ -106,7 +113,7 @@ fn guest_emits_route_by_declared_capability_and_nowhere_else() {
     assert!(o.pump(0, 10_000));
     assert_eq!(o.drain_events(), vec![delivered("inc", Some("talker"), "inc", b"ij")]);
     // and the real host observed the emits too (it is the feed's witness).
-    assert_eq!(o.host("talker").unwrap().emitted.len(), 2);
+    assert_eq!(o.with_host("talker", |h| h.emitted.len()).unwrap(), 2);
 }
 
 #[test]
@@ -174,7 +181,7 @@ fn a_crashing_actor_is_restarted_with_backoff_then_failed_loudly() {
     assert!(!o.pump(1_000_000, 10_000), "a failed actor is never pumped");
     assert_eq!(o.pending("boom"), 1, "7 sent, 6 consumed by crashes, one still queued");
     // the host survived every restart: one init log per boot + restart.
-    let logs = &o.host("boom").unwrap().logs;
+    let logs = logs(&o, "boom");
     assert_eq!(logs.len(), 1 + MAX_RESTARTS as usize);
     assert!(logs.iter().all(|l| l == &(1, b"boom".to_vec())), "same config replayed");
 }
@@ -198,7 +205,7 @@ fn a_successful_delivery_resets_the_crash_count() {
         assert_eq!(ev[0], Event::Restarted { slug: "flaky".into(), attempt: 1 });
         assert_eq!(ev[1], delivered("flaky", None, "flaky", b"ok"));
     }
-    assert_eq!(o.health("flaky"), Some(&Health::Up));
+    assert_eq!(o.health("flaky"), Some(Health::Up));
 }
 
 #[test]
@@ -245,12 +252,12 @@ fn hot_swap_keeps_host_state_and_pending_mail() {
     o.swap(manifest_with("inc", &["inc"], &[]), &compile(&shift_src(-1)), 10_000)
         .unwrap();
     assert_eq!(o.drain_events(), vec![Event::Swapped { slug: "inc".into() }]);
-    assert_eq!(o.health("inc"), Some(&Health::Up));
+    assert_eq!(o.health("inc"), Some(Health::Up));
     assert_eq!(o.pending("inc"), 1, "pending mail survived the swap");
     assert!(o.pump(0, 10_000));
     assert_eq!(o.drain_events(), vec![delivered("inc", None, "inc", b"a")], "handled by the NEW module");
     // the host carried over: it saw both inits with the remembered config.
-    assert_eq!(o.host("inc").unwrap().logs, vec![(1, b"inc".to_vec()), (1, b"inc".to_vec())]);
+    assert_eq!(logs(&o, "inc"), vec![(1, b"inc".to_vec()), (1, b"inc".to_vec())]);
 
     // a swap also revives a Failed actor — that is the escape hatch.
     let mut o = booted(vec![(manifest_with("boom", &["boom"], &[]), compile(&crasher_src()))]);
@@ -264,7 +271,7 @@ fn hot_swap_keeps_host_state_and_pending_mail() {
     }
     o.swap(manifest_with("boom", &["boom"], &[]), &compile(&shift_src(1)), 10_000)
         .unwrap();
-    assert_eq!(o.health("boom"), Some(&Health::Up));
+    assert_eq!(o.health("boom"), Some(Health::Up));
     o.drain_events();
     assert!(o.pump(now, 10_000));
     assert!(matches!(&o.drain_events()[0], Event::Delivered { response, .. } if response == b"y"));
@@ -296,6 +303,173 @@ fn a_swap_that_breaks_the_wiring_or_the_bytes_is_refused_with_nothing_changed() 
     o.send("inc", b"a");
     assert!(o.pump(0, 10_000));
     assert_eq!(o.drain_events(), vec![delivered("inc", None, "inc", b"b")]);
-    assert_eq!(o.composition().wiring().order, vec!["inc", "dec"]);
-    assert_eq!(o.host("inc").unwrap().logs.len(), 1, "no re-init happened");
+    assert_eq!(o.order(), vec!["inc", "dec"]);
+    assert_eq!(logs(&o, "inc").len(), 1, "no re-init happened");
+}
+
+// ---- ABI v2: synchronous calls ---------------------------------------------------------
+
+#[test]
+fn a_synchronous_call_reaches_the_provider_and_returns_its_answer() {
+    // `ask` provides "ask", requires "inc", and forwards every message to
+    // inc via call — the answer comes back through ask's own memory.
+    let mut entries = pair();
+    entries.push((manifest_with("ask", &["ask"], &["inc"]), compile(&caller_src("inc"))));
+    let mut o = booted(entries);
+    assert!(o.send("ask", b"abc"));
+    assert!(o.pump(0, 10_000));
+    let ev = o.drain_events();
+    assert_eq!(
+        ev,
+        vec![
+            Event::Called {
+                from: "ask".into(),
+                to: "inc".into(),
+                port: "inc".into(),
+                response_len: 3
+            },
+            delivered("ask", None, "ask", b"bcd"),
+        ]
+    );
+    assert_eq!(o.pending("inc"), 0, "a call is not mail: nothing was queued");
+
+    // the callee is charged to the CALLER's budget: a budget that covers
+    // the caller alone is not enough once it calls. running dry INSIDE the
+    // callee is the caller's crash, not the callee's — the callee is
+    // reset (rebuilt on the next pump, no backoff, no crash counted), so a
+    // stingy caller cannot back an innocent provider off into Failed.
+    assert!(o.send("ask", b"abc"));
+    assert!(o.pump(0, 60));
+    let ev = o.drain_events();
+    assert!(
+        matches!(&ev[0], Event::CallFailed { from, port, reason }
+            if from == "ask" && port == "inc" && reason.contains("fuel")),
+        "{ev:?}"
+    );
+    assert!(matches!(&ev[1], Event::Reset { slug, .. } if slug == "inc"), "{ev:?}");
+    assert!(
+        matches!(&ev[2], Event::Crashed { slug, attempt: 1, reason, .. } if slug == "ask" && reason.contains("fuel")),
+        "{ev:?}"
+    );
+    assert!(matches!(o.health("inc"), Some(Health::Restarting { attempt: 0, .. })));
+    // the next pump rebuilds inc even though it has no mail of its own;
+    // ask waits out its real backoff.
+    assert!(o.pump(0, 10_000));
+    assert_eq!(o.drain_events(), vec![Event::Restarted { slug: "inc".into(), attempt: 0 }]);
+    assert_eq!(o.health("inc"), Some(Health::Up));
+    assert!(!o.pump(0, 10_000));
+    // at-most-once: the message that crashed ask is gone. ask restarts at
+    // its retry time with nothing to deliver; a fresh message goes through.
+    assert!(o.pump(RESTART_BASE_MS, 10_000));
+    assert_eq!(o.drain_events(), vec![Event::Restarted { slug: "ask".into(), attempt: 1 }]);
+    assert!(o.send("ask", b"abc"));
+    assert!(o.pump(RESTART_BASE_MS, 10_000));
+    assert!(o.drain_events().contains(&delivered("ask", None, "ask", b"bcd")));
+}
+
+#[test]
+fn calls_to_undeclared_ports_return_zero_and_are_denied() {
+    // `ask` calls "dec" but declared nothing.
+    let mut entries = pair();
+    entries.push((manifest_with("ask", &["ask"], &[]), compile(&caller_src("dec"))));
+    let mut o = booted(entries);
+    assert!(o.send("ask", b"abc"));
+    assert!(o.pump(0, 10_000));
+    let ev = o.drain_events();
+    assert!(
+        matches!(&ev[0], Event::Denied { from, topic, .. } if from == "ask" && topic == "dec"),
+        "{ev:?}"
+    );
+    // the guest saw 0 and took its fallback path: echo.
+    assert_eq!(ev[1], delivered("ask", None, "ask", b"abc"));
+    assert_eq!(o.health("ask"), Some(Health::Up), "a denied call is not a crash");
+}
+
+#[test]
+fn a_callee_that_traps_fails_the_call_softly_and_is_supervised() {
+    let entries = vec![
+        (manifest_with("boom", &["boom"], &[]), compile(&crasher_src())),
+        (manifest_with("ask", &["ask"], &["boom"]), compile(&caller_src("boom"))),
+    ];
+    let mut o = booted(entries);
+    assert!(o.send("ask", b"q"));
+    assert!(o.pump(0, 10_000));
+    let ev = o.drain_events();
+    assert!(
+        matches!(&ev[0], Event::CallFailed { from, port, reason }
+            if from == "ask" && port == "boom" && reason.contains("out of bounds")),
+        "{ev:?}"
+    );
+    assert!(
+        matches!(&ev[1], Event::Crashed { slug, attempt: 1, retry_at_ms, .. }
+            if slug == "boom" && *retry_at_ms == RESTART_BASE_MS),
+        "the callee is supervised as if it crashed on its own mail: {ev:?}"
+    );
+    assert_eq!(ev[2], delivered("ask", None, "ask", b"q"), "the caller fell back and completed");
+    assert_eq!(o.health("ask"), Some(Health::Up));
+    assert!(matches!(o.health("boom"), Some(Health::Restarting { .. })));
+    // while the callee is down, a call is refused without running it.
+    assert!(o.send("ask", b"r"));
+    assert!(o.pump(0, 10_000));
+    let ev = o.drain_events();
+    assert!(
+        matches!(&ev[0], Event::CallFailed { reason, .. } if reason.contains("not up")),
+        "{ev:?}"
+    );
+    assert_eq!(ev[1], delivered("ask", None, "ask", b"r"));
+}
+
+#[test]
+fn call_chains_nest_and_answers_propagate_back() {
+    // a → b → c → inc: three synchronous hops deep, the +1 comes all the
+    // way back. proves the re-entrancy discipline (each level takes its
+    // callee out of the composition; nothing is borrowed across a run).
+    let entries = vec![
+        (manifest_with("inc", &["inc"], &[]), compile(&shift_src(1))),
+        (manifest_with("c", &["c"], &["inc"]), compile(&caller_src("inc"))),
+        (manifest_with("b", &["b"], &["c"]), compile(&caller_src("c"))),
+        (manifest_with("a", &["a"], &["b"]), compile(&caller_src("b"))),
+    ];
+    let mut o = booted(entries);
+    assert!(o.send("a", b"abc"));
+    assert!(o.pump(0, 100_000));
+    let ev = o.drain_events();
+    let called: Vec<(String, String)> = ev
+        .iter()
+        .filter_map(|e| match e {
+            Event::Called { from, to, .. } => Some((from.clone(), to.clone())),
+            _ => None,
+        })
+        .collect();
+    // innermost completes first.
+    assert_eq!(
+        called,
+        vec![
+            ("c".into(), "inc".into()),
+            ("b".into(), "c".into()),
+            ("a".into(), "b".into())
+        ]
+    );
+    assert_eq!(ev.last().unwrap(), &delivered("a", None, "a", b"bcd"));
+}
+
+#[test]
+fn emits_during_a_nested_call_are_routed_after_it() {
+    // ask → talker (which emits on "inc" during the call). the emit lands
+    // in inc's mailbox once the call returns; nothing is lost or reordered.
+    let mut entries = pair();
+    entries.push((
+        manifest_with("talker", &["talk"], &["inc"]),
+        compile(&emitter_src(&["inc"])),
+    ));
+    entries.push((manifest_with("ask", &["ask"], &["talk"]), compile(&caller_src("talk"))));
+    let mut o = booted(entries);
+    assert!(o.send("ask", b"hi"));
+    assert!(o.pump(0, 10_000));
+    let ev = o.drain_events();
+    assert!(matches!(&ev[0], Event::Called { from, to, .. } if from == "ask" && to == "talker"));
+    assert_eq!(ev[1], delivered("ask", None, "ask", b"hi"));
+    assert_eq!(o.pending("inc"), 1, "talker's emit during the call was routed");
+    assert!(o.pump(0, 10_000));
+    assert_eq!(o.drain_events(), vec![delivered("inc", Some("talker"), "inc", b"ij")]);
 }

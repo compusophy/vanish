@@ -93,6 +93,48 @@ fn string_literals_name_keys_topics_and_answers_through_the_abi() {
     assert_eq!(cart.host().emitted.last().unwrap().0, b"reply");
 }
 
+#[test]
+fn a_host_routed_call_writes_the_answer_into_the_callers_memory() {
+    // without an orchestrator, `call` goes to the host itself; the answer
+    // it hands back is placed via cart_alloc and returned packed — or 0
+    // when the host has nothing, which the guest can branch on.
+    let src = format!(
+        r#"
+        extern "C" {{ fn call(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32) -> i64; }}
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            let r: i64 = call(unpack_ptr("oracle"), unpack_len("oracle"), p, n);
+            if r == 0 {{ return "nobody home"; }}
+            return r;
+        }}
+    "#
+    );
+    let mut cart = load(&src, FakeHost { call_answer: Some(b"42".to_vec()), ..Default::default() });
+    cart.init(b"", 1000).unwrap();
+    assert_eq!(cart.handle(b"meaning?", 10_000).unwrap(), b"42");
+    assert_eq!(cart.host().calls, vec![(b"oracle".to_vec(), b"meaning?".to_vec())]);
+    cart.host_mut().call_answer = None;
+    assert_eq!(cart.handle(b"anyone?", 10_000).unwrap(), b"nobody home");
+}
+
+#[test]
+fn a_v1_manifest_cannot_import_the_v2_call() {
+    let src = format!(
+        "extern \"C\" {{ fn call(t_ptr: i32, t_len: i32, p_ptr: i32, p_len: i32) -> i64; }} \
+         {ALLOC} pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }} \
+         pub fn cart_handle(p: i32, n: i32) -> i64 {{ return 0; }}"
+    );
+    let mut v1 = manifest("echo");
+    v1.abi_version = 1;
+    let err = Cartridge::load(v1.clone(), &compile(&src), FakeHost::default()).unwrap_err();
+    assert!(err.0.contains("call") && err.0.contains("v2") && err.0.contains("abi_version 1"), "{err}");
+    // a v1 manifest with only v1 imports still loads — old cartridges never break.
+    assert!(Cartridge::load(v1, &compile(&echo_src()), FakeHost::default()).is_ok());
+    // and the v2 manifest loads the caller.
+    assert!(Cartridge::load(manifest("echo"), &compile(&src), FakeHost::default()).is_ok());
+}
+
 // ---- lifecycle rules ------------------------------------------------------------------
 
 #[test]

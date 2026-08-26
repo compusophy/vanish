@@ -196,6 +196,19 @@ impl<H: Host> Composition<H> {
         self.cartridges.get_mut(slug)
     }
 
+    /// remove a member for the duration of a guest run, so the rest of the
+    /// composition stays borrowable while that guest executes (a
+    /// synchronous `call` from inside it needs exactly that). None when
+    /// the slug is unknown OR already taken — a re-entrant request for a
+    /// busy member is refused, not deadlocked. `put_back` restores it.
+    pub fn take(&mut self, slug: &str) -> Option<Cartridge<H>> {
+        self.cartridges.remove(slug)
+    }
+
+    pub fn put_back(&mut self, slug: String, cart: Cartridge<H>) {
+        self.cartridges.insert(slug, cart);
+    }
+
     /// the slug providing `port`, if the wiring has one.
     pub fn provider_of(&self, port: &str) -> Option<&str> {
         self.wiring.providers.get(port).map(String::as_str)

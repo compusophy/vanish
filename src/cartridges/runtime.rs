@@ -1367,6 +1367,21 @@ fn call_host(
             host.emit(&topic, &payload)
                 .map_err(|e| Trap::HostError(format!("emit failed: {e}")))?;
         }
+        HostFn::Call => {
+            let port = bytes_at(mem, i32_at(0)?, i32_at(1)?)?;
+            let msg = bytes_at(mem, i32_at(2)?, i32_at(3)?)?;
+            // the callee runs under THIS fuel counter: the caller pays.
+            let answer = host.call(&port, &msg, fuel);
+            match answer {
+                Err(e) => return Err(Trap::HostError(format!("call failed: {e}"))),
+                Ok(None) => stack.push(Val::I64(0)),
+                Ok(Some(bytes)) => {
+                    let ptr = guest_alloc(m, mem, Some(host), fuel, depth, bytes.len())?;
+                    mem[ptr..ptr + bytes.len()].copy_from_slice(&bytes);
+                    stack.push(Val::I64(abi::pack(ptr as u32, bytes.len() as u32)));
+                }
+            }
+        }
     }
     Ok(())
 }
