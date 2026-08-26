@@ -976,3 +976,24 @@ textarea:focus {
 .conv-del:hover {
   color: var(--red);
 }
+
+/* the two reference-policy buttons sit side by side above the swap action,
+   so "load one, then swap it in" reads as one gesture rather than three
+   stacked full-width buttons. */
+.policy-actions {
+  display: flex;
+  gap: 8px;
+}
+.policy-actions .btn {
+  flex: 1;
+}
+/* cartridge source is code: it must not soft-wrap into something that no
+   longer looks like the module the user pasted. */
+#cfg-policy,
+#cfg-policy-manifest {
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}

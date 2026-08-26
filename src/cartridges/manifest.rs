@@ -52,7 +52,7 @@ pub struct Port {
 
 /// metadata for one cartridge. kept deliberately small: everything else
 /// (hashes, prices, owners) belongs to the registry layer, not identity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CartridgeManifest {
     /// unique id, `[a-z0-9-]`, 1–64 chars. becomes the kv namespace and the
     /// orchestrator's routing key, so it must be filesystem- and log-safe.

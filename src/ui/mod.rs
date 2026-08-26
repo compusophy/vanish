@@ -65,6 +65,24 @@ pub fn create(tag: &str, class: &str) -> Element {
     e
 }
 
+/// a textarea's text. separate from `input_value` because the two are
+/// different element types in web-sys and a dyn_into to the wrong one
+/// silently yields an empty string — which, for the cartridge source box,
+/// would read as "you pasted nothing" instead of "the id is wrong" (D4).
+fn textarea_value(id: &str) -> String {
+    by_id(id)
+        .and_then(|e| e.dyn_into::<HtmlTextAreaElement>().ok())
+        .map(|t| t.value())
+        .unwrap_or_default()
+}
+
+fn set_policy_source(src: &str) {
+    match by_id("cfg-policy").and_then(|e| e.dyn_into::<HtmlTextAreaElement>().ok()) {
+        Some(t) => t.set_value(src.trim_start_matches('\n')),
+        None => feed::note("the policy editor is missing from the page — reload"),
+    }
+}
+
 fn input_value(id: &str) -> String {
     by_id(id)
         .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
@@ -877,6 +895,42 @@ fn wire_controls(ui: &Shared) {
             let worker = ui.borrow().worker.clone();
             send(&worker, &Command::RunBenchmark);
             feed::note("benchmark queued — pinned tasks will run one by one");
+        });
+    }
+
+    // the reasoning policy: two loaders and a swap. the loaders exist so the
+    // live proof of a hot-swap is three clicks and no typing — load v2, swap,
+    // send a prompt, and the feed shows the prefix the new module added. the
+    // sources are the crate's own reference constants, not a copy: a policy
+    // that stops compiling breaks the build, not the button.
+    {
+        on_click("policy-load-v1", || {
+            set_policy_source(crate::cartridges::cognitive::REASONING_V1);
+            feed::note("reference policy v1 loaded into the editor — press hot-swap to run it");
+        });
+    }
+    {
+        on_click("policy-load-v2", || {
+            set_policy_source(crate::cartridges::cognitive::REASONING_V2);
+            feed::note("reference policy v2 loaded into the editor — press hot-swap to run it");
+        });
+    }
+    {
+        let ui = ui.clone();
+        on_click("policy-swap", move || {
+            let source = textarea_value("cfg-policy");
+            if source.trim().is_empty() {
+                feed::note("paste a rustlite module first — there is nothing to compile");
+                return;
+            }
+            let worker = ui.borrow().worker.clone();
+            send(
+                &worker,
+                &Command::SwapCartridge {
+                    manifest: textarea_value("cfg-policy-manifest"),
+                    source,
+                },
+            );
         });
     }
 

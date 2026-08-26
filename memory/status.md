@@ -7,6 +7,88 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (item 8b: the reasoning cartridge, wired into the browser — agent/cognitive-browser-wiring)
+
+seventh "keep going". 8a made the policy real and native-testable; 8b puts
+it in the running app. the agent's reasoning module is now a cartridge the
+user can replace from the right rail, mid-conversation, without a reload.
+
+- **worker.rs** owns a `COGNITION` thread_local (`Cognition<MemHost>`).
+  `boot_cognition()` reads `vanish-cartridges/reasoner/`
+  (source.rustlite, manifest.json, kv.json), boots the last swapped-in
+  module over a seeded kv, and falls back to the reference v1 LOUDLY when
+  that module no longer compiles — the loop always has a policy, and the
+  failure the user needs to see is "your module broke", not a quietly
+  degraded run.
+- **agent::run takes `&dyn Reasoning`**. `NoReasoning` is the identity
+  policy (a named type, so "no cartridge" is a choice in the code rather
+  than an absence); `CartridgeReasoning` is the worker's. `before` fires
+  exactly where the user prompt is pushed and ITS OUTPUT is what both the
+  model and the transcript get — a history that disagrees with what was
+  sent is a history the next run cannot replay honestly. `after` fires on
+  every turn with no tool calls, which is the only point in the loop where
+  the model answered rather than asked for work (it covers both the
+  ending and loop mode's nudge).
+- **durability (D2)**: each hook sets the clock (D1 — the host never reads
+  one), takes the guest's log lines as feed notes, and returns `KvFlush`
+  values the worker spawns into opfs. the hook stays synchronous; the
+  write does not block it. same write-behind shape as the transcript
+  checkpoint.
+- **Command::SwapCartridge { manifest, source }** compiles rustlite in the
+  worker and calls `Orchestrator::swap`, then persists source + manifest.
+  a refusal changes NOTHING — not the running module, not what is on disk
+  — and carries the compiler's own words to the feed. right rail: source
+  textarea, optional manifest, "load v1"/"load v2" (bound to the crate's
+  own reference consts, so a reference policy that stops compiling breaks
+  the build rather than the button), "hot-swap policy".
+- **two decisions worth remembering.** state lives under
+  `vanish-cartridges/{slug}/`, not `cartridges/{slug}/` as the plan first
+  said: opfs's root is the same root the working-tree mirror uses, so the
+  obvious name would collide with a source directory of that name the
+  first time one exists. and a cartridge's kv is ONE versioned json file
+  of hex pairs rather than a file per key — opfs directory iteration is
+  the least dependable corner of that api, which is exactly why the tree
+  already keeps an index file. `take_flush()` still keys off the dirty
+  set: it decides WHETHER to write and names what changed; the body is
+  the whole store.
+- tests/cognitive_wiring.rs (12 evals): encoding round-trip including
+  bytes that are not text, every corrupt-store refusal named (bad json,
+  no version, a future version, odd hex, bad digit, wrong pair shape),
+  a flush only when something was written, a policy's memory surviving a
+  simulated reload, a corrupt store costing the memory and not the loop,
+  the swap changing the very next prompt with kv intact, and a refused
+  swap leaving the running policy untouched.
+
+gate green: 20 suites + clippy, plus `cargo check --lib --bins --target
+wasm32-unknown-unknown`.
+
+**LIVE VERIFICATION (preview of bdc7008, authenticated browser,
+2026-08-26)** — boot, swap and persistence all watched working:
+
+- boot → "🧠 reasoning policy 'reasoner' up (reference v1)" and the guest's
+  own "reasoning v1 up: passthrough + remember".
+- "load v2" → "hot-swap policy" → "🔁 cartridge 'reasoner' hot-swapped",
+  "🧠 reasoner: reasoning v2 up: prefix + remember", "🔁 'reasoner' is now
+  the reasoning policy". rustlite compiled in the worker, swapped
+  atomically, re-inited — no reload.
+- full page reload → "up (your last hot-swap, restored from opfs)" + v2's
+  init log. source.rustlite and manifest.json survive.
+
+**still owed: the "[v2] " prefix on a real prompt.** a preview cannot show
+it — `Command::Run` refuses on the credential check before `agent::run` is
+entered, and a preview branch is its own origin, so its opfs holds no saved
+credentials. the hook is pinned natively; what is unproven is that the
+browser's run path reaches it. do it on production and record it here.
+
+LESSON worth keeping: "verify it live on the preview" has a blind spot for
+anything downstream of the credential gate. every future item that touches
+`agent::run` inherits it — plan the proof for production, or the item ships
+with a hole the preview cannot see.
+
+next: 8c, the recursive step — a `swap_cartridge` TOOL so the agent
+rewrites its own policy mid-run instead of waiting for a human to paste
+one. the worker half already exists.
+
 ## landed this run (item 8a: the reasoning policy as a cartridge — agent/cognitive-policy)
 
 sixth "keep going". the board said design first, so: read agent/mod.rs

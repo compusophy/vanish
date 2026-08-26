@@ -87,6 +87,37 @@ rules:
 8. verification before commit: a green build proves the code compiles, not that it works — compile-only evidence lets hollow iterations ship looking productive. before any git_commit, state in one line what observable behavior changed and how you know. if the change touches pure logic (protocol shapes, path handling, parsing, persistence), add or extend a test in tests/ covering the new behavior — cargo test runs as part of every deploy, so an untested regression now fails the build instead of shipping silently. "refactored X" without a test or a stated observable effect is not a finished iteration; pick work where correctness can be demonstrated, not merely asserted.
 9. branch discipline: commit to agent/* branches only. main is promoted through prs (open_pr → pr_status until green → merge_pr), never pushed blind. a refusal naming the protected branch is the policy working, not an obstacle: create your agent/ branch and continue there."#;
 
+/// the reasoning policy, as the loop sees it (CARTRIDGE_PLAN §12, item 8b).
+///
+/// the loop calls two hooks and nothing else: `before` shapes the user's
+/// prompt on its way to the model, `after` lets the policy digest an answer
+/// that ended a turn. both are SYNCHRONOUS — the cartridge interpreter
+/// cannot suspend — and neither may fail: an implementation that cannot run
+/// its policy returns the prompt unchanged and says so in a note. that is
+/// what keeps a broken cartridge from taking the agent down with it (D9,
+/// article iv).
+pub trait Reasoning {
+    fn before(&self, prompt: &str) -> crate::cartridges::Shaped;
+    fn after(&self, answer: &str) -> Vec<String>;
+}
+
+/// the loop with no policy wired: every prompt goes as written. this is the
+/// behavior every earlier build had, kept as a named type so "no cartridge"
+/// is a choice in the code rather than an absence.
+pub struct NoReasoning;
+
+impl Reasoning for NoReasoning {
+    fn before(&self, prompt: &str) -> crate::cartridges::Shaped {
+        crate::cartridges::Shaped {
+            prompt: prompt.to_string(),
+            notes: Vec::new(),
+        }
+    }
+    fn after(&self, _answer: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 pub struct RunOutcome {
     pub steps: u32,
     pub reason: FinishReason,
@@ -132,7 +163,9 @@ const STOP_POLL_MS: i32 = 250;
 /// `persist` is called with the history every time it has grown by a durable
 /// unit (the prompt, each tool result): the worker checkpoints the transcript
 /// to opfs through it, so a reload — ota or manual — or a crash costs at most
-/// the step in flight, not the whole run.
+/// the step in flight, not the whole run. `reasoning` is the hot-swappable
+/// policy cartridge (`NoReasoning` when none is wired): it shapes the prompt
+/// before the model sees it and digests answers afterwards.
 pub async fn run<E, S, P>(
     config: &Config,
     prompt: &str,
@@ -140,6 +173,7 @@ pub async fn run<E, S, P>(
     emit: E,
     stopped: S,
     persist: P,
+    reasoning: &dyn Reasoning,
 ) -> RunOutcome
 where
     E: Fn(Event),
@@ -212,7 +246,18 @@ where
         history.insert(0, Message::system(SYSTEM_PROMPT));
     }
     if !prompt.is_empty() {
-        history.push(Message::user(prompt));
+        // the reasoning cartridge sees the prompt first. what it returns is
+        // what the model is asked — and what the transcript records, because
+        // a history that disagrees with what was sent is a history the next
+        // run cannot replay honestly.
+        let shaped = reasoning.before(prompt);
+        for text in shaped.notes {
+            emit(Event::Note {
+                thread: String::new(),
+                text,
+            });
+        }
+        history.push(Message::user(shaped.prompt));
         persist(history);
         // the user's prompt is durable before the first model call, so even
         // a reload during it leaves a record that the run was asked for.
@@ -327,6 +372,19 @@ where
             },
             tool_call_id: None,
         });
+
+        // a turn with no tool calls is an ANSWER — the only point in the loop
+        // where the model has said something final rather than asked for
+        // work. that is what the policy digests, before the decision below
+        // turns it into either an ending or a nudge.
+        if turn.tool_calls.is_empty() {
+            for text in reasoning.after(&turn.content) {
+                emit(Event::Note {
+                    thread: String::new(),
+                    text,
+                });
+            }
+        }
 
         // no tool calls means the turn was pure prose: either the run is
         // over (loop mode off) or loop mode treats it as a pause and nudges.

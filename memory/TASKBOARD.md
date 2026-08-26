@@ -303,21 +303,72 @@ taskboard) asked for four things. all four are resolved:
             model calls (article i — nothing needs one; §12 records the
             honest path if a policy ever does). tests/cartridge_cognitive
             (8). ComposeError::NotUp added.
-      - [ ] item 8b NEXT: browser wiring. worker STATE owns a
-            Cognition<MemHost>; boot compiles REASONING_V1 (or loads the
-            last swapped-in source from opfs `cartridges/reasoner/`);
-            agent::run gets before/after hooks (call `before` where the
-            user prompt is pushed, `after` when a turn completes with no
-            tool calls — via callbacks like `persist`, default
-            passthrough); flush take_dirty() to opfs `cartridges/{slug}/
-            kv/…` right after each hook (D2), render take_logs + notes
-            as Event::Note. `Command::SwapCartridge { manifest, source }`
-            from the ui (a textarea in the right rail is enough for v1)
-            → compile in the worker → Orchestrator::swap → note. LIVE
-            PROOF (the v1 definition in plan §10): type a prompt, swap to
-            v2 from the ui, type another — the feed shows "[v2] " on the
-            second, no reload. then let the AGENT swap its own policy
-            (a `swap_cartridge` tool) — that is the recursive step.
+      - [x] item 8b DONE (agent/cognitive-browser-wiring, 2026-08-26):
+            browser wiring. `COGNITION` thread_local in worker.rs holds
+            the Cognition<MemHost>; `boot_cognition()` reads
+            `vanish-cartridges/reasoner/{source.rustlite,manifest.json,
+            kv.json}` and boots the last swapped-in module, else
+            REASONING_V1, over a seeded kv — a saved module that no
+            longer compiles falls back to v1 LOUDLY (the loop always has
+            a policy). agent::run takes `&dyn Reasoning` (`NoReasoning`
+            = identity, `CartridgeReasoning` = the worker's): `before`
+            fires exactly where the user prompt is pushed and its OUTPUT
+            is what both the model and the transcript get (a replay must
+            not disagree with what was sent); `after` fires on every turn
+            with no tool calls — the only point where the model answered
+            rather than asked for work. each hook sets the clock (D1),
+            takes guest logs as feed notes, and hands back KvFlush values
+            the worker spawns into opfs (D2 — the hook stays sync, the
+            write does not block it). `Command::SwapCartridge {manifest,
+            source}` compiles rustlite in the worker → Orchestrator::swap
+            → persists source+manifest; a refusal changes NOTHING (not
+            the running module, not disk) and carries the compiler's own
+            words. right rail: source textarea + optional manifest +
+            "load v1"/"load v2" (the crate's own consts, so a reference
+            policy that stops compiling breaks the build, not the button)
+            + "hot-swap policy". state lives under `vanish-cartridges/`
+            NOT `cartridges/`: opfs's root is shared with the working-tree
+            mirror and the obvious name would collide with a source dir.
+            kv is ONE versioned json file of hex pairs per cartridge —
+            opfs directory iteration is the least dependable corner of the
+            api (same reason the tree keeps an index file).
+            tests/cognitive_wiring.rs (12): encoding round-trip incl.
+            non-utf8, every corrupt-store refusal named, flush only when
+            something changed, memory surviving a "reload", boot fallback,
+            swap changing the next prompt with kv intact, a refused swap
+            leaving the policy alone.
+            LIVE VERIFICATION (preview of bdc7008, watched in an
+            authenticated browser 2026-08-26) — THREE OF THE FOUR LINKS
+            PROVEN, one still owed:
+              [x] boot: the feed shows "🧠 reasoning policy 'reasoner' up
+                  (reference v1)" and "🧠 reasoner: reasoning v1 up:
+                  passthrough + remember" — the cognition instantiates in
+                  the worker and the GUEST's own init log reaches the feed.
+              [x] swap: "load v2" fills the editor; "hot-swap policy" gives
+                  "🔁 cartridge 'reasoner' hot-swapped", "🧠 reasoner:
+                  reasoning v2 up: prefix + remember", "🔁 'reasoner' is now
+                  the reasoning policy" — rustlite COMPILED IN THE WORKER,
+                  swapped atomically, re-inited, all without a reload.
+              [x] persistence: after a full page reload the boot note reads
+                  "up (your last hot-swap, restored from opfs)" followed by
+                  v2's init log — source.rustlite + manifest.json were
+                  written and read back.
+              [ ] the "[v2] " prefix on a real prompt. NOT reachable on a
+                  preview: Command::Run refuses on the credential check in
+                  worker.rs BEFORE agent::run is entered, and a preview
+                  branch is its own origin, so its opfs has no saved
+                  credentials. do this on production (or in a preview with
+                  credentials entered): type a prompt, load v2, hot-swap,
+                  type another — the second must render with "[v2] ". the
+                  before-hook itself is pinned natively in
+                  tests/cognitive_wiring.rs; what is unproven is only that
+                  agent::run reaches it in the browser.
+      - [ ] item 8c NEXT: the RECURSIVE step — a `swap_cartridge` TOOL, so
+            the agent rewrites its own reasoning policy mid-run rather than
+            waiting for a human to paste one. the worker half already
+            exists (swap_cartridge()); this is a tools.rs entry plus the
+            system-prompt line, and a decision about what a policy is
+            allowed to do to itself while a run is in flight.
       - [ ] items 9–10 per plan §11 (corpus capture → opcode-model
             experiment).
       strategic context: owner wants composable hot-swappable cognitive
