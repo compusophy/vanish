@@ -1,20 +1,21 @@
-//! item 8b evals: everything the browser wiring of the reasoning cartridge
-//! rests on, tested where it can actually be tested.
+//! items 8b/8c evals: everything the browser wiring of the reasoning
+//! cartridge rests on, tested where it can actually be tested.
 //!
-//! the worker glue itself (opfs reads, `Command::SwapCartridge`, the feed)
-//! cannot run natively — it is wasm-bound and verified live. so the pieces
-//! it is made of are pulled out as pure functions and pinned here: booting a
-//! policy from a saved source and a saved store, the write-behind flush that
-//! makes a cartridge's memory durable (D2), the swap that replaces a policy
-//! mid-conversation, and the passthrough that must survive every one of
-//! those going wrong (D9, article iv).
+//! the worker glue itself (opfs reads, `Command::SwapCartridge`, the
+//! `swap_cartridge` tool, the feed) cannot run natively — it is wasm-bound
+//! and verified live. so the pieces it is made of are pulled out as pure
+//! functions and pinned here: booting a policy from a saved source and a
+//! saved store, the write-behind flush that makes a cartridge's memory
+//! durable (D2), the rehearsal a candidate must survive before it can
+//! replace a running policy, the swap itself, and the passthrough that must
+//! survive every one of those going wrong (D9, article iv).
 
 use vanish::agent::{NoReasoning, Reasoning};
-use vanish::cartridges::cognitive::{REASONING_V1, REASONING_V2};
+use vanish::cartridges::cognitive::{REASONING_V1, REASONING_V2, REHEARSAL_PROMPT};
 use vanish::cartridges::memhost::{decode_kv, encode_kv, KvFlush};
 use vanish::cartridges::{
-    boot_reasoner, kv_path, manifest_path, parse_policy, reasoner_manifest, source_path, Cognition,
-    CartridgeKind, MemHost, PORT_AFTER, PORT_BEFORE, REASONER_FUEL, REASONER_SLUG,
+    boot_reasoner, kv_path, manifest_path, parse_policy, reasoner_manifest, rehearse, source_path,
+    CartridgeKind, Cognition, MemHost, PORT_AFTER, PORT_BEFORE, REASONER_FUEL, REASONER_SLUG,
 };
 
 fn boot(src: &str, kv: Option<&str>) -> (Cognition<MemHost>, Vec<String>) {
@@ -203,8 +204,17 @@ fn swapping_the_policy_changes_the_next_prompt_and_keeps_the_memory() {
     c.after("one", 0);
     let _ = c.take_flushes();
 
-    let slug = c.swap_policy("", REASONING_V2).expect("v2 compiles and wires");
+    let (slug, rehearsal) = c.swap_policy("", REASONING_V2).expect("v2 compiles and wires");
     assert_eq!(slug, REASONER_SLUG);
+    // the candidate was made to run before it was installed, and the
+    // rehearsal says what it did to the probe.
+    assert_eq!(rehearsal.shaped, format!("[v2] {REHEARSAL_PROMPT}"));
+    // both phases ran, so v2 remembered a prompt AND an answer — in the
+    // scratch store, which is why the live one below is untouched by it.
+    assert_eq!(
+        rehearsal.wrote,
+        vec!["last_answer".to_string(), "last_prompt".to_string()]
+    );
 
     let notes = c.drain_notes();
     assert!(
@@ -242,6 +252,118 @@ fn a_refused_swap_leaves_the_running_policy_alone() {
     assert_eq!(c.before("after", 0).prompt, "after");
     assert_eq!(kv_of(&mut c, "last_prompt").as_deref(), Some("after"));
     assert!(c.drain_notes().is_empty(), "a refusal is not an event");
+}
+
+// ---- the rehearsal: a candidate must RUN, not merely compile -------------
+
+const ALLOC: &str = r#"
+    pub fn cart_alloc(size: i32) -> i32 {
+        let hp: i32 = load_i32(0);
+        if hp == 0 { hp = data_end(); }
+        store_i32(0, hp + size);
+        return hp;
+    }
+"#;
+
+/// compiles, starts, writes a key, and THEN reads out of bounds. the exact
+/// shape the rehearsal exists for: `parse_policy` accepts it and supervision
+/// would only find it after it had already replaced a working policy.
+fn trapping_policy() -> String {
+    format!(
+        r#"
+        extern "C" {{ fn store_set(k_ptr: i32, k_len: i32, v_ptr: i32, v_len: i32) -> i32; }}
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 0; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{
+            store_set(unpack_ptr("rehearsal_leak"), unpack_len("rehearsal_leak"), p, n);
+            let boom: i32 = load_i32(2000000000);
+            return 0;
+        }}
+    "#
+    )
+}
+
+fn init_refusing_policy() -> String {
+    format!(
+        r#"
+        {ALLOC}
+        pub fn cart_init(p: i32, n: i32) -> i32 {{ return 7; }}
+        pub fn cart_handle(p: i32, n: i32) -> i64 {{ return 0; }}
+    "#
+    )
+}
+
+#[test]
+fn a_candidate_that_traps_on_its_first_message_never_reaches_the_loop() {
+    let (mut c, _) = boot(REASONING_V1, None);
+    c.before("the real prompt", 0);
+    c.after("the real answer", 0);
+    let _ = c.take_flushes();
+
+    let err = c
+        .swap_policy("", &trapping_policy())
+        .expect_err("a module that traps on its first message must be refused");
+    assert!(err.contains("failed on a prompt"), "{err}");
+
+    // the running policy is untouched, its memory intact, and NOTHING the
+    // candidate wrote during its rehearsal reached the live store.
+    assert_eq!(c.before("after the refusal", 0).prompt, "after the refusal");
+    assert_eq!(kv_of(&mut c, "last_answer").as_deref(), Some("the real answer"));
+    assert_eq!(kv_of(&mut c, "rehearsal_leak"), None);
+}
+
+#[test]
+fn a_candidate_that_refuses_its_own_init_is_refused() {
+    let (mut c, _) = boot(REASONING_V1, None);
+    let err = c
+        .swap_policy("", &init_refusing_policy())
+        .expect_err("cart_init returning nonzero is the module refusing");
+    assert!(err.contains("refused to start"), "{err}");
+    assert!(c.has_policy(), "the old policy is still wired");
+}
+
+#[test]
+fn a_candidate_that_declares_no_reasoning_port_is_refused() {
+    let (mut c, _) = boot(REASONING_V1, None);
+    let manifest = "{\"slug\":\"reasoner\",\"kind\":\"cognitive\",\"version\":\"0.1.0\",\
+                    \"abi_version\":2,\"provides\":[],\"requires\":[]}";
+    let err = c
+        .swap_policy(manifest, REASONING_V1)
+        .expect_err("nothing would route to a module that provides no port");
+    assert!(err.contains(PORT_BEFORE), "{err}");
+    assert_eq!(c.before("still v1", 0).prompt, "still v1");
+}
+
+#[test]
+fn the_rehearsal_runs_against_a_copy_of_the_memory_it_would_inherit() {
+    // a policy that ONLY works when the store already holds something is the
+    // reason the rehearsal seeds from the live kv rather than from nothing.
+    let (mut c, _) = boot(REASONING_V1, None);
+    c.before("seeded", 0);
+    let live = c
+        .orchestrator()
+        .with_host(REASONER_SLUG, |h| h.snapshot())
+        .unwrap();
+    assert_eq!(live.len(), 1);
+    // clear the pending flush from that prompt, so anything still dirty
+    // afterwards can only have come from the rehearsal.
+    let _ = c.take_flushes();
+
+    let (manifest, bytes) = parse_policy("", REASONING_V2).unwrap();
+    let r = rehearse(manifest, &bytes, live.clone(), REASONER_FUEL).expect("v2 rehearses");
+    assert_eq!(r.shaped, format!("[v2] {REHEARSAL_PROMPT}"));
+    assert_eq!(r.note, None);
+
+    // and the live store is exactly where it was: the rehearsal wrote into a
+    // scratch host that no longer exists.
+    assert_eq!(
+        c.orchestrator().with_host(REASONER_SLUG, |h| h.snapshot()).unwrap(),
+        live
+    );
+    assert!(
+        c.take_flushes().is_empty(),
+        "the rehearsal dirtied the live host"
+    );
 }
 
 // ---- the loop without a cartridge ---------------------------------------

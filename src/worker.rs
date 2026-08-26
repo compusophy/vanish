@@ -1299,20 +1299,27 @@ impl crate::agent::Reasoning for CartridgeReasoning {
     }
 }
 
-/// hot-swap the running policy from source, then remember it so the next
-/// boot brings it back. a refusal changes nothing — not the running module,
-/// not what is on disk.
-fn swap_cartridge(manifest: String, source: String) {
-    if source.trim().is_empty() {
-        emit(Event::Error {
-            thread: conv(),
-            scope: "cartridge".to_string(),
-            message: "no cartridge source to compile — paste a rustlite module first".to_string(),
-        });
-        return;
-    }
+/// what a completed policy swap looks like to whoever asked for it — the
+/// ui, or the agent through the `swap_cartridge` tool.
+pub struct PolicySwap {
+    pub slug: String,
+    pub rehearsal: crate::cartridges::Rehearsal,
+    /// feed lines the swap produced (the Swapped event, the new module's
+    /// own init log).
+    pub notes: Vec<String>,
+    /// set when the new module is LIVE but could not be written to opfs:
+    /// it will not survive a reload, and saying otherwise would be a lie
+    /// the next boot exposes.
+    pub save_error: Option<String>,
+}
 
-    let swapped = COGNITION.with(|c| {
+/// the swap itself: rehearse the candidate, install it, take the notes and
+/// anything it wrote. synchronous, because everything it touches is.
+fn apply_policy_swap(manifest: &str, source: &str) -> Result<PolicySwap, String> {
+    if source.trim().is_empty() {
+        return Err("no cartridge source to compile — a policy is a rustlite module".to_string());
+    }
+    let (slug, rehearsal, notes, flushes) = COGNITION.with(|c| {
         let mut slot = c.borrow_mut();
         let Some(cog) = slot.as_mut() else {
             return Err(
@@ -1320,14 +1327,50 @@ fn swap_cartridge(manifest: String, source: String) {
             );
         };
         cog.set_now(js_sys::Date::now() as i64);
-        let slug = cog.swap_policy(&manifest, &source)?;
+        let (slug, rehearsal) = cog.swap_policy(manifest, source)?;
         let mut notes = cog.drain_notes();
         notes.extend(cog.take_logs());
-        Ok((slug, notes, cog.take_flushes()))
-    });
+        Ok((slug, rehearsal, notes, cog.take_flushes()))
+    })?;
+    flush_cognition(flushes);
+    Ok(PolicySwap {
+        slug,
+        rehearsal,
+        notes,
+        save_error: None,
+    })
+}
 
-    let (slug, notes, flushes) = match swapped {
-        Ok(v) => v,
+/// remember a swapped-in policy so the next boot brings it back.
+async fn persist_policy(slug: &str, manifest: &str, source: &str) -> Result<(), String> {
+    let src_path = crate::cartridges::source_path(slug);
+    let man_path = crate::cartridges::manifest_path(slug);
+    crate::platform::opfs::write(&src_path, source)
+        .await
+        .map_err(|e| format!("{src_path}: {e}"))?;
+    crate::platform::opfs::write(&man_path, manifest)
+        .await
+        .map_err(|e| format!("{man_path}: {e}"))
+}
+
+fn describe_rehearsal(r: &crate::cartridges::Rehearsal) -> String {
+    let mut line = format!(
+        "🧪 rehearsal passed: \"{}\" → \"{}\"",
+        crate::cartridges::cognitive::REHEARSAL_PROMPT,
+        r.shaped
+    );
+    if !r.wrote.is_empty() {
+        line.push_str(&format!(" (writes {})", r.wrote.join(", ")));
+    }
+    line
+}
+
+/// the ui's door (`Command::SwapCartridge`): apply, narrate, save in the
+/// background. a refusal changes nothing — not the running module, not what
+/// is on disk — and carries the compiler's or the rehearsal's own words.
+fn swap_cartridge(manifest: String, source: String) {
+    let swap = match apply_policy_swap(&manifest, &source) {
+        Ok(s) => s,
         Err(e) => {
             emit(Event::Error {
                 thread: conv(),
@@ -1338,8 +1381,11 @@ fn swap_cartridge(manifest: String, source: String) {
         }
     };
 
-    flush_cognition(flushes);
-    for text in notes {
+    emit(Event::Note {
+        thread: conv(),
+        text: describe_rehearsal(&swap.rehearsal),
+    });
+    for text in swap.notes {
         emit(Event::Note {
             thread: conv(),
             text,
@@ -1347,20 +1393,14 @@ fn swap_cartridge(manifest: String, source: String) {
     }
     emit(Event::Note {
         thread: conv(),
-        text: format!("🔁 '{slug}' is now the reasoning policy — the next prompt goes through it"),
+        text: format!(
+            "🔁 '{}' is now the reasoning policy — the next prompt goes through it",
+            swap.slug
+        ),
     });
 
     wasm_bindgen_futures::spawn_local(async move {
-        let src_path = crate::cartridges::source_path(&slug);
-        let man_path = crate::cartridges::manifest_path(&slug);
-        let mut failed = None;
-        if let Err(e) = crate::platform::opfs::write(&src_path, &source).await {
-            failed = Some(format!("{src_path}: {e}"));
-        }
-        if let Err(e) = crate::platform::opfs::write(&man_path, &manifest).await {
-            failed = Some(format!("{man_path}: {e}"));
-        }
-        if let Some(e) = failed {
+        if let Err(e) = persist_policy(&swap.slug, &manifest, &source).await {
             emit(Event::Error {
                 thread: String::new(),
                 scope: "cartridge".to_string(),
@@ -1370,6 +1410,42 @@ fn swap_cartridge(manifest: String, source: String) {
             });
         }
     });
+}
+
+/// the AGENT's door: the `swap_cartridge` tool rewrites the policy the loop
+/// reasons with, mid-run. a function rather than a pub thread_local so the
+/// rehearse-then-install order cannot be skipped by a caller.
+///
+/// what a swap does NOT do is retroactive: the prompt of the run making the
+/// call was already shaped by the old policy. the new one takes effect at
+/// the next hook, and the returned summary says so rather than leaving the
+/// model to assume otherwise.
+pub async fn swap_reasoning_policy(manifest: &str, source: &str) -> Result<PolicySwap, String> {
+    let mut swap = apply_policy_swap(manifest, source)?;
+    emit(Event::Note {
+        thread: conv(),
+        text: describe_rehearsal(&swap.rehearsal),
+    });
+    for text in &swap.notes {
+        emit(Event::Note {
+            thread: conv(),
+            text: text.clone(),
+        });
+    }
+    // the tool awaits the save rather than spawning it: the model is about
+    // to be told whether the swap is durable, and that answer has to be
+    // true when it is given.
+    if let Err(e) = persist_policy(&swap.slug, manifest, source).await {
+        swap.save_error = Some(e);
+    }
+    emit(Event::Note {
+        thread: conv(),
+        text: format!(
+            "🔁 the agent swapped its own reasoning policy to '{}'",
+            swap.slug
+        ),
+    });
+    Ok(swap)
 }
 
 fn handle(command: Command) {

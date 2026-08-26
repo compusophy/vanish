@@ -24,8 +24,8 @@ pub mod wasm;
 
 pub use abi::{pack, unpack, GuestFn, Host, HostFn};
 pub use cognitive::{
-    boot_reasoner, compile_policy, parse_policy, reasoner_manifest, Cognition, Shaped,
-    PORT_AFTER, PORT_BEFORE, REASONER_FUEL, REASONER_SLUG,
+    boot_reasoner, compile_policy, parse_policy, reasoner_manifest, rehearse, Cognition,
+    Rehearsal, Shaped, PORT_AFTER, PORT_BEFORE, REASONER_FUEL, REASONER_SLUG,
 };
 pub use composition::{ComposeError, Composition};
 pub use lifecycle::{CallError, Cartridge, LoadError, Verified};

@@ -312,6 +312,38 @@ saved credentials. that half is owed on production, and the blind spot is
 general: nothing downstream of the credential gate can be proven on a
 preview.
 
+**8c — the recursive step (built 2026-08-26):** `swap_cartridge` is a
+TOOL. the agent rewrites the module it reasons with, mid-run, through the
+same door the ui uses.
+
+that door got a lock first. "it compiles" is the bar `parse_policy` sets,
+and supervision catches a module that traps *later* — but between those two
+sits the case that matters here: a module that compiles and then traps on
+its FIRST message would be installed, crash on the next real prompt, and
+cost a restart cycle and a passthrough before anyone learned why. so
+`rehearse(manifest, bytes, kv, fuel)` instantiates the candidate over a
+SCRATCH `MemHost` seeded from a COPY of the live memory, inits it, and puts
+one message through each phase it declares. a module that will not start,
+declares no `reasoning` port, or traps is refused with nothing changed —
+not the running policy, not its memory, not what is on disk. the scratch
+host is discarded, so a rehearsal can neither read stale state nor write
+into the live store; seeding it from the live kv is deliberate, because a
+policy that only works against an empty store is exactly the one that would
+pass a naive check and fail in production. `Cognition::swap_policy` now
+returns the `Rehearsal` alongside the slug, and both the ui and the tool
+report it ("🧪 rehearsal passed: \"…\" → \"…\"").
+
+**what a policy may do to itself while a run is in flight** (the question
+8b left open): swap, but not retroactively. the prompt of the run making
+the call was already shaped by the old policy and is already in the
+transcript; the new module takes effect at the next hook. the tool result
+says so rather than leaving the model to assume otherwise. nothing else is
+restricted: the loop is never hostage to a cartridge, so the worst a bad
+swap can do is degrade its own future prompts — and a module that RUNS and
+reasons badly is not something the harness can catch, which is why the
+system prompt names this the sharpest tool the agent has and the easiest to
+misuse.
+
 **what a host import for model calls would mean:** a synchronous
 `ask_model` cannot exist under this runtime. if a policy ever needs the
 model in the loop, the honest path is the two-phase protocol extended
@@ -344,8 +376,9 @@ policy needs it (article i).
        reference v1/v2 modules, swap-with-kv-intact proven natively);
        8b (browser wiring: COGNITION in the worker, `Reasoning` hooks in
        agent::run, durable kv + saved source, Command::SwapCartridge and
-       the right-rail editor) — the live "[v2] " swap is verified in the
-       browser, not by the gate. NEXT after this: a `swap_cartridge`
-       TOOL, so the agent rewrites its own policy — the recursive step
+       the right-rail editor); 8c (the recursive step: `rehearse` as the
+       gate, and `swap_cartridge` as a TOOL — the agent rewrites the
+       module it reasons with). the live "[v2] " swap is verified in the
+       browser, not by the gate
 9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
 10. [ ] the opcode-model experiment (§9) — gated on 9
