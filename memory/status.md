@@ -54,6 +54,23 @@ whether it ran. "did the shaped prompt produce a better answer" needs an
 outcome signal the loop does not collect, and no amount of corpus makes
 that question answerable.
 
+**LIVE VERIFICATION (preview of 1a2490c, authenticated browser)** — the
+corpus watched filling, refusals included, and surviving a reload:
+
+- swap to v3 → "📚 corpus: 1 program(s), 1 verified, 0 refused —
+  most-emitted: local.get×87, local.set×42, i32.const×38, i32.add×25,
+  i64.const×24". that histogram is §9's opcode vocabulary, measured rather
+  than assumed.
+- a module that compiles and then traps → "hot-swap refused: it failed on a
+  prompt: … memory access out of bounds …" AND "📚 corpus: 2 program(s), 1
+  verified, 1 refused".
+- a module that does not compile → "hot-swap refused: rustlite
+  `cart_handle`: call to unknown function 'nope'" AND "📚 corpus: 3
+  program(s), 1 verified, 2 refused".
+- the histogram did NOT move across either refusal — visible confirmation
+  that it counts verified programs only.
+- reload → "📚 corpus restored: 3 program(s), 1 verified".
+
 next: item 10 is the opcode-model experiment, and its honest precondition
 is not "the corpus exists" (it does) but "the corpus has enough verified
 programs from enough distinct intents to be worth training on". today it
