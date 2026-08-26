@@ -227,6 +227,151 @@ pub const REASONING_V2: &str = r#"
     }
 "#;
 
+/// the key the standing note lives under, and the marker the agent writes
+/// to set it. these are Rust-side mirrors of literals inside the module
+/// below — rustlite has no way to be handed a constant — so a test pins
+/// them together rather than trusting them to stay in step.
+pub const STANDING_KEY: &str = "standing";
+pub const CARRY_MARKER: &str = "CARRY:";
+/// how much of a carried line is kept. a note is a note, not a transcript:
+/// unbounded, it would grow every later prompt for as long as the policy
+/// runs.
+pub const STANDING_MAX: usize = 400;
+
+/// the line v3 appends to every prompt, teaching its own contract. the
+/// policy cannot edit the system prompt, so it says what it offers in the
+/// only channel it has.
+pub const STANDING_PROTOCOL: &str =
+    "(policy: to carry one line into your next prompt, write CARRY: followed by that line in your answer.)";
+
+/// the reference policy, v3 — the first one that is worth swapping TO.
+///
+/// v1 and v2 are demonstrations: one changes nothing, the other prefixes a
+/// visible marker. v3 does something the loop cannot do for itself. the
+/// agent's transcript is trimmed at `KEEP_MESSAGES` and is per-conversation;
+/// a cartridge's kv is neither. so v3 gives the agent ONE line of memory
+/// that outlives both:
+///
+/// - on an answer, the first `CARRY:` in it (to the end of that line) is
+///   stored as the standing note. an answer without the marker changes
+///   nothing; `CARRY:` with nothing after it clears the note.
+/// - on a prompt, the standing note is prepended, and the protocol line is
+///   appended so the agent knows the channel exists and how to use it.
+///
+/// this is the first reference module to read its own memory back
+/// (`store_get`), to assemble a prompt from three sources, and to search
+/// bytes — the language features items 5 and 7 added, doing work.
+///
+/// what it deliberately is NOT: a judge of whether the shaped prompt was
+/// better. that needs the corpus capture in plan §9 (build item 9). until
+/// then a policy can be verified to DO what it says, not to help.
+pub const REASONING_V3: &str = r#"
+    extern "C" {
+        fn log(level: i32, ptr: i32, len: i32);
+        fn store_get(k_ptr: i32, k_len: i32) -> i64;
+        fn store_set(k_ptr: i32, k_len: i32, v_ptr: i32, v_len: i32) -> i32;
+    }
+    pub fn cart_alloc(size: i32) -> i32 {
+        let hp: i32 = load_i32(0);
+        if hp == 0 { hp = data_end(); }
+        store_i32(0, hp + size);
+        return hp;
+    }
+    // copy len bytes and answer with the position just past them, so a
+    // multi-part assembly reads as one chain of writes.
+    fn blit(dst: i32, src: i32, len: i32) -> i32 {
+        let i: i32 = 0;
+        while i < len {
+            store_u8(dst + i, load_u8(src + i));
+            i = i + 1;
+        }
+        return dst + len;
+    }
+    // a blank line. rustlite string literals carry no escapes, so the two
+    // newlines are written as bytes rather than hidden inside a literal.
+    fn gap(dst: i32) -> i32 {
+        store_u8(dst, 10);
+        store_u8(dst + 1, 10);
+        return dst + 2;
+    }
+    // index of the first occurrence of nd in h, or -1.
+    fn find(h: i32, hlen: i32, nd: i32, ndlen: i32) -> i32 {
+        let i: i32 = 0;
+        while i + ndlen <= hlen {
+            let j: i32 = 0;
+            let ok: bool = true;
+            while j < ndlen {
+                if load_u8(h + i + j) != load_u8(nd + j) {
+                    ok = false;
+                    j = ndlen;
+                } else {
+                    j = j + 1;
+                }
+            }
+            if ok { return i; }
+            i = i + 1;
+        }
+        return -1;
+    }
+    pub fn cart_init(p: i32, n: i32) -> i32 {
+        log(1, unpack_ptr("reasoning v3 up: standing note"), unpack_len("reasoning v3 up: standing note"));
+        return 0;
+    }
+    // byte 0 is the phase (0 = prompt in, 1 = answer in); the body follows.
+    pub fn cart_handle(p: i32, n: i32) -> i64 {
+        if n == 0 { return 0; }
+        let body: i32 = p + 1;
+        let blen: i32 = n - 1;
+
+        // the answer phase: take the first CARRY: to the end of its line.
+        if load_u8(p) == 1 {
+            let at: i32 = find(body, blen, unpack_ptr("CARRY:"), unpack_len("CARRY:"));
+            if at < 0 { return 0; }
+            let s: i32 = at + unpack_len("CARRY:");
+            if s < blen {
+                if load_u8(body + s) == 32 { s = s + 1; }
+            }
+            // scan to the newline, remembering WHERE it was: reusing the
+            // loop variable to stop would throw the position away.
+            let e: i32 = s;
+            let stop: i32 = blen;
+            while e < blen {
+                if load_u8(body + e) == 10 { stop = e; e = blen; } else { e = e + 1; }
+            }
+            let keep: i32 = stop - s;
+            if keep > 400 { keep = 400; }
+            if keep < 0 { keep = 0; }
+            store_set(unpack_ptr("standing"), unpack_len("standing"), body + s, keep);
+            return 0;
+        }
+
+        // the prompt phase: note (if any), then the prompt, then the
+        // protocol line.
+        let held: i64 = store_get(unpack_ptr("standing"), unpack_len("standing"));
+        let hptr: i32 = unpack_ptr(held);
+        let hlen: i32 = unpack_len(held);
+        let lead: i32 = unpack_ptr("[standing note] ");
+        let leadlen: i32 = unpack_len("[standing note] ");
+        let proto: i32 = unpack_ptr("(policy: to carry one line into your next prompt, write CARRY: followed by that line in your answer.)");
+        let protolen: i32 = unpack_len("(policy: to carry one line into your next prompt, write CARRY: followed by that line in your answer.)");
+
+        let head: i32 = 0;
+        if hlen > 0 { head = leadlen + hlen + 2; }
+        let total: i32 = head + blen + 2 + protolen;
+        let out: i32 = cart_alloc(total);
+        let w: i32 = out;
+        if hlen > 0 {
+            w = blit(w, lead, leadlen);
+            w = blit(w, hptr, hlen);
+            w = gap(w);
+        }
+        w = blit(w, body, blen);
+        w = gap(w);
+        w = blit(w, proto, protolen);
+        return pack(out, total);
+    }
+"#;
+
 // ---- the reasoner, as the browser boots and swaps it -------------------
 //
 // item 8b: everything above is host-agnostic. what follows is the ONE

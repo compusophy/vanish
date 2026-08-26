@@ -916,6 +916,14 @@ fn wire_controls(ui: &Shared) {
         });
     }
     {
+        on_click("policy-load-v3", || {
+            set_policy_source(crate::cartridges::cognitive::REASONING_V3);
+            feed::note(
+                "reference policy v3 loaded into the editor — the standing note.                  press hot-swap to run it",
+            );
+        });
+    }
+    {
         let ui = ui.clone();
         on_click("policy-swap", move || {
             let source = textarea_value("cfg-policy");

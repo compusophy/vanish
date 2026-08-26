@@ -11,7 +11,10 @@
 //! survive every one of those going wrong (D9, article iv).
 
 use vanish::agent::{NoReasoning, Reasoning};
-use vanish::cartridges::cognitive::{REASONING_V1, REASONING_V2, REHEARSAL_PROMPT};
+use vanish::cartridges::cognitive::{
+    CARRY_MARKER, REASONING_V1, REASONING_V2, REASONING_V3, REHEARSAL_PROMPT, STANDING_KEY,
+    STANDING_MAX, STANDING_PROTOCOL,
+};
 use vanish::cartridges::memhost::{decode_kv, encode_kv, KvFlush};
 use vanish::cartridges::{
     boot_reasoner, kv_path, manifest_path, parse_policy, reasoner_manifest, rehearse, source_path,
@@ -252,6 +255,122 @@ fn a_refused_swap_leaves_the_running_policy_alone() {
     assert_eq!(c.before("after", 0).prompt, "after");
     assert_eq!(kv_of(&mut c, "last_prompt").as_deref(), Some("after"));
     assert!(c.drain_notes().is_empty(), "a refusal is not an event");
+}
+
+// ---- v3: the first policy worth swapping to ------------------------------
+
+/// what v3 makes of a prompt when nothing is standing.
+fn plain(prompt: &str) -> String {
+    format!("{prompt}\n\n{STANDING_PROTOCOL}")
+}
+
+#[test]
+fn v3_appends_the_protocol_so_the_policy_teaches_its_own_contract() {
+    // the module cannot edit the system prompt, so the only way the agent
+    // learns the channel exists is the prompt itself.
+    let (mut c, notes) = boot(REASONING_V3, None);
+    assert!(
+        notes.iter().any(|n| n.contains("reasoning v3 up: standing note")),
+        "{notes:?}"
+    );
+    assert_eq!(c.before("first question", 0).prompt, plain("first question"));
+    assert!(STANDING_PROTOCOL.contains(CARRY_MARKER));
+}
+
+#[test]
+fn an_answer_carries_one_line_forward_and_only_when_it_says_to() {
+    let (mut c, _) = boot(REASONING_V3, None);
+
+    // no marker, no note. a policy that hoarded every answer would be v1
+    // with extra steps.
+    c.after("an ordinary answer with no marker", 0);
+    assert_eq!(kv_of(&mut c, STANDING_KEY), None);
+    assert_eq!(c.before("q", 0).prompt, plain("q"));
+
+    // the marker takes the rest of ITS line, not the rest of the answer.
+    c.after("reasoning first\nCARRY: the config mirror is vanish-config/config.json\nthen more prose", 0);
+    assert_eq!(
+        kv_of(&mut c, STANDING_KEY).as_deref(),
+        Some("the config mirror is vanish-config/config.json")
+    );
+
+    assert_eq!(
+        c.before("second question", 0).prompt,
+        format!(
+            "[standing note] the config mirror is vanish-config/config.json\n\nsecond question\n\n{STANDING_PROTOCOL}"
+        )
+    );
+}
+
+#[test]
+fn a_marker_with_nothing_after_it_clears_the_note() {
+    let (mut c, _) = boot(REASONING_V3, None);
+    c.after("CARRY: something", 0);
+    assert_eq!(kv_of(&mut c, STANDING_KEY).as_deref(), Some("something"));
+
+    c.after("done with that\nCARRY:", 0);
+    assert_eq!(kv_of(&mut c, STANDING_KEY).as_deref(), Some(""));
+    // an empty note is not a note: the prompt goes back to plain.
+    assert_eq!(c.before("q", 0).prompt, plain("q"));
+}
+
+#[test]
+fn the_note_is_capped_so_it_cannot_grow_every_later_prompt() {
+    let (mut c, _) = boot(REASONING_V3, None);
+    let long = "x".repeat(STANDING_MAX + 250);
+    c.after(&format!("CARRY: {long}"), 0);
+    let held = kv_of(&mut c, STANDING_KEY).expect("something was stored");
+    assert_eq!(held.len(), STANDING_MAX);
+    assert!(held.chars().all(|ch| ch == 'x'));
+}
+
+#[test]
+fn the_note_outlives_a_reload_which_is_the_whole_point() {
+    // the transcript is trimmed at KEEP_MESSAGES and is per-conversation.
+    // a cartridge's kv is neither — that is what v3 sells.
+    let (mut first, _) = boot(REASONING_V3, None);
+    first.after("CARRY: main is protected; promote through prs", 0);
+    let body = flush_body(&mut first).expect("the note was written");
+    drop(first);
+
+    let (mut second, _) = boot(REASONING_V3, Some(&body));
+    assert_eq!(
+        second.before("a much later prompt", 0).prompt,
+        format!(
+            "[standing note] main is protected; promote through prs\n\na much later prompt\n\n{STANDING_PROTOCOL}"
+        )
+    );
+}
+
+#[test]
+fn v3_can_be_swapped_in_over_v1_with_the_rehearsal_passing() {
+    let (mut c, _) = boot(REASONING_V1, None);
+    c.before("under v1", 0);
+    let (slug, rehearsal) = c.swap_policy("", REASONING_V3).expect("v3 rehearses and installs");
+    assert_eq!(slug, REASONER_SLUG);
+    // with nothing standing, the rehearsal probe comes back plain — proof
+    // the candidate ran, not merely compiled.
+    assert_eq!(rehearsal.shaped, plain(REHEARSAL_PROMPT));
+    assert_eq!(c.before("under v3", 0).prompt, plain("under v3"));
+}
+
+/// the rust-side mirrors of literals inside the rustlite module must not
+/// drift: rustlite cannot be handed a constant, so nothing but this test
+/// keeps `CARRY_MARKER`, `STANDING_KEY`, `STANDING_MAX` and the protocol
+/// line in step with the source they describe.
+#[test]
+fn v3s_rust_side_constants_match_the_module_they_describe() {
+    for needle in [
+        format!("\"{CARRY_MARKER}\""),
+        format!("\"{STANDING_KEY}\""),
+        format!("{STANDING_MAX}"),
+        format!("\"{STANDING_PROTOCOL}\""),
+    ] {
+        assert!(
+            REASONING_V3.contains(&needle),
+            "REASONING_V3 no longer contains {needle:?} — the rust mirror has drifted"
+        );
+    }
 }
 
 // ---- the rehearsal: a candidate must RUN, not merely compile -------------
