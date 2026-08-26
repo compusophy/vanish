@@ -216,6 +216,40 @@ exists, fine-tune against VERIFIED traces — the runtime is the reward model.
 do not start this until the corpus collection exists, or there is nothing
 to train on.
 
+**the collection exists as of 2026-08-26** (`src/cartridges/corpus.rs`,
+build item 9). every candidate policy that goes through a swap — from the
+ui or from the agent's `swap_cartridge` tool — is recorded as a `Sample`:
+its rustlite source, its opcode trace, where it came from, and the
+runtime's verdict. it is persisted to `vanish-cartridges/corpus.json`,
+bounded at `MAX_SAMPLES`, and keyed by a fingerprint of the source, so
+re-trying a program updates its verdict rather than growing the log.
+
+three decisions worth defending:
+
+- **refusals are kept.** a corpus of only successes teaches nothing about
+  the boundary, and the boundary is where a generated program actually
+  fails. a program that emitted and then trapped keeps its trace — a
+  refused opcode sequence with the rehearsal's own words attached is the
+  most useful negative available. a program that never compiled has no
+  trace, and the sample says so rather than inventing one.
+- **the trace drops operands.** emission is deterministic, so
+  `emit_module(parse(source))` rebuilds the module exactly: the source IS
+  the record, and the trace is the same program in the shape a model would
+  emit it. storing operands would double the corpus to hold what it already
+  holds.
+- **the histogram is over VERIFIED programs only.** an opcode sequence that
+  was rejected is not evidence about what good code looks like, even though
+  it is excellent evidence about what fails.
+
+the `prompt` half of §9's pair is the `intent` argument on
+`swap_cartridge` — one line from the model on what it meant the program to
+do. it is required, including on attempts that are refused.
+
+WHAT THIS STILL DOES NOT GIVE US: a judgement of whether a policy HELPED.
+the corpus records what was tried and whether it ran. "did the shaped prompt
+produce a better answer" needs an outcome signal the loop does not yet
+collect, and no amount of corpus makes that question answerable.
+
 ## 10. relationship to the charter
 
 - article i (loop closes): cartridges make CAPABILITIES swappable — a new
@@ -416,5 +450,7 @@ policy needs it (article i).
        note — one line of memory that outlives the transcript, set by the
        agent writing `CARRY:` in an answer. the first module to read its
        own kv back
-9. [ ] corpus capture: prompt → rustlite → wasm → trace, persisted
+9. [x] corpus capture: intent → rustlite → wasm → opcode trace → verdict,
+       persisted and bounded — corpus.rs, recorded at the rehearsal so
+       refusals land too. §9 above for what it does and does not buy
 10. [ ] the opcode-model experiment (§9) — gated on 9

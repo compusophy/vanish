@@ -25,6 +25,7 @@
 
 use super::abi::Host;
 use super::composition::ComposeError;
+use super::corpus::{self, Origin, Sample, Verdict};
 use super::manifest::{CartridgeKind, CartridgeManifest, Port, ABI_VERSION};
 use super::memhost::{KvFlush, KvPairs, MemHost};
 use super::orchestrator::{Event, Orchestrator};
@@ -606,21 +607,75 @@ impl Cognition<MemHost> {
     /// installs a policy which traps on its own next prompt has broken the
     /// thing it reasons with, and the only evidence would be a restart
     /// cycle in the feed.
+    ///
+    /// EVERY ATTEMPT RETURNS A SAMPLE (plan §9, item 9), pass or fail —
+    /// whether it also returns a swap is the verdict. a corpus of only the
+    /// programs that worked teaches nothing about the boundary, and the
+    /// boundary is where a generated program actually fails; the refusal
+    /// text stored is the compiler's or the rehearsal's own words.
     pub fn swap_policy(
         &mut self,
         manifest_json: &str,
         src: &str,
-    ) -> Result<(String, Rehearsal), String> {
-        let (manifest, bytes) = parse_policy(manifest_json, src)?;
+        origin: Origin,
+        at_ms: i64,
+    ) -> (Sample, Result<(String, Rehearsal), String>) {
+        // a source that does not compile has no module and therefore no
+        // trace; the sample says so rather than inventing one.
+        let (manifest, bytes) = match parse_policy(manifest_json, src) {
+            Ok(ok) => ok,
+            Err(reason) => {
+                let sample = corpus::sample(
+                    src,
+                    None,
+                    origin,
+                    Verdict::Refused {
+                        reason: reason.clone(),
+                    },
+                    at_ms,
+                );
+                return (sample, Err(reason));
+            }
+        };
         let slug = manifest.slug.clone();
         let fuel = self.fuel;
         // a COPY of what the running policy remembers: the candidate has to
         // work against the memory it will actually inherit, not a blank one.
         let kv = self.orch.with_host(&slug, |h| h.snapshot()).unwrap_or_default();
-        let rehearsal = rehearse(manifest.clone(), &bytes, kv, fuel)?;
-        self.orch
-            .swap(manifest, &bytes, fuel)
-            .map_err(|e| format!("{e}"))?;
-        Ok((slug, rehearsal))
+
+        let rehearsal = match rehearse(manifest.clone(), &bytes, kv, fuel) {
+            Ok(r) => r,
+            Err(reason) => {
+                // it emitted, so there IS a trace — a refused program with a
+                // real opcode sequence is the most useful negative there is.
+                let sample = corpus::sample(
+                    src,
+                    Some(&bytes),
+                    origin,
+                    Verdict::Refused {
+                        reason: reason.clone(),
+                    },
+                    at_ms,
+                );
+                return (sample, Err(reason));
+            }
+        };
+
+        let verdict = Verdict::Verified {
+            shaped: rehearsal.shaped.clone(),
+        };
+        let sample = corpus::sample(src, Some(&bytes), origin, verdict, at_ms);
+
+        match self.orch.swap(manifest, &bytes, fuel) {
+            Ok(()) => (sample, Ok((slug, rehearsal))),
+            Err(e) => {
+                let reason = format!("{e}");
+                // the rehearsal passed and the install did not: the program
+                // is sound, the composition refused it. record the program as
+                // verified and hand the caller the wiring error — conflating
+                // the two would poison the corpus with a false negative.
+                (sample, Err(reason))
+            }
+        }
     }
 }

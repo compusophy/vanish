@@ -16,10 +16,19 @@ use vanish::cartridges::cognitive::{
     STANDING_MAX, STANDING_PROTOCOL,
 };
 use vanish::cartridges::memhost::{decode_kv, encode_kv, KvFlush};
+use vanish::cartridges::corpus::{Corpus, Origin, Sample, Verdict};
 use vanish::cartridges::{
-    boot_reasoner, kv_path, manifest_path, parse_policy, reasoner_manifest, rehearse, source_path,
-    CartridgeKind, Cognition, MemHost, PORT_AFTER, PORT_BEFORE, REASONER_FUEL, REASONER_SLUG,
+    boot_reasoner, corpus_path, kv_path, manifest_path, opcodes, parse_policy, reasoner_manifest,
+    rehearse, source_path, CartridgeKind, Cognition, MemHost, PORT_AFTER, PORT_BEFORE,
+    REASONER_FUEL, REASONER_SLUG,
 };
+
+/// the swap as every earlier eval used it: human origin, fixed clock, and
+/// the sample handed back alongside so a test can look at either.
+fn swap(c: &mut Cognition<MemHost>, src: &str) -> (Sample, Result<String, String>) {
+    let (sample, result) = c.swap_policy("", src, Origin::Human, 0);
+    (sample, result.map(|(slug, _)| slug))
+}
 
 fn boot(src: &str, kv: Option<&str>) -> (Cognition<MemHost>, Vec<String>) {
     boot_reasoner("", src, kv, REASONER_FUEL).expect("the reference policy boots")
@@ -207,8 +216,12 @@ fn swapping_the_policy_changes_the_next_prompt_and_keeps_the_memory() {
     c.after("one", 0);
     let _ = c.take_flushes();
 
-    let (slug, rehearsal) = c.swap_policy("", REASONING_V2).expect("v2 compiles and wires");
+    let (sample, result) = c.swap_policy("", REASONING_V2, Origin::Human, 0);
+    let (slug, rehearsal) = result.expect("v2 compiles and wires");
     assert_eq!(slug, REASONER_SLUG);
+    // §9: the attempt produced a corpus sample with a real opcode trace.
+    assert!(sample.verdict.is_verified());
+    assert!(sample.op_count() > 0, "a verified program has a trace");
     // the candidate was made to run before it was installed, and the
     // rehearsal says what it did to the probe.
     assert_eq!(rehearsal.shaped, format!("[v2] {REHEARSAL_PROMPT}"));
@@ -246,10 +259,16 @@ fn a_refused_swap_leaves_the_running_policy_alone() {
     c.before("before the bad swap", 0);
     let _ = c.take_flushes();
 
-    let err = c
-        .swap_policy("", "pub fn cart_handle(p: i32, n: i32) -> i64 { return oops(); }")
-        .expect_err("a source that does not compile cannot be swapped in");
+    let (sample, result) = swap(
+        &mut c,
+        "pub fn cart_handle(p: i32, n: i32) -> i64 { return oops(); }",
+    );
+    let err = result.expect_err("a source that does not compile cannot be swapped in");
     assert!(err.contains("rustlite"), "{err}");
+    // a program that never emitted has no trace, and the sample says so
+    // rather than inventing one.
+    assert_eq!(sample.verdict, Verdict::Refused { reason: err.clone() });
+    assert!(sample.ops.is_empty());
 
     // still v1, still remembering.
     assert_eq!(c.before("after", 0).prompt, "after");
@@ -346,7 +365,8 @@ fn the_note_outlives_a_reload_which_is_the_whole_point() {
 fn v3_can_be_swapped_in_over_v1_with_the_rehearsal_passing() {
     let (mut c, _) = boot(REASONING_V1, None);
     c.before("under v1", 0);
-    let (slug, rehearsal) = c.swap_policy("", REASONING_V3).expect("v3 rehearses and installs");
+    let (_, result) = c.swap_policy("", REASONING_V3, Origin::Human, 0);
+    let (slug, rehearsal) = result.expect("v3 rehearses and installs");
     assert_eq!(slug, REASONER_SLUG);
     // with nothing standing, the rehearsal probe comes back plain — proof
     // the candidate ran, not merely compiled.
@@ -419,10 +439,14 @@ fn a_candidate_that_traps_on_its_first_message_never_reaches_the_loop() {
     c.after("the real answer", 0);
     let _ = c.take_flushes();
 
-    let err = c
-        .swap_policy("", &trapping_policy())
-        .expect_err("a module that traps on its first message must be refused");
+    let (sample, result) = swap(&mut c, &trapping_policy());
+    let err = result.expect_err("a module that traps on its first message must be refused");
     assert!(err.contains("failed on a prompt"), "{err}");
+    // it EMITTED and then trapped, so the corpus keeps the trace — a
+    // refused program with a real opcode sequence is the most useful
+    // negative there is (§9).
+    assert!(!sample.verdict.is_verified());
+    assert!(sample.op_count() > 0, "a program that emitted has a trace");
 
     // the running policy is untouched, its memory intact, and NOTHING the
     // candidate wrote during its rehearsal reached the live store.
@@ -434,8 +458,8 @@ fn a_candidate_that_traps_on_its_first_message_never_reaches_the_loop() {
 #[test]
 fn a_candidate_that_refuses_its_own_init_is_refused() {
     let (mut c, _) = boot(REASONING_V1, None);
-    let err = c
-        .swap_policy("", &init_refusing_policy())
+    let err = swap(&mut c, &init_refusing_policy())
+        .1
         .expect_err("cart_init returning nonzero is the module refusing");
     assert!(err.contains("refused to start"), "{err}");
     assert!(c.has_policy(), "the old policy is still wired");
@@ -447,7 +471,8 @@ fn a_candidate_that_declares_no_reasoning_port_is_refused() {
     let manifest = "{\"slug\":\"reasoner\",\"kind\":\"cognitive\",\"version\":\"0.1.0\",\
                     \"abi_version\":2,\"provides\":[],\"requires\":[]}";
     let err = c
-        .swap_policy(manifest, REASONING_V1)
+        .swap_policy(manifest, REASONING_V1, Origin::Human, 0)
+        .1
         .expect_err("nothing would route to a module that provides no port");
     assert!(err.contains(PORT_BEFORE), "{err}");
     assert_eq!(c.before("still v1", 0).prompt, "still v1");
@@ -494,4 +519,169 @@ fn no_reasoning_is_the_identity_policy() {
     assert_eq!(shaped.prompt, "untouched");
     assert!(shaped.notes.is_empty());
     assert!(r.after("an answer").is_empty());
+}
+
+// ---- item 9: the corpus -------------------------------------------------
+
+#[test]
+fn the_opcode_trace_names_the_functions_it_can_name() {
+    let (_, bytes) = parse_policy("", REASONING_V1).unwrap();
+    let ops = opcodes(&bytes).expect("the emitted module decodes");
+
+    let names: Vec<&str> = ops.iter().map(|f| f.name.as_str()).collect();
+    for exported in ["cart_alloc", "cart_init", "cart_handle"] {
+        assert!(names.contains(&exported), "{exported} missing from {names:?}");
+    }
+    // every function's trace ends where its body does.
+    for f in &ops {
+        assert_eq!(f.ops.last().map(String::as_str), Some("end"), "{}", f.name);
+    }
+    // and the mnemonics are wasm's, not an invented vocabulary.
+    let flat: Vec<&str> = ops.iter().flat_map(|f| f.ops.iter().map(String::as_str)).collect();
+    assert!(flat.contains(&"local.get"));
+    assert!(flat.contains(&"i32.const"));
+    assert!(flat.contains(&"call"));
+}
+
+#[test]
+fn a_richer_program_emits_a_richer_trace() {
+    // v3 loops, searches bytes and calls out; v1 does none of that. if the
+    // trace did not distinguish them it would not be measuring anything.
+    let v1 = opcodes(&parse_policy("", REASONING_V1).unwrap().1).unwrap();
+    let v3 = opcodes(&parse_policy("", REASONING_V3).unwrap().1).unwrap();
+    let count = |ops: &[vanish::cartridges::corpus::FnOps]| -> usize {
+        ops.iter().map(|f| f.ops.len()).sum()
+    };
+    assert!(
+        count(&v3) > count(&v1) * 2,
+        "v3 {} vs v1 {}",
+        count(&v3),
+        count(&v1)
+    );
+    let flat: Vec<&str> = v3.iter().flat_map(|f| f.ops.iter().map(String::as_str)).collect();
+    assert!(flat.contains(&"br_if"), "v3's loops must show as branches");
+    assert!(flat.contains(&"i32.load8_u"), "v3 reads bytes");
+}
+
+#[test]
+fn the_corpus_keeps_refusals_because_that_is_where_the_boundary_is() {
+    let mut corpus = Corpus::new();
+    let (_, ok_bytes) = parse_policy("", REASONING_V1).unwrap();
+
+    corpus.record(vanish::cartridges::corpus::sample(
+        REASONING_V1,
+        Some(&ok_bytes),
+        Origin::Human,
+        Verdict::Verified { shaped: "probe".into() },
+        1,
+    ));
+    corpus.record(vanish::cartridges::corpus::sample(
+        "pub fn cart_handle(p: i32) -> i64 { return nope(); }",
+        None,
+        Origin::Agent { intent: "try something".into() },
+        Verdict::Refused { reason: "rustlite: unknown function".into() },
+        2,
+    ));
+
+    assert_eq!(corpus.samples.len(), 2);
+    assert_eq!(corpus.verified(), 1);
+    assert_eq!(corpus.refused(), 1);
+    // the histogram is over VERIFIED programs only: an opcode sequence that
+    // was rejected is not evidence about what good code looks like.
+    let hist = corpus.histogram();
+    assert!(hist.contains_key("end"));
+    assert!(!corpus.top_ops(3).is_empty());
+}
+
+#[test]
+fn the_same_program_is_one_row_and_its_verdict_can_change() {
+    let mut corpus = Corpus::new();
+    let mk = |v: Verdict| {
+        vanish::cartridges::corpus::sample(REASONING_V1, None, Origin::Human, v, 0)
+    };
+    assert!(corpus.record(mk(Verdict::Refused { reason: "first".into() })), "new");
+    assert!(
+        !corpus.record(mk(Verdict::Verified { shaped: "later".into() })),
+        "the same source is not a new program"
+    );
+    assert_eq!(corpus.samples.len(), 1);
+    assert!(corpus.samples[0].verdict.is_verified(), "the verdict updated in place");
+}
+
+#[test]
+fn the_corpus_is_bounded_and_drops_the_oldest() {
+    let mut corpus = Corpus::new();
+    for i in 0..(vanish::cartridges::corpus::MAX_SAMPLES + 7) {
+        corpus.record(vanish::cartridges::corpus::sample(
+            &format!("// program {i}"),
+            None,
+            Origin::Human,
+            Verdict::Refused { reason: "n/a".into() },
+            i as i64,
+        ));
+    }
+    assert_eq!(corpus.samples.len(), vanish::cartridges::corpus::MAX_SAMPLES);
+    // oldest first, so the survivors are the newest.
+    assert_eq!(corpus.samples[0].at_ms, 7);
+    assert_eq!(
+        corpus.samples.last().unwrap().at_ms,
+        (vanish::cartridges::corpus::MAX_SAMPLES + 6) as i64
+    );
+}
+
+#[test]
+fn a_corpus_round_trips_and_a_broken_one_is_named() {
+    let (_, bytes) = parse_policy("", REASONING_V3).unwrap();
+    let mut corpus = Corpus::new();
+    corpus.record(vanish::cartridges::corpus::sample(
+        REASONING_V3,
+        Some(&bytes),
+        Origin::Agent { intent: "carry one line between prompts".into() },
+        Verdict::Verified { shaped: "[standing note] x".into() },
+        42,
+    ));
+    let text = corpus.encode();
+    assert_eq!(Corpus::decode(&text).unwrap(), corpus);
+    // the intent survives: it is the prompt half of the pair §9 wants.
+    assert!(text.contains("carry one line between prompts"));
+
+    for (bad, want) in [
+        ("nope", "not json"),
+        ("{\"samples\":[]}", "no `version`"),
+        ("{\"version\":99,\"samples\":[]}", "format version 99"),
+        ("{\"version\":1}", "no `samples` array"),
+        ("{\"version\":1,\"samples\":[{}]}", "no `id`"),
+    ] {
+        let err = Corpus::decode(bad).expect_err(bad);
+        assert!(err.contains(want), "decoding {bad}: got {err}, wanted {want}");
+    }
+}
+
+#[test]
+fn the_corpus_lives_beside_the_cartridge_state_it_describes() {
+    assert!(corpus_path().starts_with("vanish-cartridges/"));
+}
+
+#[test]
+fn an_oversized_source_is_truncated_on_a_character_boundary() {
+    // a naive String::truncate mid-character panics; the corpus must not be
+    // the thing that takes the worker down.
+    let big = "é".repeat(vanish::cartridges::corpus::MAX_SOURCE);
+    let s = vanish::cartridges::corpus::sample(
+        &big,
+        None,
+        Origin::Human,
+        Verdict::Refused { reason: "too big".into() },
+        0,
+    );
+    assert!(s.source.len() <= vanish::cartridges::corpus::MAX_SOURCE);
+    assert!(s.source.chars().all(|c| c == 'é'));
+    // the fingerprint is of the WHOLE source, not the kept prefix: two
+    // programs that differ only past the cap must not collide.
+    let other = format!("{big}x");
+    assert_ne!(
+        s.id,
+        vanish::cartridges::corpus::fingerprint(&other),
+        "the fingerprint must see the whole source"
+    );
 }

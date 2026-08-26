@@ -7,12 +7,14 @@
 //! by port. L5 orchestrator — actors with mailboxes, supervision, hot-swap,
 //! synchronous calls. cognitive — the agent loop's reasoning policy as a
 //! hot-swappable cartridge. memhost — the write-behind host the worker
-//! gives each cartridge. each layer was independently verifiable before
-//! the next existed.
+//! gives each cartridge. corpus — every candidate program, its opcode
+//! trace, and the runtime's verdict on it (§9's training data). each layer
+//! was independently verifiable before the next existed.
 
 pub mod abi;
 pub mod cognitive;
 pub mod composition;
+pub mod corpus;
 pub mod lifecycle;
 pub mod manifest;
 pub mod memhost;
@@ -29,6 +31,7 @@ pub use cognitive::{
     STANDING_KEY, STANDING_MAX, STANDING_PROTOCOL,
 };
 pub use composition::{ComposeError, Composition};
+pub use corpus::{corpus_path, opcodes, Corpus, Origin, Sample, Verdict};
 pub use lifecycle::{CallError, Cartridge, LoadError, Verified};
 pub use manifest::{CartridgeKind, CartridgeManifest, ABI_VERSION};
 pub use memhost::{kv_path, manifest_path, source_path, KvFlush, KvPairs, MemHost};

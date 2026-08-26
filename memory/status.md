@@ -7,6 +7,77 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (item 9: the corpus — agent/corpus-capture)
+
+tenth "keep going". plan §9 says the opcode-model horizon must not start
+"until the corpus collection exists, or there is nothing to train on". it
+exists now.
+
+**src/cartridges/corpus.rs.** every candidate policy that goes through a
+swap — from the ui or from the agent's `swap_cartridge` tool — becomes a
+`Sample`: rustlite source, opcode trace, `Origin` (Human | Agent{intent}),
+and the runtime's `Verdict`. persisted to `vanish-cartridges/corpus.json`,
+bounded at 200, keyed by an FNV-1a fingerprint of the source so re-trying a
+program updates its verdict in place rather than growing the log.
+
+captured inside `Cognition::swap_policy`, which now returns
+`(Sample, Result<…>)`. that signature is the design: EVERY attempt yields a
+sample; whether it also yields a swap is the verdict.
+
+three decisions worth keeping:
+
+- **refusals are kept.** a corpus of only successes teaches nothing about
+  the boundary, and the boundary is where a generated program actually
+  fails. a program that emitted and then trapped keeps its trace; one that
+  never compiled has an empty one and the sample says so rather than
+  inventing a label.
+- **the trace drops operands.** emission is deterministic, so
+  `emit_module(parse(source))` rebuilds the module exactly — the source IS
+  the record and the trace is the same program in the shape a model would
+  emit. storing operands would double the corpus to hold what it already
+  holds.
+- **the histogram counts verified programs only.** a rejected opcode
+  sequence is not evidence about what good code looks like, even though it
+  is excellent evidence about what fails.
+
+the `intent` argument on `swap_cartridge` is now REQUIRED: one line on what
+the model meant the program to do. it is the only prompt-shaped thing the
+swap path ever sees, and it is stored even when the attempt is refused.
+
+9 new evals (31 in tests/cognitive_wiring.rs). the feed and the tool result
+both carry corpus stats and the most-emitted opcodes, so the agent can see
+its own corpus growing.
+
+**what this still does not buy**, written into plan §9 rather than left
+implied: whether a policy HELPED. the corpus records what was tried and
+whether it ran. "did the shaped prompt produce a better answer" needs an
+outcome signal the loop does not collect, and no amount of corpus makes
+that question answerable.
+
+**LIVE VERIFICATION (preview of 1a2490c, authenticated browser)** — the
+corpus watched filling, refusals included, and surviving a reload:
+
+- swap to v3 → "📚 corpus: 1 program(s), 1 verified, 0 refused —
+  most-emitted: local.get×87, local.set×42, i32.const×38, i32.add×25,
+  i64.const×24". that histogram is §9's opcode vocabulary, measured rather
+  than assumed.
+- a module that compiles and then traps → "hot-swap refused: it failed on a
+  prompt: … memory access out of bounds …" AND "📚 corpus: 2 program(s), 1
+  verified, 1 refused".
+- a module that does not compile → "hot-swap refused: rustlite
+  `cart_handle`: call to unknown function 'nope'" AND "📚 corpus: 3
+  program(s), 1 verified, 2 refused".
+- the histogram did NOT move across either refusal — visible confirmation
+  that it counts verified programs only.
+- reload → "📚 corpus restored: 3 program(s), 1 verified".
+
+next: item 10 is the opcode-model experiment, and its honest precondition
+is not "the corpus exists" (it does) but "the corpus has enough verified
+programs from enough distinct intents to be worth training on". today it
+fills one program per swap, so the real next question is whether anything
+generates candidates at volume — a corpus_read tool for the agent is the
+cheap first move.
+
 ## landed this run (item 8d: a policy worth swapping to — agent/reasoning-v3-standing-note)
 
 ninth "keep going". 8c gave the agent a door; this run put something on the
