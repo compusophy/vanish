@@ -464,14 +464,32 @@ taskboard) asked for four things. all four are resolved:
             an outcome signal the loop does not collect, and no amount of
             corpus makes it answerable — written into plan §9 rather than
             left implied.
+      - [x] item 9b DONE (agent/try-cartridge, 2026-08-26): rehearse
+            without committing. the corpus as first landed could only be fed
+            by a SWAP, so the only way to learn whether a program ran was to
+            make it the policy the agent reasons with — exploring the
+            language meant betting the explorer on every experiment, and a
+            corpus fed only by commitment will never have volume.
+            Cognition::try_policy shares swap_policy's whole front half
+            (parse → rehearse against a copy of live kv → build the sample)
+            via a private `prepare`, and stops before the install.
+            Command::TryCartridge, the `try_cartridge` tool, and a "rehearse
+            only" button. the system prompt now says to rehearse first.
+            KEY EVAL: a candidate that rehearses clean in a trial produces
+            the SAME Sample as swapping it — without that, "rehearse first"
+            would be advice that does not pay. plus: a trial installs
+            nothing (the running policy still answers afterwards), and a
+            trial of a trapping module leaks nothing into the live store.
+            3 new evals (34 in tests/cognitive_wiring.rs).
       - [ ] item 10 NEXT per plan §11: the opcode-model experiment, gated on
             the corpus having real volume. the honest precondition is not
-            "the corpus exists" (it does now) but "the corpus has enough
+            "the corpus exists" (it does) but "the corpus has enough
             VERIFIED programs from enough distinct intents to be worth
-            training on" — today it fills one program per swap, so the
-            first real question is whether anything generates candidates at
-            volume. an obvious cheap source: a corpus_stats / corpus_read
-            tool so the agent can see what it has tried and iterate.
+            training on". try_cartridge removes the reason not to generate
+            candidates; what is still missing is a way to READ the corpus
+            back (a corpus_read tool — the agent can fill it but cannot yet
+            look at it) and any signal about whether a policy HELPED, which
+            plan §9 records as not answerable by this substrate at all.
       strategic context: owner wants composable hot-swappable cognitive
       modules (actor model), NOT a localharness clone; opcode-model horizon
       gated on corpus capture (plan §9).

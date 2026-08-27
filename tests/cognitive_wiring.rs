@@ -685,3 +685,67 @@ fn an_oversized_source_is_truncated_on_a_character_boundary() {
         "the fingerprint must see the whole source"
     );
 }
+
+// ---- rehearse without committing ----------------------------------------
+
+#[test]
+fn a_trial_records_the_program_and_installs_nothing() {
+    let (mut c, _) = boot(REASONING_V1, None);
+    c.before("under v1", 0);
+    let _ = c.take_flushes();
+
+    let (sample, result) = c.try_policy(
+        "",
+        REASONING_V2,
+        Origin::Agent { intent: "prefix every prompt".into() },
+        7,
+    );
+    let rehearsal = result.expect("v2 rehearses clean");
+    assert_eq!(rehearsal.shaped, format!("[v2] {REHEARSAL_PROMPT}"));
+    assert!(sample.verdict.is_verified());
+    assert_eq!(sample.at_ms, 7);
+    assert_eq!(sample.origin, Origin::Agent { intent: "prefix every prompt".into() });
+    assert!(sample.op_count() > 0);
+
+    // THE POINT: the running policy is untouched. a trial that quietly
+    // installed would be a swap with a friendlier name.
+    assert_eq!(c.before("still v1?", 0).prompt, "still v1?");
+    assert!(c.drain_notes().is_empty(), "a trial is not an event");
+}
+
+#[test]
+fn a_trial_of_a_broken_program_is_a_result_not_a_catastrophe() {
+    let (mut c, _) = boot(REASONING_V1, None);
+    c.after("remembered under v1", 0);
+    let _ = c.take_flushes();
+
+    let (sample, result) = c.try_policy("", &trapping_policy(), Origin::Human, 0);
+    let err = result.expect_err("it traps");
+    assert!(err.contains("failed on a prompt"), "{err}");
+    // it emitted, so the corpus keeps its trace.
+    assert!(!sample.verdict.is_verified());
+    assert!(sample.op_count() > 0);
+
+    // and nothing the candidate wrote during its rehearsal reached the live
+    // store, exactly as for a refused swap.
+    assert_eq!(kv_of(&mut c, "rehearsal_leak"), None);
+    assert_eq!(kv_of(&mut c, "last_answer").as_deref(), Some("remembered under v1"));
+    assert_eq!(c.before("after", 0).prompt, "after");
+}
+
+#[test]
+fn a_trial_and_a_swap_agree_about_the_same_program() {
+    // the two doors share their front half on purpose: a candidate that
+    // rehearses clean in a trial must not then be refused by the swap, or
+    // "rehearse first" would be advice that does not pay.
+    let (mut a, _) = boot(REASONING_V1, None);
+    let (trial_sample, trial) = a.try_policy("", REASONING_V3, Origin::Human, 3);
+    let trial = trial.expect("v3 rehearses");
+
+    let (mut b, _) = boot(REASONING_V1, None);
+    let (swap_sample, swapped) = b.swap_policy("", REASONING_V3, Origin::Human, 3);
+    let (_, swap_rehearsal) = swapped.expect("v3 installs");
+
+    assert_eq!(trial.shaped, swap_rehearsal.shaped);
+    assert_eq!(trial_sample, swap_sample, "the same program is the same sample");
+}

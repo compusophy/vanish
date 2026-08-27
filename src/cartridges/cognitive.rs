@@ -468,6 +468,10 @@ pub fn boot_reasoner(
     Ok((cog, notes))
 }
 
+/// a candidate that rehearsed clean: the verified image plus what it did.
+/// `swap_policy` installs it; `try_policy` throws it away.
+type Prepared = (CartridgeManifest, Vec<u8>, Rehearsal);
+
 /// what a candidate policy did when it was made to run before being
 /// allowed to replace the running one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,6 +624,57 @@ impl Cognition<MemHost> {
         origin: Origin,
         at_ms: i64,
     ) -> (Sample, Result<(String, Rehearsal), String>) {
+        let (sample, prepared) = self.prepare(manifest_json, src, origin, at_ms);
+        let (manifest, bytes, rehearsal) = match prepared {
+            Ok(ok) => ok,
+            Err(e) => return (sample, Err(e)),
+        };
+        let slug = manifest.slug.clone();
+        let fuel = self.fuel;
+        match self.orch.swap(manifest, &bytes, fuel) {
+            Ok(()) => (sample, Ok((slug, rehearsal))),
+            Err(e) => {
+                // the rehearsal passed and the INSTALL did not: the program
+                // is sound, the composition refused it. the sample stays
+                // Verified and the caller gets the wiring error — conflating
+                // the two would poison the corpus with a false negative
+                // about a program that ran perfectly well.
+                (sample, Err(format!("{e}")))
+            }
+        }
+    }
+
+    /// compile and rehearse a candidate WITHOUT installing it, recording the
+    /// attempt either way.
+    ///
+    /// this exists because the alternative is worse: until it did, the only
+    /// way to learn whether a program runs was to make it the policy the
+    /// agent reasons with. exploring the language then meant risking the
+    /// thing doing the exploring, and a corpus that can only be fed by
+    /// committing to every candidate will never have volume (§9). a
+    /// rehearsal already runs the program end to end against a copy of the
+    /// live memory; stopping before the swap costs nothing and removes the
+    /// risk entirely.
+    pub fn try_policy(
+        &mut self,
+        manifest_json: &str,
+        src: &str,
+        origin: Origin,
+        at_ms: i64,
+    ) -> (Sample, Result<Rehearsal, String>) {
+        let (sample, prepared) = self.prepare(manifest_json, src, origin, at_ms);
+        (sample, prepared.map(|(_, _, rehearsal)| rehearsal))
+    }
+
+    /// the shared front half: parse, rehearse against a copy of the live
+    /// memory, and build the corpus sample. installs nothing.
+    fn prepare(
+        &mut self,
+        manifest_json: &str,
+        src: &str,
+        origin: Origin,
+        at_ms: i64,
+    ) -> (Sample, Result<Prepared, String>) {
         // a source that does not compile has no module and therefore no
         // trace; the sample says so rather than inventing one.
         let (manifest, bytes) = match parse_policy(manifest_json, src) {
@@ -643,8 +698,14 @@ impl Cognition<MemHost> {
         // work against the memory it will actually inherit, not a blank one.
         let kv = self.orch.with_host(&slug, |h| h.snapshot()).unwrap_or_default();
 
-        let rehearsal = match rehearse(manifest.clone(), &bytes, kv, fuel) {
-            Ok(r) => r,
+        match rehearse(manifest.clone(), &bytes, kv, fuel) {
+            Ok(rehearsal) => {
+                let verdict = Verdict::Verified {
+                    shaped: rehearsal.shaped.clone(),
+                };
+                let sample = corpus::sample(src, Some(&bytes), origin, verdict, at_ms);
+                (sample, Ok((manifest, bytes, rehearsal)))
+            }
             Err(reason) => {
                 // it emitted, so there IS a trace — a refused program with a
                 // real opcode sequence is the most useful negative there is.
@@ -657,23 +718,6 @@ impl Cognition<MemHost> {
                     },
                     at_ms,
                 );
-                return (sample, Err(reason));
-            }
-        };
-
-        let verdict = Verdict::Verified {
-            shaped: rehearsal.shaped.clone(),
-        };
-        let sample = corpus::sample(src, Some(&bytes), origin, verdict, at_ms);
-
-        match self.orch.swap(manifest, &bytes, fuel) {
-            Ok(()) => (sample, Ok((slug, rehearsal))),
-            Err(e) => {
-                let reason = format!("{e}");
-                // the rehearsal passed and the install did not: the program
-                // is sound, the composition refused it. record the program as
-                // verified and hand the caller the wiring error — conflating
-                // the two would poison the corpus with a false negative.
                 (sample, Err(reason))
             }
         }

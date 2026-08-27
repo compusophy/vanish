@@ -245,6 +245,18 @@ the `prompt` half of §9's pair is the `intent` argument on
 `swap_cartridge` — one line from the model on what it meant the program to
 do. it is required, including on attempts that are refused.
 
+**rehearsing without committing (2026-08-26).** the first version of the
+corpus could only be fed by a swap, which meant the only way to learn
+whether a program ran was to make it the policy the agent reasons with.
+exploring the language then meant betting the explorer on every experiment,
+and a corpus that can only be fed by committing to every candidate will
+never have volume. `Cognition::try_policy` shares `swap_policy`'s entire
+front half — parse, rehearse against a copy of the live memory, build the
+sample — and stops before the install. `Command::TryCartridge`, the
+`try_cartridge` tool and a "rehearse only" button expose it. an eval pins
+the property that makes "rehearse first" honest advice: a candidate that
+rehearses clean in a trial produces the SAME sample as the swap of it.
+
 WHAT THIS STILL DOES NOT GIVE US: a judgement of whether a policy HELPED.
 the corpus records what was tried and whether it ran. "did the shaped prompt
 produce a better answer" needs an outcome signal the loop does not yet
