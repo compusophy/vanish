@@ -39,6 +39,21 @@ it came from asking what item 10 actually needs and finding that the
 answer was blocked by a design decision made one item earlier. that is the
 useful kind of board item — the one the previous item created.
 
+**LIVE VERIFICATION (preview of c54c758, authenticated browser)** — the
+whole point, watched:
+
+- rehearse v2 → "🧪 rehearsal passed: "rehearsal: a prompt" → "[v2]
+  rehearsal: a prompt" (writes last_answer, last_prompt) — nothing was
+  installed", then "📚 corpus: 1 program(s), 1 verified".
+- rehearse a trapping module → "🧪 rehearsal failed: … memory access out of
+  bounds … — nothing was installed", then "📚 corpus: 2 program(s), 1
+  verified, 1 refused". a broken candidate is a RESULT here, not an
+  incident.
+- reload → "📚 corpus restored: 2 program(s), 1 verified" AND "🧠 reasoning
+  policy 'reasoner' up (reference v1)". two programs learned about, nothing
+  installed, nothing persisted as a swap. that last line is the proof: a
+  trial that quietly installed would have come back as v2.
+
 next: item 10 still needs volume AND a way to read the corpus back. the
 agent can now fill it but cannot look at it, which is the obvious next
 gap. and plan §9's harder limit stands: nothing here can say whether a
