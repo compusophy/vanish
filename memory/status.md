@@ -7,6 +7,43 @@
 > (agi/rsi gradient) and the constitution now governs every run. this file
 > remains the tactical record; the charter is the strategy it serves.
 
+## landed this run (9b: rehearse without committing — agent/try-cartridge)
+
+eleventh "keep going", and it fixes something item 9 shipped with rather
+than adding a new number for its own sake.
+
+**the flaw.** the corpus could only be fed by a SWAP. so the only way to
+learn whether a program ran was to make it the policy the agent reasons
+with. exploring the language meant betting the explorer on every
+experiment — and a corpus that can only be fed by committing to every
+candidate will never have the volume item 10 needs.
+
+**the fix.** `Cognition::try_policy` shares `swap_policy`'s entire front
+half through a private `prepare` — parse, rehearse against a copy of the
+live memory, build the corpus sample — and stops before the install.
+`Command::TryCartridge`, a `try_cartridge` tool, and a "rehearse only"
+button. the system prompt now says to rehearse first, and says why: a
+refusal from try_cartridge costs nothing, and the attempt lands in the
+corpus either way.
+
+the eval that matters is the one that makes that advice honest: **a
+candidate that rehearses clean in a trial produces the SAME Sample as
+swapping it.** if the two doors could disagree, "rehearse first" would be
+advice that does not pay, and sharing the front half is what guarantees
+they cannot. the other two pin that a trial installs nothing (the running
+policy still answers afterwards) and that a trial of a trapping module
+leaks nothing into the live store.
+
+worth noticing about the shape of this run: the item was not on the board.
+it came from asking what item 10 actually needs and finding that the
+answer was blocked by a design decision made one item earlier. that is the
+useful kind of board item — the one the previous item created.
+
+next: item 10 still needs volume AND a way to read the corpus back. the
+agent can now fill it but cannot look at it, which is the obvious next
+gap. and plan §9's harder limit stands: nothing here can say whether a
+policy HELPED.
+
 ## landed this run (item 9: the corpus — agent/corpus-capture)
 
 tenth "keep going". plan §9 says the opcode-model horizon must not start

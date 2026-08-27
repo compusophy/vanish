@@ -62,6 +62,11 @@ pub enum Command {
     /// away from being something else, mid-conversation, with its memory
     /// intact.
     SwapCartridge { manifest: String, source: String },
+    /// compile and rehearse a candidate policy and record it in the corpus,
+    /// WITHOUT installing it. the same work `SwapCartridge` does up to the
+    /// moment it commits — so a program can be learned about without being
+    /// bet on.
+    TryCartridge { manifest: String, source: String },
     /// run the internal eval suite: pinned self-edit tasks through RunBatch,
     /// then grade the working tree against mechanical checkers. results land
     /// in vanish-bench/report.json and Event::BenchmarkFinished carries the

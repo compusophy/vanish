@@ -1506,6 +1506,117 @@ fn describe_rehearsal(r: &crate::cartridges::Rehearsal) -> String {
     line
 }
 
+/// what a rehearsal-only attempt produced. no module was installed and
+/// nothing was written to opfs beyond the corpus.
+pub struct PolicyTrial {
+    pub rehearsal: Option<crate::cartridges::Rehearsal>,
+    pub refusal: Option<String>,
+    pub corpus: CorpusStats,
+}
+
+/// rehearse a candidate and record it, WITHOUT installing it.
+///
+/// the point is that a refusal here is not an error: "this program does not
+/// run, and here is why" is a successful trial, and the caller wants the
+/// corpus stats either way. only "there is nothing to compile" or "there is
+/// no cognition" are errors.
+fn try_policy(
+    manifest: &str,
+    source: &str,
+    origin: crate::cartridges::Origin,
+) -> Result<PolicyTrial, String> {
+    if source.trim().is_empty() {
+        return Err("no cartridge source to compile — a policy is a rustlite module".to_string());
+    }
+    let now = js_sys::Date::now() as i64;
+    let (sample, result) = COGNITION.with(|c| {
+        let mut slot = c.borrow_mut();
+        let Some(cog) = slot.as_mut() else {
+            return Err(
+                "no reasoning cartridge is running — reload the page and try again".to_string(),
+            );
+        };
+        cog.set_now(now);
+        let out = cog.try_policy(manifest, source, origin, now);
+        // a trial installs nothing, so any orchestrator events it produced
+        // belong to nothing the user did; drop them rather than letting them
+        // surface later attached to the wrong action.
+        let _ = cog.drain_notes();
+        let _ = cog.take_logs();
+        Ok(out)
+    })?;
+    let corpus = record_sample(sample);
+    Ok(match result {
+        Ok(rehearsal) => PolicyTrial {
+            rehearsal: Some(rehearsal),
+            refusal: None,
+            corpus,
+        },
+        Err(reason) => PolicyTrial {
+            rehearsal: None,
+            refusal: Some(reason),
+            corpus,
+        },
+    })
+}
+
+/// the agent's rehearse-only door: explore the language without betting the
+/// module it reasons with on every experiment.
+pub fn trial_reasoning_policy(
+    manifest: &str,
+    source: &str,
+    intent: &str,
+) -> Result<PolicyTrial, String> {
+    let origin = crate::cartridges::Origin::Agent {
+        intent: intent.to_string(),
+    };
+    let trial = try_policy(manifest, source, origin)?;
+    let verdict = match (&trial.rehearsal, &trial.refusal) {
+        (Some(r), _) => format!("ran — the probe became \"{}\"", r.shaped),
+        (_, Some(e)) => format!("did not run — {e}"),
+        _ => "no verdict".to_string(),
+    };
+    emit(Event::Note {
+        thread: conv(),
+        text: format!("🧪 rehearsed a candidate policy without installing it: {verdict}"),
+    });
+    emit(Event::Note {
+        thread: conv(),
+        text: describe_corpus(&trial.corpus),
+    });
+    Ok(trial)
+}
+
+/// the ui's rehearse-only door (`Command::TryCartridge`).
+fn try_cartridge(manifest: String, source: String) {
+    let trial = match try_policy(&manifest, &source, crate::cartridges::Origin::Human) {
+        Ok(t) => t,
+        Err(e) => {
+            emit(Event::Error {
+                thread: conv(),
+                scope: "cartridge".to_string(),
+                message: format!("rehearsal refused: {e}"),
+            });
+            return;
+        }
+    };
+    match (&trial.rehearsal, &trial.refusal) {
+        (Some(r), _) => emit(Event::Note {
+            thread: conv(),
+            text: format!("{} — nothing was installed", describe_rehearsal(r)),
+        }),
+        (_, Some(e)) => emit(Event::Note {
+            thread: conv(),
+            text: format!("🧪 rehearsal failed: {e} — nothing was installed"),
+        }),
+        _ => {}
+    }
+    emit(Event::Note {
+        thread: conv(),
+        text: describe_corpus(&trial.corpus),
+    });
+}
+
 /// the ui's door (`Command::SwapCartridge`): apply, narrate, save in the
 /// background. a refusal changes nothing — not the running module, not what
 /// is on disk — and carries the compiler's or the rehearsal's own words.
@@ -2208,6 +2319,8 @@ fn handle(command: Command) {
         }
 
         Command::SwapCartridge { manifest, source } => swap_cartridge(manifest, source),
+
+        Command::TryCartridge { manifest, source } => try_cartridge(manifest, source),
 
         Command::RunBenchmark => {
             if STATE.with(|s| s.borrow().running) {

@@ -527,6 +527,22 @@ pub fn definitions() -> serde_json::Value {
       {
         "type": "function",
         "function": {
+          "name": "try_cartridge",
+          "description": "compile and REHEARSE a candidate reasoning policy without installing it. exactly the work swap_cartridge does up to the moment it commits: the module is compiled, instantiated over a copy of the current memory, and made to handle one message of each phase — and then thrown away. use this to learn the language, to check an idea, and to explore what the runtime accepts, because a refusal here costs nothing at all. the attempt is recorded in the corpus either way, so a rehearsal that fails is still useful work. reach for swap_cartridge only once a candidate has already rehearsed clean here.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string", "description": "the rustlite module to rehearse" },
+              "manifest": { "type": "string", "description": "optional manifest json; omit for the default reasoner manifest" },
+              "intent": { "type": "string", "description": "one line: what you meant this program to do. stored with the program and the verdict" }
+            },
+            "required": ["source", "intent"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "swap_cartridge",
           "description": "replace YOUR OWN reasoning policy, live. the policy is a cartridge: a rustlite module that shapes every prompt before you are given it and digests every answer you finish a turn with, keeping memory in its own kv across prompts and across swaps. the candidate is REHEARSED first — compiled, instantiated over a copy of the current memory, and made to handle one message of each phase — and a module that will not compile, will not start, or traps is refused with NOTHING changed. read docs/CARTRIDGE_PLAN.md section 12 and src/cartridges/cognitive.rs (REASONING_V1 is the minimal reference module, REASONING_V2 the same plus a visible prefix, REASONING_V3 a standing note you set by writing CARRY: in an answer and get back on every later prompt, one line of memory that outlives the transcript) before writing one. the swap is not retroactive: the prompt you are working on now was shaped by the old policy.",
           "parameters": {
@@ -1293,6 +1309,36 @@ impl Workspace {
             // reasons with. it goes through the same rehearse-then-install
             // door the ui does, so an autonomous run cannot install a policy
             // that has never been made to run.
+            // rehearse without committing: the cheap half of the swap, and
+            // the one an agent exploring the language should reach for
+            // first. a refusal is a RESULT here, not a tool error — the
+            // model asked "does this run?" and got a real answer.
+            "try_cartridge" => {
+                let source = arg(&args, "source").ok_or("try_cartridge requires 'source'")?;
+                let manifest = arg(&args, "manifest").unwrap_or("");
+                let intent = arg(&args, "intent").unwrap_or("");
+                let trial = crate::worker::trial_reasoning_policy(manifest, source, intent)?;
+                Ok(serde_json::json!({
+                    "success": true,
+                    "ran": trial.rehearsal.is_some(),
+                    "installed": false,
+                    "rehearsal": trial.rehearsal.as_ref().map(|r| serde_json::json!({
+                        "prompt_in": crate::cartridges::cognitive::REHEARSAL_PROMPT,
+                        "prompt_out": r.shaped,
+                        "note": r.note,
+                        "wrote": r.wrote,
+                    })),
+                    "refusal": trial.refusal,
+                    "corpus": {
+                        "programs": trial.corpus.samples,
+                        "verified": trial.corpus.verified,
+                        "refused": trial.corpus.refused,
+                        "most_emitted_ops": trial.corpus.top_ops,
+                    },
+                })
+                .to_string())
+            }
+
             "swap_cartridge" => {
                 let source = arg(&args, "source").ok_or("swap_cartridge requires 'source'")?;
                 let manifest = arg(&args, "manifest").unwrap_or("");

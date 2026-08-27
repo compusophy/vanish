@@ -925,6 +925,24 @@ fn wire_controls(ui: &Shared) {
     }
     {
         let ui = ui.clone();
+        on_click("policy-try", move || {
+            let source = textarea_value("cfg-policy");
+            if source.trim().is_empty() {
+                feed::note("paste a rustlite module first — there is nothing to rehearse");
+                return;
+            }
+            let worker = ui.borrow().worker.clone();
+            send(
+                &worker,
+                &Command::TryCartridge {
+                    manifest: textarea_value("cfg-policy-manifest"),
+                    source,
+                },
+            );
+        });
+    }
+    {
+        let ui = ui.clone();
         on_click("policy-swap", move || {
             let source = textarea_value("cfg-policy");
             if source.trim().is_empty() {
